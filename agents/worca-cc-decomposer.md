@@ -62,12 +62,17 @@ parallel in one working tree, and siblings' in-progress red tests make a full-su
 run meaningless mid-phase.
 
 Make the FINAL phase a single **integration-verify** task: alone in its phase (no
-siblings), it runs the project's full test suite and fixes only trivial integration
-breakage (a missed import, a stale snapshot) — no new features. This is the one
-place the full suite runs. Its task file also asks for a reach check: from the plan's goal,
-search for every reader of the state or value the change governs (screens, lists,
-dialogs, summaries, routes, jobs), and cover each one the goal clearly covers that no
-slice touched, recorded as a deviation. Covering such a reader is not a new feature.
+siblings), it runs the project's full test suite, fixes trivial integration breakage
+(a missed import, a stale snapshot), and covers what the reach check finds (below);
+it adds no other features. It also reads every file the slices' final notes name. This
+is the one place the full suite runs. Its task file asks for the reach check: when the
+goal sets no rule over a state or value, it writes one line saying so and moves on;
+otherwise, from the plan's goal, search for every reader of the state or value the
+change governs (screens, lists, dialogs, summaries, routes, jobs, and code that reads
+the state and then acts on it: a check, a write, a route, a job). Cover each one the
+goal clearly covers that no slice touched, and each one a slice's final note names,
+test-first, listed under Reach in DEVIATIONS.md. Its file set is whatever the reach
+check finds, and covering a reader is not a new feature.
 
 Write each task file to the tasks directory the prompt gives you, named
 `p<phaseOrdinal>-t<taskIndex+1>-<kebab-title>.md`.

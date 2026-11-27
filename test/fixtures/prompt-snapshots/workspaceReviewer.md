@@ -13,7 +13,7 @@ Your input is the output of the preceding step(s); the file paths to read are na
 
 You are a verifier. Inspect the inputs below exactly as your role instructions describe, then write a human-readable review markdown AND a machine-readable review JSON.
 
-Review what was implemented across the member projects against the plan.
+Review what was implemented across the member projects against the request's goal and the plan's contracts and invariants, with a reach check.
 
 The issue list is the UNION of every per-project critical/major issue (never collapse one), sorted by projectKey then severity, each location prefixed "<projectKey>: ".
 
@@ -25,7 +25,7 @@ Pick the BEST-FIT `subagent_type`: this project's own agents (`.claude/agents`) 
 
 Skills are available too: this project's and your personal skills (`.claude/skills`, `~/.claude/skills`) can be invoked via the Skill tool — by you AND by the sub-agents you spawn — use any that fit (e.g. design, framework-pattern, knowledge-graph) instead of guessing conventions.
 
-Sub-agents are strictly READ-ONLY investigators: YOU write every artifact. Skip fan-out only for a trivial, single-file change.
+Sub-agents are strictly READ-ONLY investigators: YOU write every artifact. Skip fan-out only for a trivial, single-file change. A short diff or a short brief is not a reason to skip: what a change missed is outside it.
 
 Send every dispatch in ONE message with `run_in_background: false`: the lanes still run concurrently and all their reports come back in that same turn. Never wait for a lane or a background command with `sleep`, `node -e setTimeout`, a polling loop, or by reading sub-agent transcripts; a background command's completion notice wakes you.
 

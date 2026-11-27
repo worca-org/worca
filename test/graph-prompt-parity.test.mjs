@@ -73,10 +73,12 @@ const V1_SLICE_DIRECTIVE =
   'Implement the task below using TDD (red-green-refactor). The TASK file is a ' +
   'self-contained vertical slice and is AUTHORITATIVE — do exactly what it says and ' +
   'nothing outside its scope. The plan is reference/context only; you do NOT need to ' +
-  'read the whole plan.';
+  'read the whole plan. When the task\'s goal reaches a file outside its list, do not edit that file: ' +
+  'name it, with the reason, in your final note, and finish the rest of the step (the integration task covers it).';
 const V1_IMPLEMENT_DIRECTIVE =
-  'Implement the plan using TDD (red-green-refactor). Follow its contracts with NO deviation; ' +
-  'deviate slightly only if a contract does not work at all.';
+  'Implement the plan using TDD (red-green-refactor). Follow its contracts; deviate only if a contract ' +
+  'does not work at all. The plan\'s goal sets the reach: cover every place the goal governs that the plan missed, ' +
+  'and list each one under Reach (see the agent\'s Recording section).';
 const V1_REVISE_DIRECTIVE =
   '## Revise to address the review\n\n' +
   'A reviewer found issues with the previous plan. Re-plan from scratch (cold start) and ' +
@@ -98,10 +100,10 @@ const V1_REFINER_INSTRUCTION =
   '(read-only: no replay, no test runs), then write an improved version at most 1.3× the input size and a ' +
   'machine-readable review.';
 const V1_REVIEWER_INSTRUCTION =
-  'Review the git diff of what was implemented against the plan\'s contracts and invariants, with an ' +
-  'adversarial pass and the severity floors.';
+  'Review the git diff of what was implemented against the request\'s goal and the plan\'s contracts and invariants, with a ' +
+  'reach check, an adversarial pass and the severity floors.';
 const V1_WS_REVIEW_INSTRUCTION =
-  'Review what was implemented across the member projects against the plan.';
+  'Review what was implemented across the member projects against the request\'s goal and the plan\'s contracts and invariants, with a reach check.';
 const V1_CHECKLIST_SINGLE =
   'Read the implementation plan and the implemented changes (via `git diff` in your cwd), ' +
   'then write a markdown checklist of concrete manual test cases a human can run against the ' +

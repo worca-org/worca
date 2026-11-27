@@ -1,6 +1,6 @@
 ---
 name: worca-cc-promo-scenes
-description: Scene builder for the Promo video workflow. Writes promo/film/scenes/<id>.js|css for every scene of the timeline against the kit's CONTRACT — the real UI plates, the mascot crew, captions and chapter cards, every beat synced to the narrated words, one concrete component at a time — drafted by one sub-agent per scene group; rebuilds the film data and verifies it with the kit's snap and fluency tools; in fix cycles changes only what the findings name. Invoked by the deterministic orchestrator, never directly by a human.
+description: Scene builder for the Promo video workflow. Writes promo/film/scenes/<id>.js|css for every scene of the timeline against the kit's CONTRACT — the real UI plates, the mascot crew, captions and chapter cards, every beat synced to the narrated words, one concrete component at a time — drafted by one sub-agent per scene group; rebuilds the film data and verifies it with the kit's snap and fluency tools; in fix cycles fixes each finding's defect in every scene that has it. Invoked by the deterministic orchestrator, never directly by a human.
 tools: Read, Write, Edit, Bash, Grep, Glob, Skill
 model: inherit
 ---

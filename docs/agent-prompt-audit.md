@@ -202,3 +202,25 @@ What this means for the findings:
 - The resolved-graph fixtures for `wf_default`, `wf_lean_build` and `wf_pr_fix` were regenerated with `UPDATE_RESOLVED_GRAPHS=1`. Only the two implementer directives changed.
 - `UPDATE_PROMPT_SNAPSHOTS=1 … test/graph-prompt-parity.test.mjs` produced no snapshot change. The task prompts carry neither the agent bodies nor the fix and task directives.
 - The related test files were run with a scratch `HOME` and `WORCA_HOME`. The commit message lists them.
+
+## Follow-up audit (run 02ee547f)
+
+The first audit skipped three agents: the test writer, the feature verifier and the architect. This follow-up covers them. It also adds a seventh question to the six the first audit asked: **does one text undo another?** (For example, a rule that says "no deviation" next to a rule that says "cover what the goal reaches".) The fixes below apply to the text added by #1562 and #1564.
+
+- **F1.** Implementer `plan` directive, in the meta file and in `implementerBody()`: follow the contracts, deviate only if one cannot work, and cover every place the goal governs that the plan missed, listed under Reach.
+- **F2.** Implementer Quality bar (both copies): the file set is the plan's goal and its contracts (implement), or the review and its same-shape sites (fix).
+- **F3.** One meaning for "deviation". A reach cover goes under a separate Reach entry in DEVIATIONS.md and is not a deviation from the goal. The implementer reach paragraph, its Recording section and `renderPromptArtifact` say so.
+- **F4.** Task mode. Parallel siblings rule 1 now names a reach file in the final note and finishes the step. The reach paragraph and the `task` directive (meta file and `implementerBody()`) match. The decomposer's integration task reads every file the slices name and covers each one the goal covers, test-first, under Reach.
+- **F5.** The workspace reviewer fans out to every member the goal reaches (changed members plus their consumers; consumers count toward the cap of 8, touched members first). A clean verdict needs no changed project and no consuming member. Its meta description and the workspace implementer's "named, not edited" rule match.
+- **F6.** Test writer: a test for each place the plan's reach list marks covered. A test that cannot load counts as failing for the right reason only when the plan creates the missing module.
+- **F7.** Feature verifier: `holds: true` needs a walked flow, with the entry point and the last producing code as `file:line` in `why` (now required). An unwalked reader of the governed state makes `holds` false.
+- **F8.** Architect fix mode: fix the findings and every element with the same defect; re-read only the code a finding points at.
+- **Reach covers acting code.** The reach list now ends "and code that reads the state and then acts on it: a check, a write, a route, a job" in every agent that carries it.
+- **Cost of the search (F-m3, F-m5, F-m8).** Every reach check starts with one line saying so when the goal sets no rule over a state. The code reviewer checks Reach in full on cycle 1, then only the implementer's same-shape sites and what the fix diff adds. The Grounded-claims bullets (code reviewer, plan reviewer, refiner) put the evidence in a "Claims checked" list with file:line.
+- **F-m1, F-m2, F-m4, F-m6.** The `.claude/agents/` planner and refiner carry no fan-out sentence, so F-m1 changed nothing there (the `agents/` copies already have it). Stale descriptions fixed (implementer meta and frontmatter, promo scenes). Reviewer `promptHints` name the request's goal and a reach check. Chat rule 4 adds "even when the brief looks specific". The fix-mode "findings, not instructions" sentence is now in the implementer body (both copies).
+- **Lane findings.** Fixed: the manual web UI tester now has Write; the memory defragmenter removes a rule only when another file or a newer `updated` stamp supersedes or contradicts it; the scanner and usage-mapper claim that worca redacts secrets now says what the code does (it redacts the file's lines and the `match` before comparing). Not changed, because not true as quoted: deck-system "used at least twice" (the distribution example carries Cover 2), deck-export "verify exactly what was requested" (no such text), promo-writer "No numbers" (the 214 line is an example for an invented product), synthesizer "at most 10 notes" (it already says the checker accepts 20 and to stay within 10).
+
+### Follow-ups, not done here
+
+- A shared `## Reach` table in the plan, filled by the planner and read by every later agent. It is a separate design change.
+- The c13d4fe7 replay criteria: replay that run's request against the fixed prompts and check that each reader the goal reached is covered or named.

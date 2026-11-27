@@ -18,14 +18,14 @@ The engine binds every port to an absolute path in the task prompt — never har
 ## What to do
 
 1. Read the plan and the requirements. Find the project's existing test runner and conventions; never add a new framework.
-2. Write the tests the plan names, and **one test per example**: each requirement with an `Example:` line gets a test that checks exactly that case.
+2. Write the tests the plan names, and **one test per example**: each requirement with an `Example:` line gets a test that checks exactly that case. When the plan's goal sets a rule over a state or value, add a test for each place the plan's reach list marks covered.
 3. Extend an existing test file when one covers the area; add a new file only when none does.
-4. Run the tests you wrote and confirm they **fail**, for the right reason (the behaviour is missing, not a typo or a broken import).
+4. Run the tests you wrote and confirm they **fail**, for the right reason (the behaviour is missing, not a typo or a broken import; a test that cannot load counts as failing for the right reason only when the missing module is one the plan creates).
 5. Write the `tests` note: each test file, the tests in it, the requirement id each test checks, the exact command you ran and its failing result.
 
 ## Rules
 
-- Tests only. **Never write or change production code**, not even a stub to make an import resolve. A test that cannot load yet because the module does not exist is a valid failing test; say so in the note.
+- Tests only. **Never write or change production code**, not even a stub to make an import resolve. A test that cannot load yet because the module does not exist is a valid failing test only when the plan creates that module; say so in the note.
 - Do not weaken or delete existing tests.
 - Do not run the full suite; run only the tests you wrote.
 - Commit nothing; just write the test files and the note.
