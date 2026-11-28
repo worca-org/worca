@@ -14,18 +14,92 @@ test('one workflows view; the composer, agents, scripts and agent-create views a
   for (const v of ['composer', 'agents', 'scripts', 'agent-create']) assert.equal(doc.querySelector(`[data-view="${v}"]`), null, v);
 });
 
-test('top bar: Back, Workflows ▾, name, Canvas · Tests · Versions, chip | Library toggle, Save version, Save — and nothing else', () => {
+test('top bar: Back, Workflows ▾, name, Canvas · Tests · Versions | the status bar (badge, chip), Open (the Library toggle), Save version, Save — and nothing else', () => {
   const tl = doc.querySelector('.wfv-tl .wfv-bar');
-  assert.deepEqual([...tl.querySelectorAll('button, input')].map((e) => e.id), ['wfv-back', 'wfv-wf-menu', 'wfv-name', 'wfv-page-canvas', 'wfv-page-tests', 'wfv-page-versions', 'wfv-errors', 'wfv-import-file']);
+  assert.deepEqual([...tl.querySelectorAll('button, input')].map((e) => e.id), ['wfv-back', 'wfv-wf-menu', 'wfv-name', 'wfv-page-canvas', 'wfv-page-tests', 'wfv-page-versions', 'wfv-import-file']);
+  assert.equal(tl.querySelector('#wfv-doc, #wfv-errors'), null, 'the badge and the chip left the top-left bar');
   assert.equal(doc.getElementById('wfv-name').placeholder, 'Untitled pipeline');
-  const tr = doc.querySelector('.wfv-tr .wfv-bar');
-  assert.deepEqual([...tr.querySelectorAll('button')].map((e) => e.id), ['wfv-lib-toggle', 'wfv-saveversion', 'wfv-save']);
+  const tr = doc.querySelector('.wfv-tr');
+  assert.deepEqual([...tr.querySelectorAll('button')].map((e) => e.id), ['wfv-errors', 'wfv-status-more', 'wfv-lib-toggle', 'wfv-saveversion', 'wfv-save']);
   assert.equal(doc.getElementById('wfv-save').textContent.trim(), 'Save');
 });
 
-test('dock = black "+" and the chat root; bottom-right = Auto-layout + zoom', () => {
-  assert.deepEqual([...doc.querySelectorAll('#wfv-dock > *')].map((e) => e.id), ['wfv-add', 'wfc']);
-  assert.deepEqual([...doc.querySelectorAll('#wfv-br button')].map((e) => e.id), ['wfv-autolayout', 'wfv-zoom']);
+test('top right: the status bar, then Open, Save version and Save as separate buttons 8px apart, in no shared bar; the Save reason is never text on the canvas', () => {
+  const tr = doc.querySelector('.wfv-tr');
+  assert.deepEqual([...tr.children].map((e) => e.id), ['wfv-status', 'wfv-lib-toggle', 'wfv-saveversion', 'wfv-savewrap']);
+  for (const id of ['wfv-lib-toggle', 'wfv-saveversion', 'wfv-save']) assert.equal(doc.getElementById(id).closest('.wfv-bar'), null, `${id} is in no bar`);
+  for (const id of ['wfv-lib-toggle', 'wfv-saveversion']) {
+    const b = doc.getElementById(id);
+    assert.ok(b.classList.contains('btn') && !b.classList.contains('btn-quiet'), `${id} is a secondary .btn: a quiet one has no surface on the canvas`);
+  }
+  assert.ok(doc.getElementById('wfv-save').classList.contains('btn-primary'));
+  assert.match(css, /\n\.wfv-tr\{top:12px;right:12px;display:flex;align-items:center;gap:8px;height:40px;\}/, '8px between them, centred on the 40px top-left bar');
+  assert.match(css, /\n\.wfv-tr > \*\{flex:0 0 auto;\}/, 'nothing in the group shrinks: top-fit.mjs reads its own width, then folds the status bar');
+  assert.match(css, /\n\.wfv-tr \.btn\[aria-pressed="true"\]\{background:var\(--hover\);\}/, 'the open Library keeps its tint');
+  const lib = doc.getElementById('wfv-lib-toggle');
+  assert.deepEqual([...lib.children].map((e) => e.tagName.toLowerCase()), ['svg', 'span'], 'the folder, then the word');
+  assert.equal(lib.textContent.trim(), 'Open');
+  assert.equal(lib.classList.contains('btn-icon'), false);
+  assert.equal(lib.getAttribute('aria-label'), 'Open Library', 'the name holds the word on the button');
+  assert.equal(lib.title, 'Library');
+  assert.match(css, /\n\.wfv-bar \.btn:not\(\.btn-icon\) svg,\.wfv-tr \.btn:not\(\.btn-icon\) svg\{width:15px;height:15px;\}/, 'the folder svg has no size of its own');
+  assert.match(css, /\n\.wfv-bar \.btn-icon svg\{width:16px;height:16px;\}/);
+  assert.match(css, /\n\.wfv-savewrap\{display:inline-flex;\}/, 'no margin of its own: the gap spaces it');
+  assert.ok(doc.getElementById('wfv-save-reason').hidden, 'the reason is Save\'s description, not text');
+  assert.doesNotMatch(css, /\.wfv-save-reason/);
+});
+
+test('the status bar: the document badge and the validation chip in a bar of their own, left of Open; nothing shown = no bar', () => {
+  const status = doc.getElementById('wfv-status');
+  assert.deepEqual([...status.classList], ['wfv-bar', 'wfv-status']);
+  assert.equal(status.nextElementSibling.id, 'wfv-lib-toggle', 'left of Open');
+  assert.deepEqual([...status.children].map((e) => e.id), ['wfv-doc', 'wfv-errors', 'wfv-status-more']);
+  const badge = doc.getElementById('wfv-doc');
+  assert.equal(badge.getAttribute('role'), 'status');
+  assert.ok(badge.hidden && doc.getElementById('wfv-errors').hidden, 'both start hidden');
+  assert.match(css, /\n\.wfv-status:not\(:has\(> :not\(\[hidden\]\)\)\)\{display:none;\}/, 'no empty bar on a blank canvas');
+});
+
+test('the status bar folds (top-fit.mjs sets data-compact): one "!" in the chip\'s dress stands for the badge and the chip; the top-left bar takes what the right group leaves', () => {
+  const status = doc.getElementById('wfv-status');
+  assert.equal(status.dataset.compact, 'false', 'open until measured');
+  const more = doc.getElementById('wfv-status-more');
+  assert.deepEqual([...more.classList], ['btn', 'btn-sm', 'btn-danger', 'btn-icon', 'wfv-errchip', 'wfv-status-more'], 'the chip\'s skin and tones, as an icon');
+  assert.ok(more.hidden, 'only top-fit.mjs shows it');
+  assert.equal(more.getAttribute('aria-haspopup'), 'menu');
+  assert.equal(more.getAttribute('aria-expanded'), 'false');
+  assert.equal(more.textContent.trim(), '', 'a glyph, not a typed "!"');
+  assert.match(more.innerHTML, /<svg [^>]*aria-hidden="true"[^>]*><path d="M12 6\.8v6\.6"><\/path><path d="M12 17\.6h\.01"><\/path><\/svg>/, 'the shared alert glyph (icons.mjs)');
+  assert.match(css, /\n\.wfv-status-more\{margin:0 2px;\}/);
+  assert.match(css, /\n\.wfv-status\[data-compact="true"\] > \.wfv-errchip:not\(\.wfv-status-more\)\{display:none;\}/, 'the chip is in the menu');
+  const sr = css.match(/\n\.wfv-status\[data-compact="true"\] > \.wfv-doc,\.wfv-status\[data-compact="true"\]:has\(> \.wfv-status-more\[hidden\]\)\{([^}]*)\}/);
+  assert.ok(sr, 'the folded badge, and the bar when the badge is all it holds');
+  assert.match(sr[1], /clip-path:inset\(50%\);/, 'screen readers keep the document status');
+  assert.match(sr[1], /border:0;/, 'the bar leaves no 1px frame behind');
+  assert.doesNotMatch(sr[1], /display:none/);
+  assert.match(css, /\n\.wfv-tl\{top:12px;left:12px;max-width:calc\(100% - 32px - var\(--wfv-tr-w,0px\)\);\}/, '12 + 12 inset and the 8px gap');
+  assert.match(css, /\n\.wfv-tl \.wfv-bar\{max-width:100%;\}/, 'the name gives way (min 56px)');
+});
+
+test('dock = black "+", the Auto-layout icon in its own bar, the chat root; bottom-right = zoom, then the How it works slot', () => {
+  const dock = [...doc.querySelectorAll('#wfv-dock > *')];
+  assert.deepEqual(dock.map((e) => e.id || e.className), ['wfv-add', 'wfv-bar', 'wfc']);
+  const auto = doc.getElementById('wfv-autolayout');
+  assert.deepEqual([...dock[1].children], [auto], 'alone in its bar');
+  assert.deepEqual([...auto.classList], ['btn', 'btn-quiet', 'btn-icon']);
+  assert.equal(auto.textContent.trim(), '', 'an icon, no word');
+  assert.ok(auto.querySelector('svg'));
+  assert.equal(auto.getAttribute('aria-label'), 'Auto-layout');
+  assert.equal(auto.title, 'Auto-layout');
+  assert.match(css, /\n\.wfv-dock > \.wfv-bar\{flex:0 0 auto;\}/, 'the chat gives way, not the tile');
+  const br = [...doc.querySelectorAll('#wfv-br > *')];
+  assert.deepEqual(br.map((e) => e.id || e.className), ['wfv-bar', 'wfv-howto-slot']);
+  assert.deepEqual([...br[0].querySelectorAll('button')].map((e) => e.id), ['wfv-zoom']);
+  assert.deepEqual([...br[1].classList], ['wfv-bar', 'wfv-howto-bar']);
+  assert.equal(br[1].children.length, 0, 'how-it-works.mjs puts its button here');
+  assert.match(css, /\n\.wfv-howto-bar:not\(:has\(> \.btn:not\(\[hidden\]\)\)\)\{display:none;\}/, 'no empty tile');
+  assert.match(css, /\n\.wfv-stage:has\(> \.wfv-versions:not\(\[hidden\]\)\) > \.wfv-dock,\.wfv-stage:has\(> \.wfv-versions:not\(\[hidden\]\)\) > \.wfv-br > :not\(\.wfv-howto-bar\)\{display:none;\}/,
+    'the Versions page keeps How it works');
 });
 
 test('the dock "+" is the large icon button (40px, in line with the chat pill), the only .btn-lg in the view', () => {
@@ -56,8 +130,9 @@ test('full screen: the sidebar and the top bar are hidden on the view', () => {
   assert.match(css, /\.view\[data-view="workflows"\]\{flex:1 1 auto;min-height:0;position:relative;\}/);
 });
 
-test('narrow screens: only Auto-layout goes icon-only (the zoom keeps its %), and the selection toolbar stays on the stage', () => {
-  assert.match(css, /@media \(max-width:760px\)\{\.wfv-tr\{top:58px;\}#wfv-autolayout span\{display:none;\}#wfv-autolayout\{width:30px;padding:0;justify-content:center;\}/);
+test('narrow screens: the top-right buttons step under the bar, the zoom keeps its %, and the selection toolbar stays on the stage', () => {
+  assert.match(css, /@media \(max-width:760px\)\{\.wfv-tr\{top:58px;\}\.wfv-sheet\{padding:8px;\}\}/);
+  assert.doesNotMatch(css, /#wfv-autolayout/, 'Auto-layout is an icon at every width: no rule of its own');
   assert.doesNotMatch(css, /\.wfv-br \.wfv-btn span\{display:none;\}/, 'that rule also hid #wfv-zoom-label');
   assert.match(css, /\.wfv-tb\{[^}]*max-width:calc\(100% - 16px\);overflow-x:auto;/);
 });
@@ -141,13 +216,11 @@ test('versions table: the draft row keeps Save version in the actions column; th
   assert.match(css, /@media \(max-width:760px\)\{\.wfv-versions\{border-top-width:112px;padding:0 16px 32px;\}\}/);
 });
 
-test('phone width (finding 15): Canvas · Tests · Versions fit in the top-left bar; the document status stays for screen readers', () => {
+test('phone width (finding 15): Canvas · Tests · Versions fit in the top-left bar; the status bar folds by measure, not by a width rule', () => {
   const m = css.match(/@media \(max-width:760px\)\{\.wfv-tl\{.*\}/);
   assert.match(m[0], /\.wfv-tl \.wfv-pages button\{padding:0 8px;\}/, 'the three buttons are narrower');
-  const p = css.match(/@media \(max-width:480px\)\{\.wfv-tl \.wfv-doc\{[^}]*\}\}/);
-  assert.ok(p, 'a <=480px rule for the document status');
-  assert.match(p[0], /clip/);
-  assert.doesNotMatch(p[0], /display:none/);
+  assert.match(m[0], /\.wfv-tl\{max-width:calc\(100% - 24px\);\}/, 'its own row: the right group takes none of it');
+  assert.doesNotMatch(css, /@media \(max-width:480px\)\{[^\n]*\.wfv-doc[,{]/, 'no <=480px rule for the document status any more');
 });
 
 // UI nits #3: at 390 px the switch squeezed the name to one letter ("F"). With the flag on, the switch is compact and the

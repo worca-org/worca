@@ -13,7 +13,7 @@ const MARK = '<span class="howto-new" aria-hidden="true" hidden></span>';
 const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 
 /** The button's HTML: question icon, the words (none when `icon`) and a trailing hidden "New" mark.
- *  `icon` makes it a quiet icon button, for a bar of icon buttons (the Workflows editor bar). */
+ *  `icon` makes it a quiet icon button, for a bar (the Workflows editor's, after the zoom menu). */
 export function howtoButtonHtml({ id, cls, icon = false }) {
   const classes = ['btn', icon ? 'btn-quiet btn-icon' : 'btn-sm', cls].filter(Boolean).join(' ');
   const words = icon ? '' : `<span class="howto-label">${LABEL}</span>`;

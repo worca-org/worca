@@ -65,8 +65,7 @@ export function createHowItWorks({ doc, getStatus, setStatus, postPrefs, startTo
   function mount() {
     const right = doc.querySelector('.topnav-r');
     top = place(TOP_ID, 'topnav-howto', right, right?.firstChild ?? null);
-    const lib = byId('wfv-lib-toggle');
-    workflows = place(WORKFLOWS_ID, 'wfv-howto', lib?.parentNode ?? null, lib, true);   // an icon, like the Library toggle beside it
+    workflows = place(WORKFLOWS_ID, 'wfv-howto', byId('wfv-howto-slot'), null, true);   // an icon in its own bar, after the zoom menu
   }
 
   function titleFor(guide) {

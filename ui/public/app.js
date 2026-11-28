@@ -3766,6 +3766,7 @@ function wfvEls() {
   return {
     root: g('wfv'), stage: g('wfv-stage'), canvas: g('wfv-canvas'), chip: g('wfv-chip'), back: g('wfv-back'),
     wfMenu: g('wfv-wf-menu'), name: g('wfv-name'), docState: g('wfv-doc'), errors: g('wfv-errors'), importFile: g('wfv-import-file'),
+    status: g('wfv-status'), statusMore: g('wfv-status-more'),
     libToggle: g('wfv-lib-toggle'), saveWrap: g('wfv-savewrap'), save: g('wfv-save'), saveReason: g('wfv-save-reason'), add: g('wfv-add'),
     autolayout: g('wfv-autolayout'), zoom: g('wfv-zoom'), zoomLabel: g('wfv-zoom-label'), overlay: g('wfv-overlay'),
     library: g('wfv-library'), sheet: g('wfv-sheet'), sheetTitle: g('wfv-sheet-title'), sheetClose: g('wfv-sheet-close'),
@@ -3863,7 +3864,7 @@ async function initWorkflows() {
     },
     actions: wfvChatActions(),
     canvas: () => wfvChatCanvas(),
-    stage: els.stage, cluster: document.getElementById('wfv-br'), plus: els.add,   // fit the stage; lift the bars clear
+    stage: els.stage, cluster: document.getElementById('wfv-br'), beside: [els.add, els.autolayout?.parentElement],   // fit the stage; lift the bars clear
     confirm: (o) => confirmModal(o),                    // New chat asks before it leaves unsaved drafts behind
     // Each rejects when its list could not be read: the dock drops a pinned project or workspace only on a list that loaded.
     projects: async () => {

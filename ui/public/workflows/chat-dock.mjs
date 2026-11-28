@@ -58,13 +58,13 @@ export const REPLY_PLACEHOLDER = 'Reply';
  * @param {Function} [o.projects]  async () => [{key, name}]; rejects when the list could not be read
  * @param {Function} [o.workspaces]  async () => [{id, name}]; rejects when the list could not be read
  * @param {HTMLElement} [o.stage]  #wfv-stage: the dock never grows wider than it
- * @param {HTMLElement} [o.cluster]  #wfv-br: the Auto-layout + zoom bars, lifted clear of the dock when the two meet
- * @param {HTMLElement} [o.plus]  #wfv-add: the "+" beside the pill (its width is not the chat's)
+ * @param {HTMLElement} [o.cluster]  #wfv-br: the zoom and How it works bars, lifted clear of the dock when the two meet
+ * @param {HTMLElement[]} [o.beside]  what shares the dock with the pill (the "+", the Auto-layout bar): their widths are not the chat's
  * @param {Function} [o.confirm]  ({title, message, confirmLabel, cancelLabel, danger}) => Promise<boolean> (app.js: confirmModal);
  *   absent = go ahead (headless callers), a throw = no
  */
 export function createChatDock({ doc, host, composer, sessionId, fetch: fetchFn, sendWs, storage = null, renderMarkdown = null,
-  actions = {}, canvas, projects = async () => [], workspaces = async () => [], stage = null, cluster = null, plus = null, confirm: confirmFn = null }) {
+  actions = {}, canvas, projects = async () => [], workspaces = async () => [], stage = null, cluster = null, beside = [], confirm: confirmFn = null }) {
   const win = doc.defaultView || globalThis;
   const h = (tag, cls, text) => { const n = doc.createElement(tag); if (cls) n.className = cls; if (text != null) n.textContent = text; return n; };
   const svg = (name) => {
@@ -181,14 +181,15 @@ export function createChatDock({ doc, host, composer, sessionId, fetch: fetchFn,
   host.replaceChildren(shell);
 
   // ── fit the stage; keep the bottom-right bars visible (mockup fitWidth + checkLegend) ───────────────────
-  /** The chat never grows past the stage (the Library takes 324 px of the window), and the Auto-layout + zoom bars
+  /** The chat never grows past the stage (the Library takes 324 px of the window), and the bottom-right bars
    *  step up clear of the dock whenever the two meet — the open chat covers them below ≈1380 px. Only the bars'
    *  left/right are read: their `bottom` transitions, so a measured top would flap. Both sit on the stage's
    *  bottom edge, so meeting side to side IS an overlap. The collapsed pill's live chip floats above it: the bars clear
    *  that too. */
   function place() {
     const W = stage ? stage.clientWidth : 0;
-    if (W) shell.style.setProperty('--wfc-avail', `${Math.max(150, W - 24 - (plus && plus.offsetWidth ? plus.offsetWidth + 8 : 0))}px`);
+    const taken = beside.reduce((sum, el) => sum + (el && el.offsetWidth ? el.offsetWidth + 8 : 0), 0);   // each with the dock's 8px gap
+    if (W) shell.style.setProperty('--wfc-avail', `${Math.max(150, W - 24 - taken)}px`);
     if (!cluster) return;
     const a = cluster.getBoundingClientRect();
     const b = host.getBoundingClientRect();

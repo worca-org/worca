@@ -437,8 +437,8 @@ try {
       .filter(shown).map((e)=>e.id).filter(Boolean);
     const disp=(s)=>{const e=q(s);return e?getComputedStyle(e).display:'absent';};
     return {ctl,sidebar:disp('.sidebar'),topnav:disp('#topnav'),dock:disp('body > .ask-dock'),errorsShown:shown(q('#wfv-errors'))};})()`);
-  const expectBar = ['wfv-back', 'wfv-wf-menu', 'wfv-name', ...(bar.errorsShown ? ['wfv-errors'] : []), 'wfv-howto-btn', 'wfv-lib-toggle', 'wfv-save'];
-  check(11, 'the top bar holds exactly Back, the workflow menu, the name, (errors), How it works, the Library toggle and Save; the app chrome is hidden',
+  const expectBar = ['wfv-back', 'wfv-wf-menu', 'wfv-name', ...(bar.errorsShown ? ['wfv-errors'] : []), 'wfv-lib-toggle', 'wfv-save'];
+  check(11, 'the top bar holds exactly Back, the workflow menu, the name, (errors), the Library toggle and Save; the app chrome is hidden',
     JSON.stringify([...bar.ctl].sort()) === JSON.stringify([...expectBar].sort())
     && bar.sidebar === 'none' && bar.topnav === 'none' && (bar.dock === 'none' || bar.dock === 'absent'), { ...bar, expectBar });
   const frost = async () => ev(`(()=>{const n=document.querySelector('#wfv-canvas .gv-world .node');if(!n)return null;const cs=getComputedStyle(n);
@@ -600,7 +600,7 @@ try {
       }
       await settle(`room-${width}`);
       room.push({ width, lib: await rect('#wfv-library'), stage: await rect('#wfv-stage'), tl: await rect('#wfv-stage .wfv-tl .wfv-bar'),
-        tr: await rect('#wfv-stage .wfv-tr .wfv-bar'), main: await rect('main.main'), name: await ev(`document.getElementById('wfv-name').value`) });
+        tr: await rect('#wfv-stage .wfv-tr'), main: await rect('main.main'), name: await ev(`document.getElementById('wfv-name').value`) });
     }
     await cdp('Emulation.clearDeviceMetricsOverride');
     check(18, 'beside the 380px Library the stage keeps its room: the content area less the Library and the 8px padding and gap at 1440 and 1024, and with Default open the top-left bar ends left of the top-right bar',

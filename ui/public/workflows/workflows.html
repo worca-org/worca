@@ -24,7 +24,6 @@
                   </button>
                   <span class="wfv-sep" aria-hidden="true"></span>
                   <input type="text" class="wfv-name" id="wfv-name" placeholder="Untitled pipeline" aria-label="Pipeline name" spellcheck="false" autocomplete="off">
-                  <span class="wfv-doc" id="wfv-doc" role="status" hidden></span>
                   <span class="wfv-vstatus hint" id="wfv-vstatus" data-flag="workflowTests" aria-live="polite" hidden></span>
                   <span class="wfv-sep" aria-hidden="true" data-flag="workflowTests"></span>
                   <div class="seg wfv-pages" id="wfv-pages" role="tablist" aria-label="Workflow views" data-flag="workflowTests">
@@ -32,38 +31,43 @@
                     <button type="button" role="tab" aria-selected="false" id="wfv-page-tests" aria-controls="wfv-tests" data-page="tests">Tests</button>
                     <button type="button" role="tab" aria-selected="false" id="wfv-page-versions" aria-controls="wfv-versions" data-page="versions" data-flag-chip="workflowTests">Versions</button>
                   </div>
-                  <button type="button" class="btn btn-sm btn-danger wfv-errchip" id="wfv-errors" hidden></button>
                   <input type="file" id="wfv-import-file" accept=".json,application/json" hidden>
                 </div>
               </div>
               <div class="wfv-float wfv-tr" data-canvas-keys="off">
-                <div class="wfv-bar">
-                  <button type="button" class="btn btn-quiet btn-icon" id="wfv-lib-toggle" aria-label="Library" title="Library" aria-pressed="true" aria-controls="wfv-library">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7.5A1.5 1.5 0 0 1 4.5 6h4l2 2.2H19.5A1.5 1.5 0 0 1 21 9.7v8.3A1.5 1.5 0 0 1 19.5 19.5h-15A1.5 1.5 0 0 1 3 18z"></path></svg>
+                <div class="wfv-bar wfv-status" id="wfv-status" data-compact="false">
+                  <span class="wfv-doc" id="wfv-doc" role="status" hidden></span>
+                  <button type="button" class="btn btn-sm btn-danger wfv-errchip" id="wfv-errors" hidden></button>
+                  <button type="button" class="btn btn-sm btn-danger btn-icon wfv-errchip wfv-status-more" id="wfv-status-more" aria-haspopup="menu" aria-expanded="false" hidden>
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 6.8v6.6"></path><path d="M12 17.6h.01"></path></svg>
                   </button>
-                  <button type="button" class="btn btn-quiet" id="wfv-saveversion" data-flag="workflowTests">Save version</button>
-                  <span class="wfv-savewrap" id="wfv-savewrap"><span class="wfv-save-reason hint" id="wfv-save-reason" hidden></span><button type="button" class="btn btn-primary" id="wfv-save" aria-describedby="wfv-save-reason">Save</button></span>
                 </div>
+                <button type="button" class="btn" id="wfv-lib-toggle" aria-label="Open Library" title="Library" aria-pressed="true" aria-controls="wfv-library">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7.5A1.5 1.5 0 0 1 4.5 6h4l2 2.2H19.5A1.5 1.5 0 0 1 21 9.7v8.3A1.5 1.5 0 0 1 19.5 19.5h-15A1.5 1.5 0 0 1 3 18z"></path></svg>
+                  <span>Open</span>
+                </button>
+                <button type="button" class="btn" id="wfv-saveversion" data-flag="workflowTests">Save version</button>
+                <span class="wfv-savewrap" id="wfv-savewrap"><span id="wfv-save-reason" hidden></span><button type="button" class="btn btn-primary" id="wfv-save" aria-describedby="wfv-save-reason">Save</button></span>
               </div>
               <div class="wfv-float wfv-dock" id="wfv-dock" data-canvas-keys="off">
                 <button type="button" class="btn btn-lg btn-primary btn-icon wfv-plus" id="wfv-add" aria-label="Add" title="Add" aria-haspopup="menu" aria-expanded="false">
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"></path></svg>
                 </button>
+                <div class="wfv-bar">
+                  <button type="button" class="btn btn-quiet btn-icon" id="wfv-autolayout" aria-label="Auto-layout" title="Auto-layout">
+                    <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path fill-rule="evenodd" transform="rotate(45 10 14.5)" d="M9.4 7.1h1.2a1.3 1.3 0 0 1 1.3 1.3v12.2a1.3 1.3 0 0 1-1.3 1.3h-1.2a1.3 1.3 0 0 1-1.3-1.3V8.4a1.3 1.3 0 0 1 1.3-1.3zM9.1 8.4v2.4h1.8V8.4z"></path><path d="M9 2.9Q9.79 5.71 12.6 6.5Q9.79 7.29 9 10.1Q8.21 7.29 5.4 6.5Q8.21 5.71 9 2.9ZM17.6 2.6Q18.26 4.94 20.6 5.6Q18.26 6.26 17.6 8.6Q16.94 6.26 14.6 5.6Q16.94 4.94 17.6 2.6ZM18.2 11.4Q18.68 13.12 20.4 13.6Q18.68 14.08 18.2 15.8Q17.72 14.08 16 13.6Q17.72 13.12 18.2 11.4Z"></path></svg>
+                  </button>
+                </div>
                 <div class="wfc" id="wfc" data-canvas-keys="off"></div>
               </div>
               <div class="wfv-float wfv-br" id="wfv-br" data-canvas-keys="off">
-                <div class="wfv-bar">
-                  <button type="button" class="btn btn-quiet" id="wfv-autolayout">
-                    <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path fill-rule="evenodd" transform="rotate(45 10 14.5)" d="M9.4 7.1h1.2a1.3 1.3 0 0 1 1.3 1.3v12.2a1.3 1.3 0 0 1-1.3 1.3h-1.2a1.3 1.3 0 0 1-1.3-1.3V8.4a1.3 1.3 0 0 1 1.3-1.3zM9.1 8.4v2.4h1.8V8.4z"></path><path d="M9 2.9Q9.79 5.71 12.6 6.5Q9.79 7.29 9 10.1Q8.21 7.29 5.4 6.5Q8.21 5.71 9 2.9ZM17.6 2.6Q18.26 4.94 20.6 5.6Q18.26 6.26 17.6 8.6Q16.94 6.26 14.6 5.6Q16.94 4.94 17.6 2.6ZM18.2 11.4Q18.68 13.12 20.4 13.6Q18.68 14.08 18.2 15.8Q17.72 14.08 16 13.6Q17.72 13.12 18.2 11.4Z"></path></svg>
-                    <span>Auto-layout</span>
-                  </button>
-                </div>
                 <div class="wfv-bar">
                   <button type="button" class="btn btn-quiet wfv-zoom" id="wfv-zoom" aria-haspopup="menu" aria-expanded="false" aria-label="Zoom">
                     <span id="wfv-zoom-label">100%</span>
                     <svg class="wfv-chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 15l6-6 6 6"></path></svg>
                   </button>
                 </div>
+                <div class="wfv-bar wfv-howto-bar" id="wfv-howto-slot"></div>
               </div>
               <div class="wfv-overlay" id="wfv-overlay" data-canvas-keys="off"></div>
             </div>

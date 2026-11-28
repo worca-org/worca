@@ -167,7 +167,8 @@ describe('openGuideDialog shell', () => {
 });
 
 const BAR_HTML = '<header id="topnav"><h1 id="topnav-title">Chat</h1><div class="topnav-r"><button id="topnav-ask">Ask</button></div></header>'
-  + '<div class="wfv-bar"><button id="wfv-lib-toggle">Library</button></div><button id="ws-howto-btn" type="button">How workspaces work</button>';
+  + '<button id="wfv-lib-toggle">Open</button><div id="wfv-br"><div class="wfv-bar"><button id="wfv-zoom">100%</button></div><div class="wfv-bar wfv-howto-bar" id="wfv-howto-slot"></div></div>'
+  + '<button id="ws-howto-btn" type="button">How workspaces work</button>';
 
 function boot({ status = { guidesSeen: {} }, postResult = {} } = {}) {
   const dom = trackDom(new JSDOM(`<!doctype html><body>${BAR_HTML}</body>`, { url: 'http://localhost/', pretendToBeVisual: true }));
@@ -211,7 +212,7 @@ describe('howto button', () => {
     assert.equal(b.dataset.new, 'false');
     assert.equal(b.querySelector('.howto-new').hidden, true);
     assert.equal(b.getAttribute('aria-label'), 'How it works');
-    // The icon form (the Workflows editor bar): a quiet icon button, no words, the same name.
+    // The icon form (the Workflows editor's bar after the zoom menu): a quiet icon button, no words, the same name.
     doc.body.innerHTML = howtoButtonHtml({ id: 'i-btn', icon: true });
     const i = doc.getElementById('i-btn');
     assert.ok(i.classList.contains('btn-icon') && i.classList.contains('btn-quiet') && !i.classList.contains('btn-sm'));
@@ -222,14 +223,15 @@ describe('howto button', () => {
 });
 
 describe('How it works controller', () => {
-  test('mount puts the top-bar button first in .topnav-r and the Workflows one before the library toggle; twice is the same', () => {
+  test('mount puts the top-bar button first in .topnav-r and the Workflows one in its bar after the zoom menu; twice is the same', () => {
     const c = boot();
     c.hiw.mount();
     const r = c.doc.querySelector('.topnav-r');
     assert.equal(r.firstElementChild.id, 'howto-btn');
     assert.equal(c.doc.querySelectorAll('#howto-btn').length, 1);
     assert.equal(c.doc.querySelectorAll('#wfv-howto-btn').length, 1);
-    assert.equal(c.doc.getElementById('wfv-lib-toggle').previousElementSibling.id, 'wfv-howto-btn');
+    assert.deepEqual([...c.doc.getElementById('wfv-howto-slot').children].map((e) => e.id), ['wfv-howto-btn']);
+    assert.notEqual(c.doc.getElementById('wfv-lib-toggle').previousElementSibling.id, 'wfv-howto-btn', 'no longer beside the Library toggle');
   });
 
   test('paintMarks: unseen shows the mark, seen and unknown prefs do not (also on #ws-howto-btn)', () => {

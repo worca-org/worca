@@ -1,10 +1,11 @@
 // ui/public/workflows/shell.mjs
 // The Workflows view's chrome around the composer engine (graph/composer.mjs): the top bar
-// (Back · Workflows ▾ · name · chip | Library · Save), the bottom-right Auto-layout + zoom % menu,
+// (Back · Workflows ▾ · name · chip | Open · Save), the dock's Auto-layout, the bottom-right zoom % menu,
 // the black "+" menu, the Library drop target, and the selection toolbar whose "More" popover hosts
 // the full inspector. Pure DOM + injected callbacks: app.js owns routing, data and the server.
 // Strings and behaviour: composer-mockup.html canvas.js (buildChrome 2363–2448, toolbar 2141–2322).
 import { toggleMenu, closeMenus } from './menu.mjs';
+import { createTopFit } from './top-fit.mjs';
 import { modelGroups, pickEffortsOn } from '../../../src/shared/connections.mjs';
 import { engineLabel } from '../../../src/shared/engine-switch.mjs';
 import { openModelColumns, columnsValue, columnsLabel, nodeModelPatch, pickEfforts } from '../models/model-columns.mjs';
@@ -45,7 +46,8 @@ const ICONS = {
 /**
  * @param {object} o
  * @param {Document} o.doc
- * @param {object} o.els  {root, stage, canvas, back, wfMenu, name, importFile, libToggle, add, autolayout, zoom, zoomLabel, overlay, inspector}
+ * @param {object} o.els  {root, stage, canvas, back, wfMenu, name, importFile, libToggle, add, autolayout, zoom, zoomLabel, overlay, inspector,
+ *   status, statusMore, docState, errors}  — the last four: the status bar, its "!", the badge and the chip (top-fit.mjs)
  * @param {object} o.composer  the createComposer() instance
  * @param {object} o.actions  {back, newCanvas, openLibrary(tab), toggleLibrary, importFile(file), exportCurrent, newAgent, newScript, afterRender?,
  *   pinState?() → {id, pinned}|null, togglePin?,  — these two: the Chat home pin of the saved canvas
@@ -77,10 +79,15 @@ export function createWorkflowsShell({ doc, els, composer, actions }) {
   on(els.name, 'input', () => composer.setName(els.name.value));
   on(els.name, 'keydown', (ev) => { if (ev.key === 'Enter' || ev.key === 'Escape') { ev.preventDefault(); els.name.blur(); } });
   on(els.libToggle, 'click', () => act('toggleLibrary'));
+  // The two top groups never meet: the status bar folds into its "!" when both do not fit (top-fit.mjs).
+  const topFit = createTopFit({ doc, els: { stage: els.stage, tl: els.stage && els.stage.querySelector('.wfv-tl'), tr: els.stage && els.stage.querySelector('.wfv-tr'),
+    status: els.status, more: els.statusMore, badge: els.docState, chip: els.errors } });
+  offs.push(() => topFit.destroy());
+  topFit.fit();
   /** The Library's open state, painted by app.js after every toggle. */
   function paintLibToggle(open) { if (els.libToggle) els.libToggle.setAttribute('aria-pressed', open ? 'true' : 'false'); }
 
-  // ── bottom-right: Auto-layout (the engine binds the layout itself) + zoom ───
+  // ── the dock's Auto-layout (the engine binds the layout itself) + the bottom-right zoom ───
   on(els.autolayout, 'click', () => composer.fit());     // after the engine's own click handler: lay out, then fit
   on(els.zoom, 'click', () => {
     toggleMenu({ doc, anchor: els.zoom, align: 'end', side: 'top', label: 'Zoom', items: [

@@ -1931,7 +1931,38 @@ test('Projects, any way U9: the composer dock\'s scope menu lists the workspaces
   assert.deepEqual([...w.document.querySelectorAll('.wfv-menu .wfv-menu-l')].map((x) => x.textContent), ['No project', 'Team']);
 });
 
-test('F-26: the Save reason shows as text, linked by aria-describedby, and hides on a valid canvas', async () => {
+test('the top row never overlaps: on a stage too narrow for both groups the status bar folds into one "!" that opens the badge and the chip as a menu', async () => {
+  const { window: win } = await boot();
+  await go(win, 'workflows');
+  const doc = win.document;
+  const stage = doc.getElementById('wfv-stage');
+  const status = doc.getElementById('wfv-status');
+  const more = doc.getElementById('wfv-status-more');
+  let width = 796;                                           // jsdom has no layout: the widths a browser would report
+  Object.defineProperty(stage, 'clientWidth', { configurable: true, get: () => width });
+  Object.defineProperty(stage.querySelector('.wfv-tl'), 'offsetWidth', { configurable: true, get: () => 328 });
+  Object.defineProperty(stage.querySelector('.wfv-tr'), 'offsetWidth', { configurable: true, get: () => (status.dataset.compact === 'true' ? 200 : 360) });
+  win.__gv().c.spawn({ key: 'planner' });                    // unwired ports: the badge and the chip show
+  await tick(); await tick();
+  assert.equal(doc.getElementById('wfv-errors').hidden, false);
+  assert.equal(status.dataset.compact, 'false', '328 + 8 + 360 fits 772');
+  assert.equal(more.hidden, true);
+  assert.equal(stage.style.getPropertyValue('--wfv-tr-w'), '360px');
+  width = 620;                                               // the Library open in a 1024px window
+  win.dispatchEvent(new win.Event('resize'));
+  assert.equal(status.dataset.compact, 'true');
+  assert.equal(more.hidden, false);
+  assert.match(more.getAttribute('aria-label'), /^\d+ ports? to wire\. Show details$/);
+  assert.ok(more.classList.contains('is-incomplete'));
+  assert.equal(stage.style.getPropertyValue('--wfv-tr-w'), '200px');
+  clickEl(win, more);
+  const menu = doc.querySelector('.wfv-menu[role="menu"]');
+  assert.ok(menu);
+  assert.deepEqual([...menu.querySelectorAll('.menu-h')].map((h) => h.textContent), ['Not saved']);
+  assert.match(menu.querySelector('[role="menuitem"]').textContent, /^\d+ ports? to wire$/);
+});
+
+test('F-26: the Save reason is Save\'s tooltip and its aria-describedby description, never text on the canvas; a valid canvas clears it', async () => {
   const { window: win } = await boot();
   await go(win, 'workflows');
   const doc = win.document;
@@ -1945,7 +1976,7 @@ test('F-26: the Save reason shows as text, linked by aria-describedby, and hides
   await tick(); await tick();
   assert.equal(save.disabled, true);
   assert.notEqual(save.title, '');
-  assert.equal(reason.hidden, false);
+  assert.equal(reason.hidden, true, 'not shown: a hidden element still describes the button that points at it');
   assert.equal(reason.textContent, save.title);
   win.__gv().c.loadTemplate({ id: 'wf_ok', name: 'Ok', version: 2, domain: 'coding',
     nodes: [{ id: 'n_task', kind: 'task', x: 0, y: 0, config: {} }, { id: 'n_plan', kind: 'agent', key: 'planner', x: 300, y: 0, config: {} },
@@ -1956,6 +1987,8 @@ test('F-26: the Save reason shows as text, linked by aria-describedby, and hides
       { id: 'w4', from: { node: 'n_rev', port: 'pass' }, to: { node: 'n_end', port: 'result' } }] });
   await tick(); await tick();
   assert.equal(reason.hidden, true);
+  assert.equal(reason.textContent, '');
+  assert.equal(save.title, '');
 });
 
 // ------------------------------------------------- Workflow versions (plans/workflow-tests-plan.md Part 1, Task 7)

@@ -955,7 +955,7 @@ test('a reader at the bottom follows the streaming text; one who scrolled up sta
   assert.equal(top, 100);
 });
 
-test('the dock fits the stage, and lifts the Auto-layout + zoom bars clear of itself whenever the two meet', async () => {
+test('the dock fits the stage less everything beside the pill, and lifts the bottom-right bars clear of itself whenever the two meet', async () => {
   const rect = (left, top, width, height) => ({ left, top, width, height, right: left + width, bottom: top + height, x: left, y: top });
   const s = await bootDock([], (b) => {
     // 1280 x 900 with the Library open: the stage is 956 px wide; the bars sit at its right edge.
@@ -966,14 +966,17 @@ test('the dock fits the stage, and lifts the Auto-layout + zoom bars clear of it
     Object.defineProperty(stage, 'clientWidth', { configurable: true, value: 956 });
     stage.getBoundingClientRect = () => rect(8, 8, 956, 884);
     Object.defineProperty(b.g('wfv-add'), 'offsetWidth', { configurable: true, value: 40 });
+    const autoBar = b.doc.createElement('div');                // the Auto-layout tile between the "+" and the pill
+    Object.defineProperty(autoBar, 'offsetWidth', { configurable: true, value: 40 });
+    const gone = b.doc.createElement('div');                   // not laid out (jsdom: offsetWidth 0): takes no room
     cluster.getBoundingClientRect = () => rect(752, 838, 200, 40);
     const open = () => b.g('wfc').querySelector('.wfc-shell').dataset.open === 'true';
     b.g('wfc').getBoundingClientRect = () => (open() ? rect(220, 500, 580, 377) : rect(290, 837, 440, 40));
-    return { stage, cluster, plus: b.g('wfv-add') };
+    return { stage, cluster, beside: [b.g('wfv-add'), autoBar, gone] };
   });
   const shell = s.g('wfc').querySelector('.wfc-shell');
   const cluster = s.g('wfv-br');
-  assert.equal(shell.style.getPropertyValue('--wfc-avail'), '884px', '956 - 24 - (40 + 8)');
+  assert.equal(shell.style.getPropertyValue('--wfc-avail'), '836px', '956 - 24 - (40 + 8) - (40 + 8)');
   assert.equal(cluster.classList.contains('is-up'), false, 'the 440 px pill clears them');
   const input = s.g('wfc').querySelector('#wfc-input');
   input.value = 'Add Plan';
@@ -985,7 +988,7 @@ test('the dock fits the stage, and lifts the Auto-layout + zoom bars clear of it
   assert.equal(cluster.style.bottom, '');
   Object.defineProperty(s.g('wfv-stage'), 'clientWidth', { configurable: true, value: 600 });
   s.win.dispatchEvent(new s.win.Event('resize'));
-  assert.equal(shell.style.getPropertyValue('--wfc-avail'), '528px');
+  assert.equal(shell.style.getPropertyValue('--wfc-avail'), '480px');
 });
 
 test('the input grows with its text only while open: empty or collapsed it keeps the CSS 30 px', async () => {
@@ -1531,7 +1534,7 @@ test('the chips make the open chat taller: the bars above it re-lift at once', a
     // 34 px taller with a row of chips. jsdom has no layout and no ResizeObserver: only the dock's own place() re-lifts.
     const chips = () => b.g('wfc').querySelector('.wfc-files');
     b.g('wfc').getBoundingClientRect = () => (chips() && !chips().hidden ? rect(220, 466, 580, 411) : rect(220, 500, 580, 377));
-    return { stage, cluster, plus: b.g('wfv-add') };
+    return { stage, cluster, beside: [b.g('wfv-add')] };
   });
   const cluster = s.g('wfv-br');
   s.g('wfc').querySelector('#wfc-input').dispatchEvent(new s.win.Event('focus'));

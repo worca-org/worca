@@ -113,8 +113,11 @@ Flow cards express joins, choices and merges without code: **Task** (the run's r
 **AND**, **OR** and **Combine**.
 
 A selected card's toolbar sets its model, effort and await-all. **More** holds every other setting. The top bar
-keeps only Back, **Workflows ▾** (New canvas, Open…, Import…, Export…), the name, the Library toggle and **Save**.
-**Auto-layout** and the zoom menu sit bottom right. See [UI levels](ui-levels.md#workflows).
+keeps only Back, **Workflows ▾** (New canvas, Open…, Import…, Export…) and the name on the left; on the right, what
+the canvas holds and what is left to wire, then **Open** (the Library toggle) and **Save**. When the canvas is too narrow
+for both sides, those two fold into one **!** button that opens them as a menu, and the name gives way before anything
+overlaps. **Auto-layout** sits between **+** and the chat; the zoom menu and **How it works** sit bottom right. See
+[UI levels](ui-levels.md#workflows).
 
 ### The Library
 

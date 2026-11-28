@@ -27,7 +27,11 @@ test('every area shows one How it works button; nothing opens by itself (R-po-1,
     assert.equal(modal(doc), null, `${area}: no modal on a first visit`);
     const shown = visibleButtons(doc).map((b) => b.id);
     if (area === 'workspaces') assert.deepEqual(shown, [], 'Workspaces has its in-page button only');
-    else if (area === 'workflows') assert.deepEqual(shown, ['wfv-howto-btn'], 'Workflows shows its editor-bar button');
+    else if (area === 'workflows') {
+      assert.deepEqual(shown, ['wfv-howto-btn'], 'Workflows shows its own button');
+      assert.equal(doc.getElementById('wfv-howto-btn').parentElement.id, 'wfv-howto-slot', 'bottom right, in its bar');
+      assert.equal(doc.getElementById('wfv-howto-slot').previousElementSibling.querySelector('button').id, 'wfv-zoom', 'after the zoom menu');
+    }
     else assert.deepEqual(shown, ['howto-btn'], `${area}: exactly one button in the top bar`);
   }
   await show('getting-started');
