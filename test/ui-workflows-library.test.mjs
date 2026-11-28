@@ -586,6 +586,12 @@ test('the search box slides over the title (reduced motion: at once); folders an
   assert.doesNotMatch(src, /wfl-(crumbs?|crumb-home|trail|csep|up|search|gh|gn|group|archived)\b/);
 });
 
+test('a tab name keeps its descenders: the ellipsis box is taller than the tab\'s 13px line', () => {
+  const css = readStyleCss();
+  assert.match(css, /\n\.wfl-tname\{min-width:0;overflow:hidden;text-overflow:ellipsis;line-height:1\.4;\}/,
+    'overflow:hidden at .tab\'s line-height:1 clipped the g of Agents and the p of Scripts');
+});
+
 test('workflow row ⋯: Pin to Chat home / Unpin from Chat home calls togglePin with the row', async () => {
   const pinned = new Set(['wf_mine']);
   const s = await boot({}, { isPinned: (id) => pinned.has(id) });

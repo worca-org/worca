@@ -104,7 +104,7 @@ input.wfv-name:focus-visible{box-shadow:0 0 0 2px var(--ink);}
 .wfl-bar{display:flex;align-items:center;gap:6px;min-height:46px;flex:0 0 auto;padding:7px 8px 7px 10px;border-bottom:1px solid var(--line);}
 .wfl-seg{flex:1 1 auto;min-width:0;}
 .wfl-tab{flex:1 1 0;min-width:0;justify-content:center;}
-.wfl-tname{min-width:0;overflow:hidden;text-overflow:ellipsis;}
+.wfl-tname{min-width:0;overflow:hidden;text-overflow:ellipsis;line-height:1.4;}
 .wfl-tab .wfl-n{flex:0 0 auto;font-size:11px;color:var(--ink-2);}
 .wfl-new{flex:0 0 auto;}
 .wfl-new.is-slot{width:32px;height:32px;}
