@@ -1034,12 +1034,12 @@ test('History opens on Overview, one level: page title, status line, facts; the 
 });
 
 // The saved run's bar controls (.rd-bar-end, moved into the header's title row on the full page: barIntoHeader) are the
-// Running bar's in its order (Run after, the Resume split, Pause, Stop, then the terminal button). "Resume on <other engine>" lives in the
+// Running bar's in its order (Run after, the Resume split, Pause, Stop; the tool icons end the tab line instead). "Resume on <other engine>" lives in the
 // split's menu, never as a button of its own. The Details header
 // keeps only the PR controls (slice 2: its ⋯ joined the bar's), and the glance card carries no run control. Run 3 (D13): the bar ends
 // with its own ⋯ (Save as preset and Terminal fold into it; CSS hides the two). Run after stays a quick button beside
 // Resume and Stop, so ⋯ does not repeat it.
-const HD_BAR_ORDER = ['hd-save-preset', 'hd-after', 'rd-actions', 'hd-resume-split', 'hd-pause', 'hd-stop', 'tool-icons', 'hd-bar-more', 'run-menu-carriers'];
+const HD_BAR_ORDER = ['hd-save-preset', 'hd-after', 'rd-actions', 'hd-resume-split', 'hd-pause', 'hd-stop', 'hd-bar-more', 'run-menu-carriers'];
 // A step in flight: the one run model reads a running run with no step as Starting, which offers no Pause (slice 4).
 const STEPPING = { steps: [{ executionId: 'x:n_impl:1', nodeId: 'n_impl', ordinal: 1, cycle: 1, kind: 'cycle', status: 'start',
   startedAt: '2026-01-01T00:00:00Z' }], active: [{ nodeId: 'n_impl', executionId: 'x:n_impl:1' }] };
@@ -1057,6 +1057,7 @@ test('History bar per finished/paused status: Run after, Resume split only when 
       const hd = ctx.window.document.querySelector('#hist-detail .hd');
       const end = hd.querySelector('.hd-row1 .rd-bar-end');
       assert.deepEqual([...end.children].map((c) => HD_BAR_ORDER.find((k) => c.classList.contains(k)) || c.className), HD_BAR_ORDER);
+      assert.ok(ctx.window.document.querySelector('#hist-detail .hd-tabs > .tool-icons'), 'the tool icons are on the tab line');
       const after = end.querySelector('.hd-after');
       assert.equal(after.hidden, false, 'a saved run can always be waited for');
       assert.equal(after.dataset.minLevel, 'advanced');

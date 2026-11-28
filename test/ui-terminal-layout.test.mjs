@@ -14,12 +14,12 @@ test('opening the pane moves the toasts left of it, and the page content with th
   assert.match(css, /\.term-pane\{position:fixed;top:0;right:0;bottom:0;width:var\(--term-w,460px\);z-index:39;/);
 });
 
-test('the icon strip lives in the run bars; the project title row keeps its terminal opener', () => {
+test('the icon strip ends the run tab lines; the project title row keeps its terminal opener', () => {
   const html = readIndexHtml();
   assert.equal(html.match(/class="term-opener btn"/g)?.length, 1);
   assert.ok(html.indexOf('class="term-opener', html.indexOf('<h1 class="pd-title"></h1>')) - html.indexOf('<h1 class="pd-title"></h1>') < 400);
   assert.equal(html.match(/<span class="tool-icons" data-tool-icons role="group" aria-label="Tools"><\/span>/g)?.length, 2);
-  for (const anchor of ['<span class="rd-btn-label">Stop</span>', '<span class="hd-btn-label">Stop</span>']) {
+  for (const anchor of ['<div class="rd-tabs" role="tablist">', '<div class="hd-tabs" role="tablist">']) {
     const at = html.indexOf(anchor);
     assert.ok(at > 0 && html.indexOf('data-tool-icons', at) - at < 400, anchor);
   }
@@ -97,6 +97,7 @@ test('every .tov class the Overview builds has a rule; the chevron has its reduc
   for (const c of classes) assert.match(pane, new RegExp(`\\.${c}(?![a-z-])[^{]*\\{`), `.${c} has a rule`);
   assert.ok(css.includes('.tov{'), 'the part is in the shipped stylesheet');
   assert.match(pane, /@media \(prefers-reduced-motion: reduce\)\{ \.tov-chev\{transition:none\} \}/);
+  assert.ok(pane.includes('@media (max-width:760px){ :is(.rd-tabs,.hd-tabs) > .tool-icons{display:none;} }'), 'narrow screens hide the tab line\'s icons');
   const rules = [...pane.matchAll(/([^{}]*\.tov[^{}]*)\{([^}]*)\}/g)];
   assert.ok(rules.length > 20);
   for (const [, sel, body] of rules) {
