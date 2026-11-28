@@ -211,8 +211,9 @@ A finished run's page offers **Create PR**. In the dialog you can edit the title
 description as soon as the dialog opens.
 
 Worca then pushes the branch and opens the PR. On GitHub it uses the GitHub CLI (`gh`). On
-[Azure DevOps](azure-devops.md) it uses a personal access token, and on [Bitbucket Cloud](bitbucket.md) an access
-or API token. A run started from a GitHub issue closes the issue on merge, and a workspace run opens one linked PR
+[Azure DevOps](azure-devops.md) it uses a personal access token, on [Bitbucket Cloud](bitbucket.md) an access
+or API token, and on [Gitea, Forgejo](gitea.md) and [Codeberg](codeberg.md) that host's token. A run started
+from a GitHub issue closes the issue on merge, and a workspace run opens one linked PR
 per changed repo. Afterwards the button becomes **View PR**. A workspace run's button reads **View PRs** and lists each
 repository's PR; in the dialog, each repository row shows its own **View PR** link once its PR is open.
 
@@ -247,8 +248,8 @@ each push, or turns a placeholder into findings) counts as a new comment and is 
 anyone not listed, and comments hidden on GitHub, never start a run. If the check can't run (the helper model is
 unreachable), Worca tries again ten minutes later.
 
-The reviewer list takes GitHub login names; on Bitbucket, list the account UUID (`{…}`). Azure DevOps already
-counts every reviewer.
+The reviewer list takes login names on GitHub, Gitea, Forgejo and Codeberg; on Bitbucket, list the account UUID
+(`{…}`). Azure DevOps already counts every reviewer.
 
 After a run, Worca also checks whether the branch still merges into its base. If it does, you get **Update
 branch**. If it conflicts, you get **Resolve in a pipeline** or **Resolve in a terminal**.

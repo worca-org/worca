@@ -61,6 +61,8 @@ Start with the [project README](../README.md) for what Worca is and a quick star
 - [Ticket updates](ticket-updates.md) — what happens to a ticket when a run that writes back finishes (Labs)
 - [Azure DevOps](azure-devops.md) — Ship-it, clone, sync, merge tracking and the Boards source on `dev.azure.com`
 - [Bitbucket](bitbucket.md) — Ship-it, clone, sync, Watch PR and merge tracking on bitbucket.org
+- [Gitea and Forgejo](gitea.md) — the same on your own Gitea or Forgejo instances, one token per host
+- [Codeberg](codeberg.md) — the same on codeberg.org
 
 ## Governance and costs
 
