@@ -65,7 +65,7 @@ const SERVERS = [
     description: 'Datadog', fields: [], inSets: [], tools: null, pluginDisabled: false, inClaudeConfig: false, retired: 'acme/platform' },
 ];
 
-function mount({ assignments = {}, over = {}, answer = async () => true, notify = null } = {}) {
+function mount({ assignments = {}, over = {}, answer = async () => true, notify = null, howto = null } = {}) {
   const calls = [];
   const nav = [];
   const confirms = [];
@@ -86,7 +86,7 @@ function mount({ assignments = {}, over = {}, answer = async () => true, notify 
   };
   const host = doc.createElement('section');
   doc.body.replaceChildren(host);
-  const ctl = createMcpView({ host, api, navigate: (h) => nav.push(h), confirm: async (o) => { confirms.push(o); return answer(o); }, modal, doc, now: () => NOW, notify });
+  const ctl = createMcpView({ host, api, navigate: (h) => nav.push(h), confirm: async (o) => { confirms.push(o); return answer(o); }, modal, doc, now: () => NOW, notify, howto });
   return { host, ctl, calls, nav, confirms, modal, writes: () => calls.filter(([m]) => m !== 'GET') };
 }
 const click = (el) => el.dispatchEvent(new doc.defaultView.Event('click', { bubbles: true }));
@@ -99,6 +99,24 @@ const pickMore = (scope, label) => {
   assert.ok(item, `the ⋯ menu offers ${label}`);
   click(item);
 };
+
+test('the page\'s How it works button ends the head on every tab, the same element through every repaint', async () => {
+  const howto = doc.createElement('button');
+  const { host, ctl } = mount({ howto });
+  for (const param of ['', 'servers', 'skills', 'sets/billing']) {
+    await ctl.show(param);
+    const head = host.querySelector('.mk-head');
+    assert.deepEqual([...head.children].map((n) => n.className), ['tabs mk-tabs', 'mk-head-actions', 'howto-slot'], param);
+    assert.equal(head.lastElementChild.firstElementChild, howto, `${param}: the one button, moved into the new head`);
+  }
+  howto.focus();
+  assert.equal(doc.activeElement, howto);
+  await ctl.show('servers');
+  assert.equal(doc.activeElement, howto, 'a repaint moves the button to the new head and keeps the focus on it');
+  const bare = mount();
+  await bare.ctl.show('');
+  assert.equal(bare.host.querySelector('.mk-head').children.length, 2, 'none given: the head is as before');
+});
 
 test('set list: General first, user sets, Team sets; the warning dot; Used by lines; a greyed Team set', async () => {
   const { host, ctl } = mount();

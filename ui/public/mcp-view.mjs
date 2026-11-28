@@ -139,7 +139,8 @@ export function collectFieldInputs(root) {
 }
 
 // ── the Connectors page controller ──────────────────────────────────────────────────────────────────
-export function createMcpView({ host, api, navigate, confirm, modal, sheet = null, doc = globalThis.document, now = () => Date.now(), notify = null }) {
+/** `howto`: the page's How it works button (how-it-works.mjs's); every paint puts the same element at the head's end. */
+export function createMcpView({ host, api, navigate, confirm, modal, sheet = null, doc = globalThis.document, now = () => Date.now(), notify = null, howto = null }) {
   const st = { view: 'sets', setId: 'general', sets: null, set: null, servers: null, skills: null, testing: new Set(), msg: '', msgKind: '',
     md: new Map(),   // SKILL.md: the text (or error) per skill id
     open: new Map(), loadErr: null,   // a server row's fold (`set|server` → open?); the list that could not be read
@@ -315,14 +316,14 @@ export function createMcpView({ host, api, navigate, confirm, modal, sheet = nul
     msg.setAttribute('aria-live', 'polite');
     const body = st.view === 'sets' ? h(doc, 'div', 'cx-sets-page mk-browse') : catalogBody(st.view);
     if (st.view === 'sets') body.append(renderSetRail(doc, { sets: st.sets || [], setId: st.set ? st.set.set.id : st.setId, q: st.filters.sets.q }), setDetail());
-    const head = renderHead(doc, { tabs: renderTabs(doc, { view: st.view, counts: counts() }), actions: headActions() });
+    const head = renderHead(doc, { tabs: renderTabs(doc, { view: st.view, counts: counts() }), actions: headActions(), howto });
     host.replaceChildren(head, strip, msg, body);
     painted = where;
     const again = keep && keep.key && [...host.querySelectorAll(FOCUSABLE_KEYED)].find((x) => keyOf(x) === keep.key);
     if (again) {
       again.focus();
       if (keep.from != null && again.matches('input[type="text"], input[type="search"]')) { again.value = keep.value; again.setSelectionRange(keep.from, keep.to); }
-    }
+    } else if (howto && a === howto) howto.focus();   // the same button, moved to the new head: its focus moves with it
     if (stripRenderer) stripRenderer(strip);
   }
 

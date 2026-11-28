@@ -48,9 +48,11 @@ function applyPost(state, body) {
  * @param {boolean} [o.onboardingDown]     /api/onboarding answers 500
  * @param {string[]} [o.flags]             feature flags on in the shell (<html data-flags>)
  * @param {string}  [o.level]              interface mode (<html data-level>); none = expert
+ * @param {(url:string, opts:object)=>object|null} [o.answer]  a body for a request before the defaults (null: the defaults)
+ * @param {string}  [o.hash]               the address the app boots on (a reload there), without the '#'
  */
-export async function bootApp({ trackDom, seen = false, guidesSeen = {}, hidden = false, workspaces = [], onboardingDown = false, flags = [], level = '' } = {}) {
-  const dom = trackDom(new JSDOM(readIndexHtml(), { url: 'http://localhost:4317/' }));
+export async function bootApp({ trackDom, seen = false, guidesSeen = {}, hidden = false, workspaces = [], onboardingDown = false, flags = [], level = '', answer = null, hash = '' } = {}) {
+  const dom = trackDom(new JSDOM(readIndexHtml(), { url: `http://localhost:4317/${hash ? `#${hash}` : ''}` }));
   const { window } = dom;
   const state = { seen, hidden, guidesSeen: structuredClone(guidesSeen) };
   const posts = [];
@@ -65,6 +67,8 @@ export async function bootApp({ trackDom, seen = false, guidesSeen = {}, hidden 
   window.fetch = (url, opts = {}) => {
     const u = String(url);
     requests.push({ url: u, method: opts.method || 'GET' });
+    const own = answer?.(u, opts);
+    if (own) return json(200, own);
     if (u.includes('/api/onboarding')) {
       if (onboardingDown) return json(500, { error: 'down' });
       if (opts.method === 'POST') {

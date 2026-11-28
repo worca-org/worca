@@ -223,10 +223,11 @@ test('Settings › Show again brings every How it works mark back, Workspaces in
   const seen = { chat: true, runs: true, stats: true, workspaces: true };
   const { doc, window, posts } = await boot({ onboarding: status(['claude'], { welcomeSeen: true, hidden: true, guidesSeen: seen, workspaceGuideSeen: true }) });
   const markOf = (id) => doc.getElementById(id)?.dataset.new;
+  const runsMark = () => doc.querySelector('[data-howto-slot="runs"] > .page-howto')?.dataset.new;
   window.location.hash = 'runs';
   window.dispatchEvent(new window.Event('hashchange'));
   await settle();
-  assert.equal(markOf('howto-btn'), 'false', 'precondition: Runs is seen');
+  assert.equal(runsMark(), 'false', 'precondition: Runs is seen');
   window.location.hash = 'workspaces';
   window.dispatchEvent(new window.Event('hashchange'));
   await settle();
@@ -242,7 +243,7 @@ test('Settings › Show again brings every How it works mark back, Workspaces in
   window.location.hash = 'runs';
   window.dispatchEvent(new window.Event('hashchange'));
   await settle();
-  assert.equal(markOf('howto-btn'), 'true', 'Runs mark is back');
+  assert.equal(runsMark(), 'true', 'Runs mark is back');
 });
 
 test('Connect Claude Code re-checks on open: a page that loaded while signed out does not keep saying so', async () => {

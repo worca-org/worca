@@ -30,12 +30,18 @@ export function renderTabs(doc, { view, counts = {} }) {
   return nav;
 }
 
-/** div.mk-head: the tabs, then the tab's own actions. */
-export function renderHead(doc, { tabs, actions = [] }) {
+/** div.mk-head: the tabs, then the tab's own actions, then `howto` (the page's How it works button) in the slot
+ *  span Marketplace's head ends in. */
+export function renderHead(doc, { tabs, actions = [], howto = null }) {
   const head = h(doc, 'div', 'mk-head');
   const acts = h(doc, 'div', 'mk-head-actions');
   acts.append(...actions);
   head.append(tabs, acts);
+  if (howto) {
+    const slot = h(doc, 'span', 'howto-slot');
+    slot.append(howto);
+    head.append(slot);
+  }
   return head;
 }
 

@@ -25,7 +25,7 @@ const MAX_PAGE = 200;
 
 export function mountChatsColumn({ host, fetch: fetchImpl, storage, win, now = () => Date.now(), level = () => 'simple',
   scopeName = () => '', currentId = () => null, onOpen, onRename, onDelete, onHelp = () => {},
-  flagOn = () => false, confirm = async () => false, onChatsGone = () => {}, onChatsArchived = () => {}, requestRefresh = null, onThreads = () => {}, newButton = null }) {
+  flagOn = () => false, confirm = async () => false, onChatsGone = () => {}, onChatsArchived = () => {}, requestRefresh = null, onThreads = () => {}, newButton = null, howtoButton = null }) {
   const doc = host.ownerDocument;
   const el = (tag, cls, text) => { const n = doc.createElement(tag); if (cls) n.className = cls; if (text != null) n.textContent = text; return n; };
   // focusKey uses list-dom.mjs's navKey form (`row:chat:ID`, `sec:older`), as runsUi does.
@@ -44,9 +44,10 @@ export function mountChatsColumn({ host, fetch: fetchImpl, storage, win, now = (
   viewBtn.setAttribute('aria-haspopup', 'menu');
   viewBtn.setAttribute('aria-expanded', 'false');
   viewBtn.append(icon(doc, 'chevron-down', 14));
-  // New chat ends the list's head, after View, as New run does the Runs list's (`newButton`: the panel's own button).
+  // New chat comes after View, as New run does in the Runs list's head (`newButton`: the panel's own button); the page's
+  // How it works button ends the head (`howtoButton`: how-it-works.mjs's, named for Chat or Design as the route goes).
   const title = el('h2', 'runs-head-title', 'Chats');
-  head.append(title, viewBtn, ...(newButton ? [newButton] : []));
+  head.append(title, viewBtn, ...(newButton ? [newButton] : []), ...(howtoButton ? [howtoButton] : []));
   const chip = el('div', 'runs-view-chip');
   chip.id = 'chats-view-chip';
   chip.hidden = true;

@@ -42408,6 +42408,8 @@ const howItWorks = createHowItWorks({
   startTour: startGuide,
 });
 howItWorks.mount();
+// The Chats list's head is built by the panel (chats-column.mjs): it asks for its button when it mounts.
+chatDeps.howtoButton = () => howItWorks.button('chat');
 const navLinks = $$('.nav button[data-nav], #acct-settings');
 // workflows took over composer, agents, scripts and agent-create (see MOVED_ROUTES); workspaces + workspace-create are appended.
 // workspace-create is in the array (so deep-links resolve) but has no nav link.
@@ -43170,6 +43172,7 @@ function mcpTab() {
       modal: connectorLayers.modal,
       sheet: connectorLayers.sheet,
       notify: (o) => notify(o),
+      howto: howItWorks.button('connectors', { size: 'md' }),
     });
   }
   return mcpViewCtl;
@@ -43225,9 +43228,13 @@ function paintNav(name, param) {
   });
   paintTopnavTitle(navSection === 'design' ? 'design' : name);
 }
-/** A design chat's design mounted or left after the route painted (the chat loads first): light the row again. */
+/** A design chat's design mounted or left after the route painted (the chat loads first): light the row again, and
+ *  name How it works for it, as showView does. Only while Chat shows, so the route How it works holds is Chat's. */
 function repaintChatNav() {
-  if (currentShownView === 'chat') paintNav('chat', parseHash()[1]);
+  if (currentShownView !== 'chat') return;
+  const param = parseHash()[1];
+  paintNav('chat', param);
+  howItWorks.syncRoute(navSectionOf('chat', param) === 'design' ? 'design' : 'chat');
 }
 
 // Nav clicks only update the hash; the single hashchange listener drives

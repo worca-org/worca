@@ -166,10 +166,15 @@ for targets inside an open dialog.
 
 ## How it works
 
-Every main area has a **How it works** button in its top bar. It opens a walkthrough of three to five
-screens that explains the area with made-up examples; opening it never changes anything in your
-workspace or projects.
+Every main area has a **How it works** button: a small **?** at the right end of the page's own top row
+(the intro line, the tabs, or the list header), after the page's main button. Its tooltip names the page,
+for example "How Runs works". It opens a walkthrough of three to five screens that explains the area with
+made-up examples; opening it never changes anything in your workspace or projects.
 
+- The **?** is on an area's main screen. A single project's or workspace's page does not carry it. Chat and
+  Design share the chats list, so its **?** opens the guide of the one you are on. In the Workflows editor
+  it sits bottom right, after the zoom menu.
+- The **?** key is something else: it opens the keyboard shortcuts.
 - The first time you visit an area, its button carries a **new** mark. The mark goes away once you open
   that walkthrough, and it stays gone on every other tab and after a reload (the server remembers which
   areas you have opened).

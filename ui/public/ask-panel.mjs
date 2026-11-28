@@ -2802,7 +2802,10 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     el.listNew = newChatPlus('New', { list: true });   // New chat at the end of the chats list's head (the head's own shows only while the list is folded)
     el.listNewName = el.listNew.getAttribute('aria-label');
     el.listNew.classList.add('chat-list-new');
-    chatsCol = mountChatsColumn({ host: el.history, newButton: el.listNew, fetch, storage, win, now, level: () => currentLevel(doc),
+    // The page's How it works button (app.js: chatDeps.howtoButton, one per call) ends the list's head. The chat's own
+    // head carries a second one while the list is folded (a phone, a folded column), as it does New chat: paintHistory.
+    el.listHowto = chatDep('howtoButton', doc) || null;
+    chatsCol = mountChatsColumn({ host: el.history, newButton: el.listNew, howtoButton: el.listHowto, fetch, storage, win, now, level: () => currentLevel(doc),
       scopeName: (sc) => chatDep('scopeName', sc) || '', currentId: () => (typeof st.wantThread === 'string' ? st.wantThread : st.threadId),
       onOpen: (id) => {
         const overlay = historyOverlayOpen();
@@ -2863,6 +2866,10 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     el.head.appendChild(Object.assign(make('span', 'tool-icons chat-tool-icons'), { role: 'group' }));
     el.head.lastChild.setAttribute('data-tool-icons', '');
     el.head.lastChild.setAttribute('aria-label', 'Tools');
+    // How it works is the last thing on the head's row, after the tools, as it ends the list's head.
+    el.headHowto = chatDep('howtoButton', doc) || null;
+    if (el.headHowto) el.head.appendChild(el.headHowto);
+    paintHistory();
     updateMeters();
     loadHistory();                                // hidden (a boot on another page): stale until Chat shows
   }
@@ -2939,6 +2946,11 @@ export function createAskPanel({ doc, win, fetch, sendWs, confirm, getPageContex
     if (el.historyBtn) el.historyBtn.setAttribute('aria-pressed', String(open));
     if (el.sideThread) el.sideThread.setAttribute('aria-expanded', String(open && st.host === 'dock'));
     if (el.scrim) el.scrim.hidden = !(open && overlayMode());
+    // How it works belongs to the Chat page: beside another page (the dock) that page has its own. On the Chat page
+    // it is the list's while the list shows, the head's while it is folded.
+    const docked = st.host === 'dock';
+    if (el.listHowto) el.listHowto.hidden = docked;
+    if (el.headHowto) el.headHowto.hidden = docked || open;
   }
 
   /** Refresh the Chats column. While Chat is hidden it only marks the list stale; the next show fetches it. */

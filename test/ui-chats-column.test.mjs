@@ -68,6 +68,44 @@ const key = (doc, target, init) => target.dispatchEvent(new doc.defaultView.Keyb
 const toastTitles = (doc) => [...doc.querySelectorAll('.toast .tt')].map((n) => n.textContent);
 const listGets = (rec) => rec.calls.filter((c) => c.startsWith('GET /api/ask/threads?'));
 
+// app.js hands the page's How it works button over as chatDeps.howtoButton (how-it-works.mjs makes one per call).
+const howtoDeps = (made) => ({ chatDeps: { howtoButton: (d) => { const b = d.createElement('button'); b.className = 'page-howto'; b.textContent = '?'; made.push(b); return b; } } });
+
+test('the page\'s How it works button ends the list\'s head, after New', async () => {
+  const made = [];
+  const { col } = await bootOn({ deps: howtoDeps(made) });
+  const head = col.querySelector('.runs-head');
+  assert.deepEqual([...head.children].map((n) => n.textContent.trim()), ['Chats', 'View', 'New', '?']);
+  assert.equal(head.lastElementChild, made[0], 'the far corner');
+  assert.ok(made[0].previousElementSibling.matches('[data-ask-new-btn].chat-list-new'), 'New is just before it');
+  assert.equal(made[0].hidden, false);
+});
+
+test('with the list folded the chat\'s own head carries How it works as its last control, after the meter and the tools; beside another page neither shows', async () => {
+  const made = [];
+  const { ctx, doc } = await bootOn({ deps: howtoDeps(made) });
+  assert.equal(made.length, 2, 'one for the list, one for the chat head');
+  const [inList, inHead] = made;
+  const chatHead = doc.querySelector('.chat-head');
+  assert.equal(inHead.parentElement, chatHead);
+  assert.equal(chatHead.lastElementChild, inHead, 'the far corner: the last thing on the row, as in the list');
+  assert.ok(inHead.previousElementSibling.matches('[data-tool-icons]'), 'after the tool icons, which come after the meter');
+  const page = doc.querySelector('.chat-page');
+  assert.equal(page.dataset.history, 'open');
+  assert.deepEqual([inList.hidden, inHead.hidden], [false, true], 'list open: the list\'s own, not a second one in the head');
+  doc.querySelector('.chat-history-toggle').click();
+  assert.equal(page.dataset.history, 'closed');
+  assert.equal(inHead.hidden, false, 'list folded: the head carries it, so the page still has one');
+  doc.querySelector('.chat-history-toggle').click();
+  assert.equal(inHead.hidden, true);
+  ctx.panel.setHost('dock');
+  assert.deepEqual([inList.hidden, inHead.hidden], [true, true], 'Ask worca beside a page: that page has its own');
+  ctx.panel.setHost('page');
+  assert.equal(inList.hidden, false);
+  assert.equal(inHead.hidden, page.dataset.history === 'open');
+  assert.equal(chatHead.lastElementChild, inHead, 'still the last after the trip beside a page');
+});
+
 test('head is Chats, View, New (as Runs, View, New); Pinned, then the Runs day sections; no search or trash', async () => {
   const { col } = await bootOn();
   assert.deepEqual([...col.querySelector('.runs-head').children].map((n) => n.textContent.trim()), ['Chats', 'View', 'New']);

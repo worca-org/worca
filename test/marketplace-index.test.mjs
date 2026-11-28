@@ -49,3 +49,22 @@ test('P7 providers: openAddMarketplace opens the Add dialog and answers undefine
   assert.equal(doc.querySelector('#mk-dialog li[aria-current="step"]').textContent, 'Reading plugins…');
   doc.querySelector('#mk-dialog .mk-dlg-close').click();
 });
+
+test('the head ends in the How it works slot: on every tab, with no marketplace, and through every repaint', async () => {
+  for (const routes of [{}, { 'GET /api/marketplaces': { marketplaces: [] } }]) {
+    const { doc, page } = pageHarness({ trackDom, mount: mountMarketplace, routes });
+    const head = doc.querySelector('#mk-root > .mk-head');
+    assert.deepEqual([...head.children].map((n) => n.className), ['tabs mk-tabs', 'mk-head-actions', 'howto-slot']);
+    const slot = head.lastElementChild;
+    assert.ok(slot.matches('span[data-howto-slot="marketplace"][data-howto-size="md"]'), 'the controller fills it with the 32px button');
+    const btn = slot.appendChild(doc.createElement('button'));   // what how-it-works.mjs's mount() does
+    await page.load();
+    for (const tab of ['installed', 'marketplaces', 'browse']) {
+      page.setTab(tab);
+      assert.equal(head.lastElementChild, slot, `${tab}: still the last thing on the row`);
+      assert.equal(slot.firstElementChild, btn, `${tab}: its button survives the repaint`);
+    }
+    await page.load({ refresh: true });
+    assert.equal(doc.querySelector('#mk-root > .mk-head').lastElementChild.firstElementChild, btn, 'and a refresh');
+  }
+});
