@@ -113,6 +113,36 @@ test('happy path: frames ordered, session stored immediately, row + totals persi
   assert.deepEqual(done.threadTotals, totals);
 });
 
+test('hands-free <spoken> block: the stored row and ask-done carry the clean text; ask-spoken streams before the first ask-delta', async () => {
+  const s = seed();
+  const raw = '<spoken>Two runs failed.</spoken>\n\nTwo runs **failed** today.';
+  const delta = (text) => push(opts0.onEvent, { type: 'stream_event', event: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text } }, parent_tool_use_id: null });
+  let opts0 = null;
+  const { turn, frames } = makeTurn(s, {}, {
+    runClaudeImpl: async (opts) => {
+      opts0 = opts;
+      opts.onEvent({ type: 'session', sessionId: 'sess-1' });
+      push(opts.onEvent, { type: 'stream_event', event: { type: 'message_start', message: { id: 'msg_1', role: 'assistant', content: [], usage: { input_tokens: 1, output_tokens: 1 } } }, parent_tool_use_id: null });
+      delta('<spoken>Two runs ');
+      delta('failed.</spoken>\n\nTwo runs **failed** today.');
+      say(opts.onEvent, 'msg_1', raw);
+      push(opts.onEvent, RESULT());
+      return { text: raw, exitCode: 0 };
+    },
+  });
+  const out = await turn.run();
+  assert.equal(out.status, 'done');
+  const row = getMessage(s.asst.id);
+  assert.equal(row.text, 'Two runs **failed** today.');
+  assert.equal(frames.at(-1).type, 'ask-done');
+  assert.equal(frames.at(-1).text, row.text);
+  const types = frames.map((f) => f.type);
+  assert.ok(types.includes('ask-spoken'), types.join(','));
+  assert.ok(types.indexOf('ask-spoken') < types.indexOf('ask-delta'), types.join(','));
+  assert.equal(frames.filter((f) => f.type === 'ask-spoken').map((f) => f.text).join(''), 'Two runs failed.');
+  assert.equal(frames.filter((f) => f.type === 'ask-delta').map((f) => f.text).join(''), row.text);
+});
+
 test('session: the init frame\'s session event does not store the id a second time', async () => {
   const s = seed();
   const writes = [];
@@ -711,6 +741,20 @@ test('a classified error persists a human notice (errorClass + detail, on the as
       assert.ok(Array.isArray(last.blocks), 'ask-error carries the terminal blocks');
       assert.ok(last.blocks.some((b) => b && b.kind === 'notice' && b.errorClass === 'model'),
         'the classified notice is among the frame blocks');
+    } },
+    { name: 'a Claude Code that is not installed: the notice says so, not "endpoint unreachable"', run: async () => {
+      const s = seed();
+      const why = 'Claude Code is not installed: /nowhere/claude was not found. Install it, or set WORCA_CLAUDE_BIN to its path.';
+      const raw = '/nowhere/claude error: spawn /nowhere/claude ENOENT';
+      const { turn, frames } = makeTurn(s, {}, {
+        runClaudeImpl: async () => { throw Object.assign(new Error(raw), { errorClass: 'network', notInstalled: why }); },
+      });
+      await turn.run();
+      assert.equal(frames.at(-1).errorClass, 'network', 'the class is unchanged');
+      const notice = getMessage(s.asst.id).blocks.find((b) => b && b.kind === 'notice' && b.errorClass === 'network');
+      assert.equal(notice.text, why);
+      assert.equal(notice.claudeSetup, true, 'the notice links Connect Claude Code');
+      assert.equal(notice.detail, raw);
     } },
     { name: 'an unclassified error persists NO notice block (raw message stays the only evidence)', run: async () => {
       const s = seed();
@@ -1983,6 +2027,45 @@ test('agent mode off, or relay mode: the bridge is never asked and the mcp json 
     await turn.run();
     assert.equal(called, 0);
     assert.ok(!('WORCA_ASK_COMMANDS' in cfg.mcpServers.worca.env));
+  }
+});
+
+// ── Tool panel tabs (issue 1064 slice 3) ──────────────────────────────────────────────────────────────
+test('tab tools: the bridge URL rides the mcp json, the token only spawnEnv; disposed when the turn ends', async () => {
+  const s = seed();
+  let raw = null; let spawnEnv = null; const asked = []; let disposed = 0;
+  const { turn } = makeTurn(s, {}, {
+    tabsBridge: (o) => { asked.push(o); return { url: 'http://127.0.0.1:4317/api/ask/tabs', token: 'TOKEN-1064-tabs', dispose: () => { disposed += 1; } }; },
+    runClaudeImpl: async (opts) => {
+      raw = readFileSync(opts.mcpConfigPath, 'utf8');
+      spawnEnv = opts.spawnEnv;
+      throw Object.assign(new Error('claude exited with code 1: boom'), { errorClass: 'api' });
+    },
+  });
+  await turn.run();
+  assert.deepEqual(asked, [{ threadId: s.thread.id }]);
+  assert.equal(JSON.parse(JSON.parse(raw).mcpServers.worca.env.WORCA_ASK_TABS).url, 'http://127.0.0.1:4317/api/ask/tabs');
+  assert.ok(!raw.includes('TOKEN-1064-tabs'), 'the token never lands on disk');
+  assert.equal(spawnEnv.ASK_TABS_TOKEN, 'TOKEN-1064-tabs');
+  assert.equal(disposed, 1, 'the token ends with the turn');
+  assert.equal(turn.tabsBridge, null);
+});
+
+test('tab tools: no bridge dep, or relay mode: the bridge is never asked and the mcp json has no tabs key', async () => {
+  for (const deps of [{}, { agentRelay: () => ({ url: 'http://127.0.0.1:1/api/ask/relay', token: 'r', dispose() {} }) }]) {
+    const s = seed();
+    let cfg = null; let called = 0;
+    const { turn } = makeTurn(s, {}, {
+      ...deps,
+      ...('agentRelay' in deps ? { tabsBridge: () => { called += 1; return { url: 'u', token: 't', dispose() {} }; } } : {}),
+      runClaudeImpl: async (opts) => {
+        cfg = JSON.parse(readFileSync(opts.mcpConfigPath, 'utf8'));
+        throw Object.assign(new Error('claude exited with code 1: boom'), { errorClass: 'api' });
+      },
+    });
+    await turn.run();
+    assert.equal(called, 0);
+    assert.ok(!('WORCA_ASK_TABS' in cfg.mcpServers.worca.env));
   }
 });
 

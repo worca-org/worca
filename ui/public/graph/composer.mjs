@@ -22,7 +22,7 @@ import { hitRoute } from '../../../src/shared/graph/route.mjs';
 import { PARAMS_PORT, SESSION_ID_RE } from '../../../src/shared/graph/constants.mjs';
 import { canWire, newNode, newWire, normalizeTemplate, serializeTemplate }
   from '../../../src/shared/graph/template.mjs';
-import { validateGraph, CANVAS_WARNING_CODES } from '../../../src/shared/graph/validate.mjs';
+import { validateGraph, shellWarningIssue, CANVAS_WARNING_CODES } from '../../../src/shared/graph/validate.mjs';
 import { autoLayout } from '../../../src/shared/graph/layout.mjs';
 import { applyCanvasOps, newRealErrors } from '../../../src/shared/graph/canvas-ops.mjs';
 import { mintId, normalizeSessions } from '../../../src/shared/graph/template.mjs';
@@ -31,6 +31,8 @@ import { sessionsOf, sessionCandidates, sessionLegal, sessionIdOf, pruneSessions
 import { LABEL_H } from '../../../src/shared/graph/geometry.mjs';
 import { flagOn } from '../flags.mjs';
 import { SESSION_SUBAGENTS_VERIFIED } from '../../../src/shared/engine-switch.mjs';
+import { pickEffortsOn } from '../../../src/shared/connections.mjs';
+import { columnsValue, nodeModelPatch } from '../models/model-columns.mjs';
 
 export const UNDO_LIMIT = 50;
 /** The ONE reserved workflow id: the server prepends this built-in to
@@ -57,7 +59,7 @@ export const isBuiltinWorkflow = (w) => Boolean(w) && (isReservedWorkflowId(w.id
 const isTyping = (t) => !!t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable);
 
 export function createComposer(hostEls, { doc = globalThis.document, api, raf = null, viewport = null, storage = null, portsFn, highlight = null, notify = null, allLevels = false, insetRight: insetRightOpt = null,
-  sessionVerified = SESSION_SUBAGENTS_VERIFIED } = {}) {
+  sessionVerified = SESSION_SUBAGENTS_VERIFIED, lintDelayMs } = {}) {
   const win = doc.defaultView || globalThis;
   const schedule = raf || ((fn) => win.requestAnimationFrame(fn));
   const stats = { rectReads: 0, frames: 0, pointerMoves: 0, validations: 0 };
@@ -256,10 +258,7 @@ export function createComposer(hostEls, { doc = globalThis.document, api, raf = 
       hostEls.saveBtn.title = tip;
     }
     if (hostEls.saveWrap) hostEls.saveWrap.title = tip;
-    if (hostEls.saveReason) {
-      hostEls.saveReason.textContent = tip;
-      hostEls.saveReason.hidden = !tip;
-    }
+    if (hostEls.saveReason) hostEls.saveReason.textContent = tip;   // stays hidden: Save's aria-describedby reads it
     if (hostEls.errors) {
       const pristine = isPristine();
       const quiet = !real && todo > 0 && !pristine;
@@ -833,12 +832,14 @@ export function createComposer(hostEls, { doc = globalThis.document, api, raf = 
   let models = [];
   let efforts = [];
   let subagentModels = [];
+  let defaultEngine = 'claude';   // the harness a step set to inherit (or a soft pick) runs on: the run's default
   let modelsSet = false;          // an explicit setModels() wins over the mount fetch
 
-  function applyModels({ models: m = [], efforts: e = [], subagentModels: sm = [] } = {}) {
+  function applyModels({ models: m = [], efforts: e = [], subagentModels: sm = [], defaultEngine: de = 'claude' } = {}) {
     models = Array.isArray(m) ? m : [];
     efforts = Array.isArray(e) ? e : [];
     subagentModels = Array.isArray(sm) ? sm : [];
+    defaultEngine = typeof de === 'string' && de ? de : 'claude';
     modelById = new Map(models.filter(Boolean).map((m) => [m.id, m.label || m.id]));
     paintInspector();
     // /api/config lands AFTER the first loadTemplate: repaint so the label rows show model labels, not raw ids.
@@ -851,7 +852,26 @@ export function createComposer(hostEls, { doc = globalThis.document, api, raf = 
   // is the only place that sees both sides of the swap. With no `highlight`
   // injected the hook is null and renderParamsForm keeps P1b's plain textarea.
   const insEditors = [];
-  const insEditorFor = paramEditorHook({ doc, highlight, editors: insEditors });
+  const insEditorFor = paramEditorHook({ doc, highlight, editors: insEditors, onLint: onInsLint, onExpandedChange: onInsExpanded, lintDelayMs });
+  const insExpanded = () => insEditors.some((e) => e.isExpanded());
+  // A repaint asked for while a field is expanded waits: it would destroy the field the large window mirrors into.
+  let insStale = false;
+  function onInsExpanded(open) {
+    if (!open && insStale) paintInspector();
+  }
+  /** A Command editor's lint changed. Move that card's shell-warning mark NOW, from the open editors' counts, without
+   *  waiting for the field to commit; the next validateGraph recomputes it from the stored config. Only the canvas and
+   *  the chrome repaint — never the inspector, whose field is being typed in. */
+  function onInsLint() {
+    const panel = hostEls.insBody && hostEls.insBody.querySelector('.ins-panel[data-node-id]');
+    const nodeId = panel && panel.dataset.nodeId;
+    if (!nodeId) return;
+    const count = insEditors.reduce((sum, ed) => sum + ed.getWarnings().length, 0);
+    const issue = shellWarningIssue(nodeId, count);
+    lastReport = { ...lastReport, warnings: [...lastReport.warnings.filter((w) => !(w.code === 'V33' && w.nodeId === nodeId)), ...(issue ? [issue] : [])] };
+    view.render(tpl, { selection: sel, report: shownReport() });
+    paintChrome();
+  }
   function disposeInsEditors() {
     for (const ed of insEditors) ed.destroy();
     insEditors.length = 0;
@@ -879,6 +899,8 @@ export function createComposer(hostEls, { doc = globalThis.document, api, raf = 
   function paintInspector() {
     const hostBody = hostEls.insBody;
     if (!hostBody) return;
+    if (insExpanded()) { insStale = true; return; }
+    insStale = false;
     const active = doc.activeElement;
     const inside = Boolean(active && active !== doc.body && hostBody.contains(active));
     const had = inside ? active : (insFrom && hostBody.contains(insFrom) ? insFrom : null);
@@ -908,7 +930,7 @@ export function createComposer(hostEls, { doc = globalThis.document, api, raf = 
       const sid = memberSid(node.id);
       const spec = sid ? sessionById(sid) : null;
       const session = spec ? { sid, label: spec.settings.label, index: spec.members.indexOf(node.id) + 1, count: spec.members.length } : null;
-      return renderNodeInspector(node, { template: tpl, portsFn, meta, models, efforts, subagentModels, editorFor: insEditorFor, session, doc });
+      return renderNodeInspector(node, { template: tpl, portsFn, meta, models, efforts, subagentModels, editorFor: insEditorFor, session, defaultEngine, doc });
     }
     const wire = wireById(s.id);
     return wire ? renderWireInspector(wire, { loop: view.isLoopWire(wire.id), doc }) : renderEmptyInspector({ doc });
@@ -958,6 +980,18 @@ export function createComposer(hostEls, { doc = globalThis.document, api, raf = 
     }
     const node = nodeById(owner.id);
     if (!node) return;
+    // The Model field is the columns picker's trigger: its value and data-engine are one pick, written as model and
+    // engine in ONE commit, with an effort the picked harness lacks dropped (nodeModelPatch; null deletes the key).
+    if (node.kind === 'agent' && name === 'model') {
+      const next = columnsValue({ model: ev.target.value, engine: ev.target.dataset ? ev.target.dataset.engine : '' });
+      const patch = nodeModelPatch(next, { catalog: models, effort: node.config.effort || '', defaultEngine, effortsOf: pickEffortsOn });
+      commit('model', () => {
+        node.config = { ...(node.config || {}) };
+        for (const [k, v] of Object.entries(patch)) { if (v == null) delete node.config[k]; else node.config[k] = v; }
+      });
+      paintInspector();
+      return;
+    }
     if (node.kind === 'script' && name.startsWith('param:')) {
       const id = name.slice('param:'.length);
       const decl = ((scripts[node.key] && scripts[node.key].params) || []).find((p) => p.id === id);
@@ -1357,7 +1391,7 @@ export function createComposer(hostEls, { doc = globalThis.document, api, raf = 
     /** Session authoring (05 §3): each call is ONE commit, or `{ok:false, reason}` and no commit. */
     sessions: { join: joinSession, leave: leaveSession, ungroup: ungroupSession, split: splitSession, setSetting: setSessionSetting, byId: sessionById },
     docToken: () => token,
-    models: () => ({ models, efforts, subagentModels }),
+    models: () => ({ models, efforts, subagentModels, defaultEngine }),
     /** The sub-agents gate the Composer draws with (the app passes none: SESSION_SUBAGENTS_VERIFIED; tests open it). */
     sessionVerified: () => sessionVerified,
     metaOf: (node) => (node && node.kind === 'agent' ? (agents[node.key] || null) : node && node.kind === 'script' ? (scripts[node.key] || null) : null),
@@ -1385,8 +1419,8 @@ export function createComposer(hostEls, { doc = globalThis.document, api, raf = 
     selection: () => (sel ? { ...sel } : null),
     select,
     gesture: () => gesture,
-    /** True while focus sits in the inspector (the Workflows More / Params popover): the chat waits before committing. */
-    inspectorFocused: () => Boolean(hostEls.insBody && doc.activeElement && hostEls.insBody.contains(doc.activeElement)),
+    /** True while focus sits in the inspector (the Workflows More / Params popover), or a field's large window is open: the chat waits before committing. */
+    inspectorFocused: () => insExpanded() || Boolean(hostEls.insBody && doc.activeElement && hostEls.insBody.contains(doc.activeElement)),
     isDirty: () => dirty,
     setReady(v) { ready = v; paintChrome(); },
     // A registry reload (MAJ-16) must re-validate the OPEN canvas: a wire into a

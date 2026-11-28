@@ -1,14 +1,20 @@
 // test/ui-folder-run-running.test.mjs — Projects, any way (P1b): a Folder run on the Running page.
-import { test } from 'node:test';
+import { test, before, beforeEach, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { bootApp, helloRun } from './helpers/run-page-boot.mjs';
+import { runPageOn, helloRun } from './helpers/run-page-boot.mjs';
 import { checkRows } from './helpers/rows.mjs';
+import { useSharedApp, restoreAfter } from './helpers/shared-app-boot.mjs';
+
+const app = useSharedApp({ before, beforeEach, after });
+const bootApp = runPageOn(app);
+// A test that turns git off on the one shared page (data-git) has it back as it was when the test ends.
+beforeEach((t) => restoreAfter(t, app.document.documentElement.dataset, 'git'));
 
 const COUNTS = { added: 9, modified: 4, deleted: 1 };
 const ok = (body) => Promise.resolve({ ok: true, status: 200, json: async () => body });
 const tabs = (ctx) => [...ctx.window.document.querySelectorAll('#run-detail .rd-tab')].map((b) => b.dataset.sec);
 const $ = (ctx, sel) => ctx.window.document.querySelector(`#run-detail ${sel}`);
-const FOLDER_TABS = ['overview', 'changes', 'artifacts', 'workflow', 'qa', 'logs', 'agents'];
+const FOLDER_TABS = ['overview', 'task', 'changes', 'artifacts', 'qa', 'logs', 'workflow', 'agents'];   // the row, then what is under More
 
 test('a live folder run: Changes in place of Diff and Actions, from its hello or its run-created frame', async () => {
   await checkRows([
@@ -84,12 +90,14 @@ test('a finished folder run before its saved row lands: Ready · 14 files change
   assert.equal($(ctx, '.rd-pr-slot').hidden, true);
   const tile = [...ctx.window.document.querySelectorAll('#run-detail .rd-facts .rd-stats > div')].find((t) => t.lastElementChild.textContent === 'files changed');
   assert.equal(tile.querySelector('b').textContent, '+9 ~4 −1');
-  const rows = [...ctx.window.document.querySelectorAll('#run-detail .rd-result .rd-srow')].map((r) => [r.dataset.rdTab, (r.querySelector('.rd-srow-v') || { textContent: '' }).textContent]);
-  assert.deepEqual(rows.find((r) => r[0] === 'changes'), ['changes', '14 files']);
-  assert.equal(rows.some((r) => r[0] === 'diff' || r[0] === 'actions'), false);
+  // One level: the card lists no tab-opening rows; the Changes tab's badge carries the count.
+  assert.equal(ctx.window.document.querySelector('#run-detail .rd-result .rd-srow[data-rd-tab]'), null, 'no tab rows on the card');
+  assert.equal($(ctx, '.rd-tab[data-sec="changes"] .rd-tab-badge').textContent, '14');
+  assert.equal($(ctx, '.rd-tab[data-sec="diff"]'), null);
+  assert.equal($(ctx, '.rd-tab[data-sec="actions"]'), null);
   ctx.go('running/r1/details/overview');
   await ctx.settle();
-  assert.equal($(ctx, '.rd-sec[data-sec="overview"] .act-strip').hidden, true);
+  assert.equal($(ctx, '.rd-sec[data-sec="overview"] .act-strip'), null, 'no Overview Actions strip');
   assert.equal($(ctx, '.rd-sec[data-sec="overview"] .hd-ov-wt'), null);
 });
 
@@ -166,6 +174,8 @@ test('the tab bar rebuilt for a Folder run keeps the open tab', async () => {
   ctx.dispatch({ type: 'state', runId: 'r1', id: 'p1', status: 'running', steps: [], workMode: 'folder', branch: { workMode: 'folder' } });
   await ctx.settle();
   assert.equal($(ctx, '.rd-tab.active').dataset.sec, 'workflow');
+  assert.equal($(ctx, '.rd-tab.active').nextElementSibling.className, 'rd-tab tab', 'still under More, drawn because it is open');
+  assert.equal($(ctx, '.rd-tabs').lastElementChild.className, 'tab tab-more');
 });
 
 test('a finished git run while git is missing: no pull-request placeholder, a line that names no hidden control', async () => {
@@ -185,7 +195,7 @@ test('a finished git run while git is missing: no pull-request placeholder, a li
   assert.equal($(ctx, '.rd-now-top').dataset.text, 'Finished', 'not "Ready to ship": Ship it is hidden');
 });
 
-test('a finished folder run: changes that land after the detail payload fill the Changes row', async () => {
+test('a finished folder run: changes that land after the detail payload fill the Changes tab badge', async () => {
   const NOCH = { state: { id: 'p1', title: 'Rename receipts', status: 'done', workMode: 'folder', branch: { workMode: 'folder' }, steps: [], subAgents: [] },
     results: null, clarify: { questions: [], answers: [] }, stepQuestions: [], artifacts: [] };
   const ctx = await bootApp({ fetchHandler: (url) => {
@@ -196,29 +206,11 @@ test('a finished folder run: changes that land after the detail payload fill the
   helloRun(ctx, { runId: 'r1', pipelineId: 'p1', status: 'done', workMode: 'folder', projectDir: '/tmp/tax' });
   ctx.go('running/r1');
   await ctx.settle(8);
-  const row = () => [...ctx.window.document.querySelectorAll('#run-detail .rd-result .rd-srow')].map((r) => [r.dataset.rdTab, (r.querySelector('.rd-srow-v') || { textContent: '' }).textContent]).find((r) => r[0] === 'changes');
-  assert.deepEqual(row(), ['changes', '']);
+  const badge = () => $(ctx, '.rd-tab[data-sec="changes"] .rd-tab-badge')?.textContent || '';
+  assert.equal(badge(), '');
   ctx.dispatch({ type: 'state', runId: 'r1', id: 'p1', status: 'done', steps: [], workMode: 'folder', branch: { workMode: 'folder', changes: { state: 'pending', counts: COUNTS } } });
   await ctx.settle(4);
-  assert.deepEqual(row(), ['changes', '14 files']);
-});
-
-test('the Runs list: a live Folder run names its group kind and its settled changes before any saved row', async () => {
-  const PROJ = [{ name: 'Tax papers 2026', path: '/tmp/tax', exists: true, vcs: 'none', workMode: 'folder', key: 'tax-papers-1a2b3c4d' }];
-  const ctx = await bootApp({ local: { 'worca-cc.runs.view': JSON.stringify({ show: 'all', groupBy: 'project', person: '' }) }, fetchHandler: (url) => {
-    if (url === '/api/projects') return ok({ projects: PROJ });
-    if (url.endsWith('/api/history')) return ok({ pipelines: [], ghAvailable: false });
-    return null;
-  } });
-  helloRun(ctx, { runId: 'r1', pipelineId: 'p1', workMode: 'folder', projectDir: '/tmp/tax' });
-  ctx.dispatch({ type: 'state', runId: 'r1', id: 'p1', status: 'running', steps: [], workMode: 'folder',
-    branch: { workMode: 'folder', changes: { state: 'applied', counts: COUNTS } } });
-  ctx.dispatch({ type: 'done', runId: 'r1', status: 'done' });
-  ctx.showRunning();
-  await ctx.settle(8);
-  const group = ctx.window.document.querySelector('#runs-list .runs-sec[data-section="project:tax-papers-1a2b3c4d"]');   // View › Group by Project
-  assert.equal(group.querySelector('.runs-sec-head .kind-chip').textContent, 'Folder');
-  assert.match(group.querySelector('.runs-row[data-run-id="r1"] .runs-row-sub').textContent, /^Applied/);
+  assert.equal(badge(), '14');
 });
 
 test('the chat card of a live Folder run is a Folder run; openApply opens Apply to folder', async () => {
@@ -347,14 +339,15 @@ test('P5: the Runs list row of a finished all-Folder workspace run never reads i
   const P2 = [{ projectKey: 'notes-00000004', projectName: 'notes', projectDir: '/r/notes', workMode: 'folder' },
     { projectKey: 'docs-00000005', projectName: 'docs', projectDir: '/r/docs', workMode: 'folder' }];
   const ctx = await bootApp({ fetchHandler: (url) => (url.endsWith('/api/history') ? ok({ pipelines: [], ghAvailable: false }) : null) });
-  helloRun(ctx, { runId: 'w2', pipelineId: 'pw', kind: 'workspace-run', workspaceId: 'wks-1', projectNames: ['notes', 'docs'], projectDir: '/tmp/ws', workMode: 'folder' });
+  // its own run id: an earlier test finished a w2, and the shared app keeps the runs it saw finish
+  helloRun(ctx, { runId: 'w3', pipelineId: 'pw', kind: 'workspace-run', workspaceId: 'wks-1', projectNames: ['notes', 'docs'], projectDir: '/tmp/ws', workMode: 'folder' });
   // An all-Folder workspace's state.branch is the harness's scalar mirror of its FIRST member's record (_primaryMirror).
-  ctx.dispatch({ type: 'state', runId: 'w2', id: 'pw', status: 'running', steps: [], target: 'workspace', workMode: 'folder', projects: P2,
+  ctx.dispatch({ type: 'state', runId: 'w3', id: 'pw', status: 'running', steps: [], target: 'workspace', workMode: 'folder', projects: P2,
     branch: { workMode: 'folder', copyDir: '/x/notes', changes: { state: 'applied', counts: { added: 2, modified: 0, deleted: 0 } } } });
-  ctx.dispatch({ type: 'done', runId: 'w2', status: 'done' });
+  ctx.dispatch({ type: 'done', runId: 'w3', status: 'done' });
   ctx.showRunning();
   await ctx.settle(8);
-  const sub = ctx.window.document.querySelector('#runs-list .runs-row[data-run-id="w2"] .runs-row-sub').textContent;
+  const sub = ctx.window.document.querySelector('#runs-list .runs-row[data-run-id="w3"] .runs-row-sub').textContent;
   assert.doesNotMatch(sub, /^Applied/, 'docs is still pending: the run is not Applied');
 });
 

@@ -9,7 +9,13 @@ or your Claude Code config. Everything lives on the **Connectors** page (Advance
 
 ## Where skills come from
 
-The **Skills** view (Connectors › Skills) is the catalog:
+The **Skills** view (Connectors › Skills) is the catalog: one row per skill, with a search box, a **Source** menu and
+filter chips — **All**, **Imported**, **From plugins** and **Needs attention** (an invalid skill, one that declares
+hooks or reads its plugin's other files, one with an update, or one whose plugin is off). Each chip shows how many
+skills it matches. A set's own page, reached from the set list on the left of **Sets**, shows the skills it holds
+with a short status word each (`In runs`, `Off`, `Invalid`, `Plugin disabled`, `Needs your consent`).
+
+A skill is in the catalog because it is:
 
 - **Plugin skills** — every `skills/<name>/SKILL.md` an installed plugin ships. They come and go with the plugin;
   a disabled plugin's skills are listed (`plugin disabled`) and skipped in runs.
@@ -110,7 +116,8 @@ references break, and the catalog and the import preview flag them.
   the run's own folder: an agent's edit never reaches the library or a plugin.
 - **Chat:** General plus the sets of the projects in play, as for MCP servers. The `Skill` tool is on only
   for a turn that mounts at least one skill, and **inline shell blocks never run in Ask** (every Ask turn runs with
-  Claude Code's `disableSkillShellExecution`). The composer's **Sets · N** picker switches skills per chat.
+  Claude Code's `disableSkillShellExecution`). The composer's Sets picker (a layers icon with the
+  count; its tooltip reads **Sets for this chat**) switches skills per chat.
 - **Project page › Sets** lists *Skills in runs on X* with each skill's status; a workspace's Overview shows the
   servers and skills its runs get, each with the member project that brings it.
 - **Hooks:** a skill whose frontmatter declares `hooks:` is shown, never refused. Its hooks run shell commands

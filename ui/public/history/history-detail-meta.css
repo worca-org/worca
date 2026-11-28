@@ -75,6 +75,7 @@
 .hd-meta .strong{font-weight:700;color:var(--ink);}   /* no global .strong rule exists */
 /* New text on this line meets 4.5:1 (--ink-2); the older --ink-3 parts sit in the light contrast baseline, which only shrinks. */
 .hd-meta .hd-engine{color:var(--ink-2);}
+.hd-meta .hd-exec-env{color:var(--ink-2);}
 .hd-diffcounts{display:inline-flex;align-items:center;gap:6px;}
 .hd-dot{font-weight:700;color:var(--ink);}
 .hd-status-word{font:600 var(--fs-body) var(--sans);}
@@ -98,6 +99,8 @@
 
 /* The bar (sticky, z-index 5, BEFORE the tabs in the DOM) while its Resume split menu is open. */
 .rd-bar:has(.btn-split-menu:not([hidden])),.hd-bar:has(.btn-split-menu:not([hidden])){z-index:7;}
+/* The header (the full page's bar controls end its title row) while a menu of theirs is open: over the pinned tabs. */
+:is(.rd-header,.hd-header):has(.btn-split-menu:not([hidden]),.menu:not([hidden])){position:relative;z-index:6;}
 /* Slice 2: the ⋯'s hidden carriers (index.html .run-menu-carriers); same guard as its siblings
    (.hd-archive[hidden], .hd-report[hidden]). */
 .hd-restore[hidden]{display:none;}

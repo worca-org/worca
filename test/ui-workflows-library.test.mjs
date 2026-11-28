@@ -586,6 +586,12 @@ test('the search box slides over the title (reduced motion: at once); folders an
   assert.doesNotMatch(src, /wfl-(crumbs?|crumb-home|trail|csep|up|search|gh|gn|group|archived)\b/);
 });
 
+test('a tab name keeps its descenders: the ellipsis box is taller than the tab\'s 13px line', () => {
+  const css = readStyleCss();
+  assert.match(css, /\n\.wfl-tname\{min-width:0;overflow:hidden;text-overflow:ellipsis;line-height:1\.4;\}/,
+    'overflow:hidden at .tab\'s line-height:1 clipped the g of Agents and the p of Scripts');
+});
+
 test('workflow row ⋯: Pin to Chat home / Unpin from Chat home calls togglePin with the row', async () => {
   const pinned = new Set(['wf_mine']);
   const s = await boot({}, { isPinned: (id) => pinned.has(id) });
@@ -652,4 +658,19 @@ test('#1127: highlight, openFolder and a search reach a workflow inside an owner
   click(s.doc.getElementById('wfl-filter-btn'));
   type(s, 'mine');
   assert.deepEqual([rowsOf(s.host), tagsOf(s.host)], [['workflow:wf_mine2', 'workflow:wf_mine'], ['Yours › coding', 'Yours › general']]);
+});
+
+test('workflow row ⋯: Versions… when versionsEnabled says so (it opens that workflow\'s Versions page), absent otherwise', async () => {
+  const s = await boot({}, { isPinned: () => false, versionsEnabled: (w) => w.id === 'wf_mine' });
+  s.lib.openFolder(['workflows', 'general']);
+  click(s.host.querySelector('.wfl-wf[data-id="wf_mine"] .wfl-more'));
+  const items = [...s.doc.querySelectorAll('.wfv-menu-item')];
+  // dev's #1127 menu (Use as template, Export…, Pin, Delete…) with Versions… after Pin.
+  assert.deepEqual(items.map((b) => b.textContent), ['Use as template', 'Export…', 'Pin to Chat home', 'Versions…', 'Delete…']);
+  click(items.find((b) => b.textContent === 'Versions…'));
+  assert.deepEqual(s.calls.at(-1), ['openVersions', 'wf_mine']);
+  const off = await boot({}, { isPinned: () => false, versionsEnabled: () => false });
+  off.lib.openFolder(['workflows', 'general']);
+  click(off.host.querySelector('.wfl-wf[data-id="wf_mine"] .wfl-more'));
+  assert.deepEqual([...off.doc.querySelectorAll('.wfv-menu-item')].map((b) => b.textContent), ['Use as template', 'Export…', 'Pin to Chat home', 'Delete…']);
 });

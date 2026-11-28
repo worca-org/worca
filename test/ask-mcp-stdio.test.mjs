@@ -137,7 +137,7 @@ test('real child: handshake, seeded rows readable, thread-scoped attachment, pro
     { jsonrpc: '2.0', id: 10, method: 'tools/call', params: { name: 'list_memory', arguments: {} } },
   ];
   // argv wins over env: env points at a bogus base, argv at the real one
-  const r = await runChild(['--home', home, '--thread', thread.id], calls, { env: { WORCA_HOME: '/nonexistent/base', WORCA_ASK_THREAD_ID: other.id, WORCA_ASK_WEB: '', WORCA_ASK_COMMANDS: '', ASK_COMMAND_TOKEN: '' } });   // a shell's WORCA_ASK_WEB / command bridge must not grow the pin
+  const r = await runChild(['--home', home, '--thread', thread.id], calls, { env: { WORCA_HOME: '/nonexistent/base', WORCA_ASK_THREAD_ID: other.id, WORCA_ASK_WEB: '', WORCA_ASK_COMMANDS: '', ASK_COMMAND_TOKEN: '', WORCA_ASK_TABS: '', ASK_TABS_TOKEN: '' } });   // a shell's WORCA_ASK_WEB / command or tab bridge must not grow the pin
   assert.equal(r.code, 0, `exit 0 (stderr: ${r.err})`);
   const msgs = r.out.split('\n').filter(Boolean).map((l) => JSON.parse(l));
   assert.deepEqual(msgs.map((m) => m.id), [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
@@ -158,7 +158,8 @@ test('real child: handshake, seeded rows readable, thread-scoped attachment, pro
     'get_network_proxy', 'test_network_proxy', 'propose_network_proxy_change', 'propose_corporate_proxy_on', 'propose_clone_project', 'propose_project_change',
     'propose_workspace_change',
     'get_project_actions', 'get_workspace_stacks', 'get_run_checkout', 'list_running_actions', 'propose_actions_change', 'list_mcp_servers', 'discover_mcp_servers', 'propose_mcp_change',
-    'show_files', 'list_settings', 'change_setting', 'pause_run', 'resume_run', 'propose_stop_run', 'send_direction', 'propose_pull_request']);
+    'show_files', 'list_settings', 'change_setting', 'pause_run', 'resume_run', 'propose_stop_run', 'send_direction', 'propose_pull_request',
+    'get_security_posture', 'get_execution_environments', 'get_project_environment', 'propose_environment_spec_change', 'propose_environment_build']);
   const projects = JSON.parse(msgs[2].result.content[0].text);
   assert.equal(projects.projects[0].key, project.key);
   const run = JSON.parse(msgs[3].result.content[0].text);

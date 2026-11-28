@@ -7,7 +7,7 @@ import { buildPerspectiveChips } from './chips.mjs';
 import { planStats, perspectiveChangeFeedback, fixAllFeedback, sectionOwners, planSummary, unmetLine,
   planApproveLabel, displayCoverage } from './plan-text.mjs';
 import { openBlocking } from '../../../src/shared/shape/role-review.mjs';
-import { perspectiveByKey, PERSPECTIVES, chipsHiddenFor } from '../../../src/shared/shape/perspectives.mjs';
+import { perspectiveByKey, perspectivesFor, chipsHiddenFor } from '../../../src/shared/shape/perspectives.mjs';
 import { levelAtLeast } from '../ui-level.mjs';
 import { toggleMenu } from '../workflows/menu.mjs';
 import { icon } from '../icons.mjs';
@@ -15,13 +15,36 @@ import { fold, swapOpen, buildCheckFold } from './check-row.mjs';
 import { SEND_FAILED, stepHead, stepSender, isRequirementsAsk } from './step-card.mjs';
 import { buildRoleFold, buildConflictCards } from './role-rows.mjs';
 import { renderRequirementsBody } from './requirements-body.mjs';
+import { renderAttachedBody } from './attached-body.mjs';
 import { buildFeedbackRow } from './feedback-row.mjs';
+import { buildNoteBody } from './note-body.mjs';
 
 export { SEND_FAILED };
 
 const labelOf = (k) => (perspectiveByKey(k) || {}).label || k;
 
+/** The attached-features ask: the step head, the card, and one send (the busy guard and error line every step card has). */
+function renderAttachedAsk(panel, pq, deps) {
+  const { doc } = deps;
+  const err = doc.createElement('div'); err.className = 'plan-err'; err.hidden = true; err.setAttribute('role', 'alert');
+  const send = stepSender({ ...deps, submit: (payload) => {
+    panel.dispatchEvent(new doc.defaultView.CustomEvent('plan-answer', { bubbles: true, detail: { ...payload } }));
+    return deps.submit(payload);
+  } }, err);
+  const body = renderAttachedBody(doc, pq.plan, { onAnswer: send });
+  body.insertBefore(err, body.querySelector('.plan-actions'));
+  panel.append(stepHead(doc, deps.title, deps.chip), body);
+  panel.dispatchEvent(new doc.defaultView.CustomEvent('step-primary', { bubbles: true }));
+  panel.__plan = { setErrors: (errors) => {
+    const list = Array.isArray(errors) ? errors : [];
+    err.classList.remove('ok');
+    err.textContent = list.map((e) => e.message || e.code || 'invalid').join(' · ');
+    err.hidden = !list.length;
+  } };
+}
+
 export function renderPlanBody(panel, pq, deps) {
+  if (pq && pq.plan && pq.plan.attached) return renderAttachedAsk(panel, pq, deps);
   if (isRequirementsAsk(pq)) return renderRequirementsBody(panel, pq, deps);
   const { doc } = deps;
   const plan = pq.plan || {};
@@ -85,8 +108,9 @@ export function renderPlanBody(panel, pq, deps) {
   // D19: a later run's planner said the run can't be built as outlined: that is why this plan stopped
   if (plan.outlineChange) {
     const note = h('div', 'shape-plan-outline-change');
-    note.append(h('div', 'shape-plan-outline-change-head', 'The planner says this run can\'t be built as outlined:'),
-      h('p', 'shape-plan-outline-change-text', String(plan.outlineChange)));
+    note.appendChild(h('div', 'shape-plan-outline-change-head', 'The planner says this run can\'t be built as outlined:'));
+    const text = buildNoteBody(doc, String(plan.outlineChange), { key: `plan:${pq.id}` });
+    if (text) note.appendChild(text.el);
     body.appendChild(note);
   }
 
@@ -117,14 +141,16 @@ export function renderPlanBody(panel, pq, deps) {
   if (decisions) body.appendChild(decisions.el);
 
   // perspectives as a line; "edit" opens today's chips + Update plan in place (D31) — the gate on only
-  const was = PERSPECTIVES.map((p) => p.key).filter((k) => k === 'product' || perspectives.includes(k));
+  // Small runs B3 (D22): the run's snapshot, carried on the ask, offers Compliance.
+  const smallRuns = plan.smallRuns === true;
+  const was = perspectivesFor({ smallRuns }).map((p) => p.key).filter((k) => k === 'product' || perspectives.includes(k));
   const pline = h('div', 'plan-persp-line');
   pline.appendChild(h('span', 'plan-persp-names', was.map(labelOf).join(' · ')));
   body.appendChild(pline);
   if (deps.extras && plan.revisable) {
     const update = btn('plan-update', 'Update plan'); update.disabled = true;
     const same = (v) => v.length === was.length && v.every((k) => was.includes(k));   // order-free
-    const chips = buildPerspectiveChips(doc, { picked: perspectives, fixed: ['ux'], hidden: chipsHiddenFor(perspectives), collapsed: false,
+    const chips = buildPerspectiveChips(doc, { picked: perspectives, fixed: ['ux'], hidden: chipsHiddenFor(perspectives), collapsed: false, smallRuns,
       onChange: (v) => { update.disabled = same(v); } });
     afterSubmit = () => { update.disabled = same(chips.value()); };
     update.addEventListener('click', (e) => {

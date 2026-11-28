@@ -3,6 +3,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
+import { readFileSync } from 'node:fs';
 import { readStyleCss } from '../src/core/read-style-css.mjs';
 import { headModel, groupHead, routeModel, routeGroupOf, landingOf, prRef, renderRoute, routeOpenWanted, setRouteOpen, ROUTE_OPEN_KEY,
   renderHeadButtons, prMenuItems, trackerWatchWords, canResolvePr, showsFixConflicts, hdPrWatchLabel, ASK_IN_CHAT, verdictWords,
@@ -332,6 +333,20 @@ test('groupHead: a feature with unmarked requirements locks every Create PR (dis
   assert.deepEqual(groupHead({ state: 'ready', prs: [], unmarked: 0 }).cta, { state: 'create' }, 'every row marked: as before');
 });
 
+test('groupHead with ship (a small-runs feature): Create N PRs, locked with the ledger\'s reason in place of the count', () => {
+  const pr = (n) => ({ key: `p${n}`, name: `Run ${n}`, number: n, url: `u${n}`, open: true, merged: false });
+  const why = 'Waiting for Compliance to confirm R-comp-4';
+  const blocked = { n: 3, blocked: true, reason: why };
+  // Slice 7 (D8): a small-runs lock is a styled `tip`, never a native title (the unmarked lock above keeps `title`).
+  assert.deepEqual(groupHead({ state: 'ready', prs: [], unmarked: 1, ship: blocked }).cta, { state: 'create', label: 'Create 3 PRs', disabled: true, quiet: true, tip: why });
+  assert.deepEqual(groupHead({ state: 'ready', prs: [], ship: { n: 3, blocked: false, reason: null } }).cta, { state: 'create', label: 'Create 3 PRs' });
+  const after = (ship) => groupHead({ state: 'ready', prs: [pr(1)], ship }).after.map((b) => [b.id, b.label, !!b.primary, !!b.disabled, b.title || '', b.tip || '']);
+  assert.deepEqual(after(blocked), [['ship', 'Create 3 PRs', false, true, '', why]]);
+  assert.deepEqual(after({ ...blocked, blocked: false }), [['ship', 'Create 3 PRs', true, false, '', '']]);
+  for (const ship of [null, undefined]) assert.deepEqual(groupHead({ state: 'ready', prs: [], ship }), groupHead({ state: 'ready', prs: [] }));
+  assert.equal(groupHead({ state: 'working', prs: [], ship: blocked }).cta, null);
+});
+
 test('prMenuItems with onWatchAll / onCopyAll: each PR as today, then Watch PRs (Advanced) and Copy PR links', () => {
   const prs = [{ key: 'a', name: 'Run 1', number: 12, url: 'u1', open: true, watch: null },
     { key: 'b', name: 'Run 2', number: 13, url: 'u2', open: true, watch: null, conflicts: true }];
@@ -437,6 +452,16 @@ test('route: every mocked case returns its rows, states, status lines, fold and 
   // 14 mocked cases + 7b, 7c, 8b, the chain run and the group-still-loading case: a dropped case fails here.
   assert.equal(Object.keys(ROUTE_CASES).length, 19);
   for (const [name, [f, want]] of Object.entries(ROUTE_CASES)) assert.deepEqual(shape(routeModel(f)), want, name);
+});
+
+test('route: a Verifier run (PR-exempt as verify) promises no pull request, live or finished, and lands nowhere', () => {
+  const why = 'The Verifier checks the feature; it opens no PR of its own';
+  const live = shape(routeModel(F({ m: M('working'), branch: 'feat/verify', prExempt: 'verify' })));
+  assert.deepEqual(live.rows, [['branch', 'working', 'feat/verify', "This run's branch · the agents are working here"], ['pr', 'future', 'Pull request', why]]);
+  const done = shape(routeModel(F({ m: M('ready'), branch: 'feat/verify', prExempt: 'verify', canCreatePr: false })));
+  assert.deepEqual(done.rows.map((r) => r[3]), ["This run's branch · changes done", why]);
+  // Another exemption keeps today's route.
+  assert.equal(shape(routeModel(F({ m: M('working'), branch: 'feat/x', prExempt: 'round' }))).rows.length, 3);
 });
 
 test('route: edge rows — a live workspace, a discarded folder, a failed folder run, a stacked PR with no previous run', () => {
@@ -775,4 +800,43 @@ test('renderHeadButtons: a step that ends as a note alone hands the focus to the
   pr.focus();
   renderHeadButtons(host, headModel(TRY({ checkout: CO({ status: 'running' }) }, { level: 'simple' })), slot, {});
   assert.equal(d.activeElement, pr, 'a focused control that was not rebuilt keeps the focus');
+});
+
+test('s7: a locked after-button with a tip is wrapped in .rd-tip-host, described by its tooltip, with no title', () => {
+  const d = doc();
+  const host = d.querySelector('.acts');
+  const pr = { key: 'p1', name: 'Run 1', number: 1, url: 'https://github.com/o/r/pull/1', open: true, merged: false };
+  const why = 'Waiting for you to confirm R-ux-2';
+  renderHeadButtons(host, groupHead({ state: 'ready', prs: [pr], ship: { n: 2, blocked: true, reason: why } }), null);
+  const btn = host.querySelector('[data-head="ship"]');
+  assert.ok(btn.disabled);
+  assert.equal(btn.getAttribute('title'), null);
+  const wrap = btn.parentElement;
+  assert.ok(wrap.matches('span.rd-tip-host'), wrap.outerHTML);
+  assert.equal(wrap.parentElement, host);
+  const tips = host.querySelectorAll('.rd-tip');
+  assert.equal(tips.length, 1);
+  assert.equal(tips[0].parentElement, wrap);
+  assert.equal(tips[0].getAttribute('role'), 'tooltip');
+  assert.equal(tips[0].textContent, why);
+  assert.ok(tips[0].id);
+  assert.equal(btn.getAttribute('aria-describedby'), tips[0].id);
+  renderHeadButtons(host, groupHead({ state: 'ready', prs: [pr], ship: { n: 2, blocked: false, reason: null } }), null);
+  assert.equal(host.querySelectorAll('.rd-tip, .rd-tip-host').length, 0, 'unlocked: no tip left');
+  assert.equal(host.querySelector('[data-head="ship"]').getAttribute('aria-describedby'), null);
+});
+
+test('s7: the tip is styled with existing tokens, hidden at rest, shown on the host\'s hover, with no motion', () => {
+  const css = readFileSync(new URL('../ui/public/runs/running-detail-bar.css', import.meta.url), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '');
+  const rules = [...css.matchAll(/([^{}]+)\{([^{}]*)\}/g)].map((m) => ({ sel: m[1].trim(), body: m[2] }))
+    .filter((r) => /\.rd-tip(?![\w-])|\.rd-tip-host/.test(r.sel));
+  assert.ok(rules.length, 'running-detail-bar.css styles .rd-tip');
+  const all = rules.map((r) => r.body).join(';');
+  const rest = rules.filter((r) => /(^|[\s,])\.rd-tip$/.test(r.sel)).map((r) => r.body).join(';');
+  assert.match(rest, /display:\s*none/);
+  assert.match(rest, /bottom:\s*calc\(100% \+ 8px\)/, 'drawn above the button');
+  for (const token of ['var(--ink)', 'var(--on-ink)', 'var(--r-sm)']) assert.ok(rest.includes(token), token);
+  assert.ok(rules.some((r) => /:hover/.test(r.sel) && /display:\s*block/.test(r.body)), 'shown on hover');
+  assert.doesNotMatch(all, /transition|animation/);
+  assert.doesNotMatch(all, /#[0-9a-fA-F]{3,8}\b|rgba?\(/, 'no new colour');
 });

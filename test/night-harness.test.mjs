@@ -587,3 +587,86 @@ test('openedAt follows the always-wait list while the question is open', async (
   orch.nightConfigChanged();
   assert.equal(orch.state.night.openedAt, '2026-09-27T12:00:00.000Z', 'the re-arm publishes the open time');
 });
+
+// Shaper small runs C3 (D16): a stop question waits for the person; a --yes run keeps dev's automatic answer.
+const STOP = { reason: 'objection', run: 8, pick: 'another', options: [{ value: 'another', payload: { decision: 'another' } }, { value: 'continue', payload: { decision: 'continue' } }] };
+test('C3: _nightLeavesToPerson is true for a gate and a plan ask with stop; away mode never decides one', async () => {
+  await setNightMode({ enabled: true, graceMinutes: 1, strategy: 'weights', window: null });
+  await setNightModeToggle('on');
+  const clock = fakeClock();
+  const orch = createOrchestrator({ projectDir: '/tmp/night-h-stop', nightClock: clock });
+  assert.equal(orch._nightLeavesToPerson({ kind: 'gate', stop: STOP }), true);
+  assert.equal(orch._nightLeavesToPerson({ kind: 'plan', plan: { file: 'p.md' }, stop: { ...STOP, reason: 'check' } }), true);
+  assert.equal(orch._nightLeavesToPerson({ kind: 'gate' }), false);
+  let decided = 0;
+  orch._nightDecide = async () => { decided += 1; };
+  const p = orch._ask({ id: 'g-stop', kind: 'gate', issues: [], wireId: 'w9', deliveryNo: 3, stop: STOP });
+  p.catch(() => {});
+  await clock.tick(60 * 60_000);
+  assert.equal(decided, 0);
+  assert.equal(orch.pendingQuestion?.id, 'g-stop');
+  assert.equal(orch.pendingQuestion.stop.reason, 'objection');
+});
+
+test('C3: under --yes a gate stop gets dev\'s continue and no "decided by you" line', async () => {
+  const orch = createOrchestrator({ projectDir: '/tmp/night-h-stop-yes', auto: true });
+  assert.equal(orch._nightLeavesToPerson({ kind: 'gate', stop: STOP }), false);
+  assert.deepEqual(await orch._ask({ id: 'g-yes', kind: 'gate', issues: [], stop: STOP }), { decision: 'continue' });
+  assert.equal(orch.pendingQuestion, null);
+});
+
+// Shaper small runs slice 10 (D3, R-arch-8): may Away mode decide this ask right now? An engine seam, no Shaper state.
+const NOW_Q = { id: 'g-now', kind: 'gate' };
+/** A plain, hand-built harness. */
+const nowHarness = (dir, opts = {}) => {
+  const orch = createOrchestrator({ projectDir: dir, nightClock: fakeClock(), ...opts });
+  assert.equal(typeof orch.nightMayDecideNow, 'function', 'the harness has nightMayDecideNow(q)');
+  return orch;
+};
+
+test('nightMayDecideNow: true while Away is active, for a plain harness with no Shaper state', async () => {
+  await setNightMode({ enabled: true });
+  await setNightModeToggle('on');
+  const orch = nowHarness('/tmp/night-now-1');
+  assert.ok(!orch.runShape);
+  assert.equal(orch.nightMayDecideNow(NOW_Q), true);
+});
+
+test('nightMayDecideNow: false when nobody is away (toggle auto, no hours)', async () => {
+  await setNightMode({ enabled: true, window: null });
+  assert.equal(nowHarness('/tmp/night-now-2').nightMayDecideNow(NOW_Q), false);
+});
+
+test('nightMayDecideNow: false under --yes, with Away active', async () => {
+  await setNightMode({ enabled: true });
+  await setNightModeToggle('on');
+  assert.equal(nowHarness('/tmp/night-now-3', { auto: true }).nightMayDecideNow(NOW_Q), false);
+});
+
+test('nightMayDecideNow: false when the kind is on neverDecide', async () => {
+  await setNightMode({ enabled: true, neverDecide: ['gate'] });
+  await setNightModeToggle('on');
+  const orch = nowHarness('/tmp/night-now-4');
+  assert.equal(orch.nightMayDecideNow(NOW_Q), false);
+  assert.equal(orch.nightMayDecideNow({ id: 'c-now', kind: 'clarify' }), true, 'only the listed kind');
+});
+
+test('nightMayDecideNow: false once the answer limit is spent, without pausing the run', async () => {
+  await setNightMode({ enabled: true, maxDecisions: 1 });
+  await setNightModeToggle('on');
+  const orch = nowHarness('/tmp/night-now-5');
+  orch.state.status = 'running';
+  orch._nightCount = () => 0;
+  assert.equal(orch.nightMayDecideNow(NOW_Q), true);
+  orch._nightCount = () => 1;
+  assert.equal(orch.nightMayDecideNow(NOW_Q), false);
+  assert.equal(orch.pauseReason, null, 'asking is not deciding: no guardrail pause');
+});
+
+test('nightMayDecideNow: never throws, false on an error', async () => {
+  await setNightMode({ enabled: true });
+  await setNightModeToggle('on');
+  const orch = nowHarness('/tmp/night-now-6');
+  orch._nightCount = () => { throw new Error('the database is gone'); };
+  assert.equal(orch.nightMayDecideNow(NOW_Q), false);
+});

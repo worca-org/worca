@@ -101,6 +101,7 @@ const ROWS = [
     .map((sel) => [sel, 'ui-history-detail-tabs: the saved run bar shares the run page bar\'s rules']),
   ['.hd-sec', 'ui-projects-view: the projects shell is a twin of the History track'], ['.pd-sec', 'ui-projects-view: the projects shell is a twin of the History track'],
   ['.rd-questions', 'ui-running-detail: the question panel rises in'],
+  ['.rd-live', 'ui-running-detail: the live workflow in the card\'s right column goes when the run ends'],
   ['.wm-add-msg', 'workspace-map-css: hidden lines stay hidden'],
   // The account corner's popups and cards (side-flyout.mjs and app.js toggle `hidden`).
   ...['.acct-menu', '.lvl-menu', '.acct-spend', '.id-card'].map((sel) => [sel, 'ui-account-corner: a closed menu, an empty card']),
@@ -134,16 +135,6 @@ test('[hidden] beats the author display rule on every element app.js hides by at
         if (win && win.r.style.display !== 'none') shown.push(`${el.tagName.toLowerCase()}${el.id ? `#${el.id}` : ''}${[...el.classList].map((c) => `.${c}`).join('')}: ${win.s} { display: ${win.r.style.display} }`);
       }
       assert.deepEqual(shown, []);
-    } },
-    { name: 'ui-running-detail: the Live view sits beside the card when the pane has room, under it otherwise; the two-column layout never outranks [hidden]', run: () => {
-      const live = displays('.rd-glance').filter(({ s }) => subject(s).includes('.rd-glance[data-live="on"]'));
-      assert.ok(live.length, 'the wide layout sets display somewhere');
-      assert.deepEqual(live.filter(({ s }) => !subject(s).includes(':not([hidden])')).map(({ s }) => s), []);
-      assert.deepEqual(live.filter(({ r }) => !(r.parentRule?.conditionText === 'rd (min-width: 960px)')).map(({ s }) => s), [],
-        'only a wide pane (the rd container) lays the glance out in two columns');
-      const graph = flat.find((r) => r.parentRule?.conditionText === 'rd (min-width: 960px)'
-        && sels(r).some((s) => /^\.rd-glance\[data-live="on"\]\S*\s*>\s*\.rd-live$/.test(s)));
-      assert.equal(graph?.style.getPropertyValue('grid-column'), '2', 'the graph takes the column beside the card');
     } },
   ]);
 });
@@ -190,23 +181,26 @@ test('run 4 D21, D14: the Chat run card is divided sections, the group page Ship
   assert.match(flat.at(-1).selectorText, /^:is\(\.ask-card,\.chat-rc,\.shape-feature\) :is\(\.qpanel,/, 'the in-card override is the last rule');
 });
 
-test('slice 2: at split layout every Back keeps a display (no rule hides .rd-back, .hd-back or .gpage-back)', () => {
+test('one-level run page: beside the Runs list the run pages drop Back (the list is right there); the group page and the slide layout keep it', () => {
   document.body.innerHTML = `<div class="runs-shell" data-layout="split"><div class="runs-pane">
     <div class="run-shell detail-open"><div class="rd"><div class="rd-bar"><button class="btn btn-sm btn-quiet btn-icon rd-back"></button></div></div></div>
     <div class="hist-shell detail-open"><div class="hd"><div class="hd-bar"><button class="btn btn-sm btn-quiet btn-icon hd-back"></button></div></div></div>
     <div class="group-shell detail-open"><div class="gpage"><div class="gpage-bar rd-bar"><a class="btn btn-sm btn-quiet btn-icon gpage-back"></a></div></div></div>
   </div></div>`;
-  for (const cls of ['rd-back', 'hd-back', 'gpage-back']) {
+  const winner = (cls) => {
     const el = document.querySelector(`.${cls}`);
     // Every top-level rule (no @media / @container arm) that sets display on this element; the cascade's winner.
     const hits = flat.map((r, i) => ({ r, i })).filter(({ r }) => topLevel(r) && r.style.getPropertyValue('display'))
       .flatMap(({ r, i }) => sels(r).filter((s) => { try { return el.matches(s); } catch { return false; } })
         .map((s) => ({ r, i, imp: important(r), spec: specificity(s) })));
     hits.sort((x, y) => (x.imp - y.imp) || cmp(x.spec, y.spec) || (x.i - y.i));
-    const win = hits.at(-1);
-    assert.ok(win, `${cls}: some rule gives it a display`);
-    assert.notEqual(win.r.style.getPropertyValue('display'), 'none', `${cls} is hidden at split by "${win.r.selectorText}"`);
-  }
+    return hits.at(-1);
+  };
+  const display = (cls) => { const w = winner(cls); assert.ok(w, `${cls}: some rule gives it a display`); return w.r.style.getPropertyValue('display'); };
+  for (const cls of ['rd-back', 'hd-back']) assert.equal(display(cls), 'none', `${cls} is hidden beside the Runs list`);
+  assert.notEqual(display('gpage-back'), 'none', 'the group page keeps its Back');
+  document.querySelector('.runs-shell').dataset.layout = 'slide';
+  for (const cls of ['rd-back', 'hd-back', 'gpage-back']) assert.notEqual(display(cls), 'none', `${cls} shows in the slide layout`);
   document.body.innerHTML = '';
 });
 
@@ -239,7 +233,8 @@ test('run page bar: every .rd-bar-end button is one height, font size and paddin
     <button class="btn btn-quiet btn-icon ${bar === 'rd-bar' ? 'rd' : 'hd'}-bar-more"></button>
     <span class="crp-bar-btns"><button class="btn crp-full"></button></span>
   </span></div>`;
-  document.body.innerHTML = `<div class="crp">${end('rd-bar')}${end('hd-bar')}</div>`;
+  // The run page roots (.rd / .hd) hold the bar: the button rules are scoped to them, wherever the end group sits.
+  document.body.innerHTML = `<div class="crp"><div class="rd">${end('rd-bar')}</div><div class="hd">${end('hd-bar')}</div></div>`;
   for (const bar of ['rd-bar', 'hd-bar']) {
     const q = (s) => document.querySelector(`.${bar} ${s}`);
     const labelled = ['.rd-after,.hd-after', '[data-k="primary"]', '[data-k="made"]', '[data-k="split"]', '[data-k="stop"]'].map(q);
@@ -300,4 +295,130 @@ test('usage rings (account-corner.css): the 24px avatar under an inner ring, the
   const tokens = readFileSync(new URL('../ui/public/shell/self-hosted.css', import.meta.url), 'utf8');
   assert.match(tokens, /--red-ink-strong:light-dark\(/);
   assert.match(tokens, /--amber-ink-strong:light-dark\(/);
+});
+
+// Slice 13 (R-ux-5): every open stop line's step card draws as the card's own question draws, and its banner and head,
+// which repeat the line, are hidden. The DOM comes from the real paintStopList and the real stop card. jsdom's CSSOM
+// expands only some shorthands (never one holding var()), so each longhand is compared next to its shorthand.
+test('slice 13: a stop line\'s step card cascades like the card question, banner and head hidden', async () => {
+  const { paintStopList, stopLinesOf } = await import('../ui/public/shape/stop-list.mjs');
+  const { renderGateCard, stepHead } = await import('../ui/public/shape/step-card.mjs');
+  const { planStop } = await import('../src/shared/shape/run-stops.mjs');
+  // The busy state: runs 2, 4 and 11 at stops, run 5 failed.
+  const ask = (index, kind, reason) => ({ index, runId: `r${index}`, pipelineId: `p${index}`, id: `q${index}`, kind, reason, failed: false, holdsUp: [] });
+  const asks = [ask(2, 'plan', 'requirement'), ask(4, 'gate', 'check'),
+    { index: 5, runId: null, pipelineId: 'p5', id: null, kind: null, reason: null, failed: true, holdsUp: [] }, ask(11, 'gate', 'check')];
+  const slices = [[2, 'approval'], [4, 'questions'], [5, 'error'], [11, 'questions']].map(([index, state]) => ({ index, title: `Run ${index}`, state, pipelineId: `p${index}`, buildsOn: [] }));
+  const lines = stopLinesOf({ asks, ask: asks[0], slices });
+
+  /** What a host's `.qpanel` holds for one ask kind, under the renderer's own banner. */
+  function fill(panel, kind) {
+    panel.classList.remove('hidden');
+    panel.dataset.kind = kind;
+    panel.innerHTML = '<div class="qpanel-head"><b>Plan ready for your approval · v1</b><span class="qcount">Shape 3/8</span></div>';
+    if (kind === 'plan' || kind === 'gate') {
+      const stop = planStop(kind === 'plan' ? { run: 2, outlineChange: 'the runner cache needs its own run' } : { run: 4 });
+      renderGateCard(panel, { id: `q-${kind}`, kind, issues: [], plan: { round: 1 }, stop },
+        { doc: document, title: stop.head, chip: 'Plan', tagLevel: () => {}, submit: async () => true });
+    } else {
+      panel.append(stepHead(document, 'A few questions', 'Clarify'));
+      panel.insertAdjacentHTML('beforeend', '<div class="qbody"><div class="qblock"><div class="qtext">Where?</div></div></div>'
+        + '<div class="qpanel-foot"><button type="button" class="btn btn-primary">Send</button></div>');
+    }
+  }
+  const PANEL = ['display', 'padding', 'padding-top', 'padding-right', 'padding-bottom', 'padding-left', 'background', 'background-color', 'border-radius'];
+  const PROPS = { '.qpanel': PANEL, '.qblock': PANEL, '.qpanel-foot': ['flex-wrap', 'gap', 'row-gap', 'border-top', 'border-top-color', 'border-color'] };
+  const bad = [];
+  for (const kind of ['plan', 'gate', 'clarify', 'form']) {
+    document.body.innerHTML = '<div class="ask-card chat-rc"><ol class="chat-rc-stops"></ol>'
+      + '<section class="chat-rc-q"><div class="chat-rc-qbody"><div class="qpanel hidden"></div></div></section></div>';
+    const slot = document.querySelector('section.chat-rc-q');
+    fill(slot.querySelector('.qpanel'), kind);
+    paintStopList(document, document.querySelector('ol.chat-rc-stops'), lines, {
+      bindQuestion: (qHost) => { fill(qHost.querySelector('.qpanel'), kind); return () => {}; },
+      paintQuestion: () => null, releaseQuestion: () => {}, resume: async () => ({ ok: true }),
+    });
+    // The proof reads real values from the card question (so equal never means two unread ones).
+    const own = slot.querySelector('.qpanel');
+    // A clarify or form panel has no top padding of its own: its questions (or its fields) carry the 16px.
+    const top = kind === 'plan' || kind === 'gate' ? '16px' : '0px';
+    assert.deepEqual([winning(own, 'padding-top').value, winning(own, 'padding-left').value], [top, '0px'], `${kind}: the card question's padding`);
+    assert.equal(winning(slot.querySelector('.qpanel-foot'), 'flex-wrap').value, 'wrap', `${kind}: the card question's foot wraps`);
+    assert.notEqual(winning(slot.querySelector('.step-head'), 'display').value, 'none', `${kind}: the card question keeps its step head`);
+    assert.equal(winning(slot.querySelector('.qpanel-head'), 'display').value, 'none', `${kind}: the card question hides the banner`);
+    for (const run of [2, 4, 11]) {
+      // Slice 12: a line mounts its step card when it is opened, and only one is mounted at a time.
+      const button = document.querySelector(`ol.chat-rc-stops li[data-run="${run}"] button.chat-rc-stop-line`);
+      assert.ok(button, `${kind}: run ${run}'s line is a button`);
+      button.click();
+      const hosts = [...document.querySelectorAll('.chat-rc-stop-q')];
+      assert.equal(hosts.length, 1, `${kind}: one host, for the opened line`);
+      const [host] = hosts;
+      assert.equal(host.closest('li').dataset.run, String(run), kind);
+      const where = `${kind}, run ${run}`;
+      for (const sel of ['.qpanel-head', '.step-head']) {
+        const w = winning(host.querySelector(sel), 'display');
+        if (w.value !== 'none') bad.push(`${where}: ${sel} display is ${w.value} (by "${w.by}"), wants none`);
+      }
+      const margin = winning(host, 'margin-top').value;
+      if (margin !== '0' && margin !== '0px') bad.push(`${where}: the host's margin-top is ${margin}, wants 0`);
+      for (const [sel, props] of Object.entries(PROPS)) {
+        const mine = [...host.querySelectorAll(sel)];
+        const theirs = [...slot.querySelectorAll(sel)];
+        assert.ok(theirs.length > 0 && mine.length === theirs.length, `${where}: ${sel} count ${mine.length} vs ${theirs.length}`);
+        for (const [i, el] of mine.entries()) {
+          for (const prop of props) {
+            const a = winning(el, prop);
+            const b = winning(theirs[i], prop);
+            if (a.value !== b.value) bad.push(`${where}: ${sel}[${i}] ${prop} is ${a.value} (by "${a.by}"), the card question's is ${b.value} (by "${b.by}")`);
+          }
+        }
+      }
+    }
+  }
+  document.body.innerHTML = '';
+  assert.deepEqual(bad, []);
+});
+
+// Slice 12 (R-ux-5): the same list on the feature page, outside any chat card, and the line's chevron.
+async function s12Lines(html) {
+  const { paintStopList, stopLinesOf } = await import('../ui/public/shape/stop-list.mjs');
+  const asks = [{ index: 2, runId: 'r2', pipelineId: 'p2', id: 'q2', kind: 'gate', reason: 'check', failed: false, holdsUp: [] }];
+  document.body.innerHTML = html;
+  paintStopList(document, document.querySelector('ol.chat-rc-stops'), stopLinesOf({ asks, slices: [{ index: 2, state: 'questions', pipelineId: 'p2', buildsOn: [] }] }), {
+    bindQuestion: (qHost) => {
+      const panel = qHost.querySelector('.qpanel');
+      panel.classList.remove('hidden');
+      panel.innerHTML = '<div class="qpanel-head"><b>Plan ready</b></div><div class="step-head">Run 2</div>';
+      return () => {};
+    },
+    paintQuestion: () => null, releaseQuestion: () => {}, resume: async () => ({ ok: true }),
+  });
+  const button = document.querySelector('button.chat-rc-stop-line');
+  assert.ok(button, 'the line is a button');
+  return button;
+}
+
+test('S12: a stop line\'s step card on the feature page hides the renderer\'s banner and the step head', async () => {
+  const button = await s12Lines('<div class="gpage"><div class="gpage-panel" data-tab="runs"><ol class="chat-rc-stops"></ol></div></div>');
+  button.click();
+  for (const sel of ['.qpanel-head', '.step-head']) {
+    assert.equal(winning(document.querySelector(`.chat-rc-stop-q ${sel}`), 'display').value, 'none', sel);
+  }
+  document.body.innerHTML = '';
+});
+
+test('S12: a stop line has a third column for its chevron, in --ink-2, which turns down while the line is open', async () => {
+  const button = await s12Lines('<div class="ask-card chat-rc"><ol class="chat-rc-stops"></ol></div>');
+  const chev = button.querySelector('.chat-rc-stop-chev');
+  assert.ok(chev, 'the chevron');
+  assert.equal(winning(button, 'display').value, 'grid');
+  assert.match(winning(button, 'grid-template-columns').value || '', /^16px minmax\(0(px)?, ?1fr\) \S+$/, 'dot, text, chevron');
+  assert.equal(winning(chev, 'color').value, 'var(--ink-2)');
+  const turn = () => ['transform', 'rotate'].map((p) => winning(chev, p).value || '').filter((v) => v && v !== 'none').join(' ');
+  assert.equal(turn(), '', 'closed: it points right');
+  button.click();
+  assert.equal(button.getAttribute('aria-expanded'), 'true');
+  assert.match(turn(), /(rotate\()?90deg/, 'open: it points down');
+  document.body.innerHTML = '';
 });

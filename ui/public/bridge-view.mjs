@@ -14,6 +14,7 @@ import { codexReaches, runsOnText } from '../../src/shared/connections.mjs';
 import { SIGN_IN_ENGINE_NAMES } from '../../src/shared/engine-switch.mjs';
 import { IMAGE_SERVICES, originOf, pictureSeconds } from '../../src/shared/image-services.mjs';
 import { markedSelect, modelMark } from './models/brand-marks.mjs';
+import { addVaultNote } from './settings/secret-vault-note.mjs';
 
 function h(doc, tag, cls, text) {
   const n = doc.createElement(tag);
@@ -250,8 +251,8 @@ export function renderSpeechRow(providers, { doc = globalThis.document } = {}) {
     }
     if (kind === 'stt') {
       box.appendChild(speechInput(doc, kind, 'language', 'Language', 'auto, or an ISO code such as bg', s));
-      // How long a silence ends what you are saying — raise it if you get cut off mid-sentence.
-      box.appendChild(speechInput(doc, kind, 'pause', 'Pause before sending (seconds)', '1.2 (raise it if you get cut off)', s));
+      // The silence that sends a finished sentence; unfinished ones wait 2.5× as long (browser speech-to-text).
+      box.appendChild(speechInput(doc, kind, 'pause', 'Pause before sending (seconds)', '0.7 (after a finished sentence; unfinished ones wait longer)', s));
     }
     for (const [field, label, placeholder] of SPEECH_FIELDS[kind]) server.appendChild(speechInput(doc, kind, field, label, placeholder, s));
     const btns = h(doc, 'div', 'mv-pv-btns');
@@ -590,7 +591,8 @@ export function renderCopilotRow(providers, { doc = globalThis.document, signIn 
   // With the broker, the broker's view of your sign-in.
   if (brokered) row.appendChild(brokerLine(doc, p.broker, 'copilot'));
   const main = h(doc, 'div', 'mv-pv-main');
-  if (c.connected && !brokered) main.appendChild(h(doc, 'small', 'hint', `Connected${c.login ? ` as @${c.login}` : ''}`));
+  const onHost = c.githubHost && c.githubHost !== 'github.com' ? ` on ${c.githubHost}` : '';
+  if (c.connected && !brokered) main.appendChild(h(doc, 'small', 'hint', `Connected${c.login ? ` as @${c.login}` : ''}${onHost}`));
   if (c.tokenSource === 'env') main.appendChild(h(doc, 'small', 'hint', `Token read from your shell env (${c.tokenRef}).`));
   const flow = h(doc, 'div', 'mv-cp-flow');
   if (signIn) flow.appendChild(renderCopilotSignIn(signIn, { doc }));
@@ -601,10 +603,18 @@ export function renderCopilotRow(providers, { doc = globalThis.document, signIn 
 
   const ctl = h(doc, 'div', 'mv-pv-ctl');
   const sel = h(doc, 'select', 'select mv-cp-account');
-  for (const [v, t] of [['individual', 'Individual'], ['business', 'Business'], ['enterprise', 'Enterprise']]) {
+  for (const [v, t] of [['individual', 'Individual'], ['business', 'Business'], ['enterprise', 'Enterprise'], ['ghe-com', 'GHE.com tenant']]) {
     const o = h(doc, 'option', null, t); o.value = v; if (v === c.accountType) o.selected = true; sel.appendChild(o);
   }
-  ctl.appendChild(tippedField(doc, 'Account', sel, 'Picks the Copilot API host. The sign-in itself reports the host it was issued for and wins when it does.'));
+  ctl.appendChild(tippedField(doc, 'Account', sel, 'Picks the Copilot API host. The sign-in itself reports the host it was issued for and wins when it does. GHE.com tenant: everything goes to your tenant.'));
+  // The tenant's host, shown while Account is GHE.com tenant (syncCopilotHostField); Save sends it with the account.
+  const hostIn = h(doc, 'input', 'input mv-cp-host');
+  hostIn.type = 'text'; hostIn.placeholder = 'acme.ghe.com';
+  hostIn.value = c.enterpriseHost || '';
+  const hostField = tippedField(doc, 'GHE.com host', hostIn, 'Your tenant, like acme.ghe.com. Sign-in, models and quota then use it.');
+  hostField.classList.add('mv-cp-host-field');
+  hostField.hidden = c.accountType !== 'ghe-com';
+  ctl.appendChild(hostField);
   ctl.appendChild(numberField(doc, 'mv-pv-conc', 'Max concurrent requests', c.maxConcurrent, {
     provider: 'copilot',
     tip: "Fan-out children beyond this wait their turn. The one knob that lowers GitHub's abuse-detection risk. Keep it low.",
@@ -657,6 +667,7 @@ export function renderEndpointRow(providers, name, { doc = globalThis.document }
   if (keyIn.value) keyIn.dataset.original = keyIn.value;
   keyIn.placeholder = 'sk-…, or ${VAR} to read your shell env';
   ctl.appendChild(tippedField(doc, 'API key', keyIn, 'Stored masked; leave masked to keep. A model can override this key on its Connection.'));
+  addVaultNote(keyIn);
   ctl.appendChild(numberField(doc, 'mv-pv-conc', 'Max concurrent requests', k.maxConcurrent, { provider: name }));
   row.appendChild(ctl);
 
@@ -724,9 +735,17 @@ export function providerRowOf(model, providers) {
 /** The row `sel` names: `rootEl` itself (a body on its own), else the first one below it (the card, the tab). */
 const rowIn = (rootEl, sel) => (rootEl.matches?.(sel) ? rootEl : rootEl.querySelector(sel));
 
+/** Show the GHE.com host field only while the Copilot row's Account select says GHE.com tenant. */
+export function syncCopilotHostField(rootEl) {
+  const row = rowIn(rootEl, '.mv-pv-row[data-provider="copilot"]');
+  const acct = row && row.querySelector('.mv-cp-account');
+  const field = row && row.querySelector('.mv-cp-host-field');
+  if (acct && field) field.hidden = acct.value !== 'ghe-com';
+}
+
 /**
  * Collect a provider row (`rootEl` is the row or an ancestor) into its PATCH body, masked echo dropped: Copilot's
- * { accountType, maxConcurrent }, an endpoint's { baseUrl, apiKey (only when changed), maxConcurrent }. Null without it.
+ * { accountType, enterpriseHost (GHE.com tenant only, the server refuses one without the other), maxConcurrent }, an endpoint's { baseUrl, apiKey (only when changed), maxConcurrent }. Null without it.
  */
 export function collectProviderRow(rootEl, name) {
   const row = rowIn(rootEl, `.mv-pv-row[data-provider="${name}"]`);
@@ -734,6 +753,8 @@ export function collectProviderRow(rootEl, name) {
   const body = {};
   const acct = row.querySelector('.mv-cp-account');
   if (acct) body.accountType = acct.value;
+  const host = row.querySelector('.mv-cp-host');
+  if (acct && acct.value === 'ghe-com' && host) body.enterpriseHost = host.value.trim();
   const bu = row.querySelector('.mv-pv-baseurl');
   if (bu) body.baseUrl = bu.value.trim();
   const key = row.querySelector('.mv-pv-key');
@@ -890,8 +911,9 @@ export function renderCopilotSignIn(flow, { doc = globalThis.document } = {}) {
   status.setAttribute('role', 'status');
   const codeRow = h(doc, 'div', 'mv-cp-code-row');
   codeRow.appendChild(copyCodeButton(doc, flow.userCode || '', status));
-  const link = h(doc, 'a', 'btn btn-primary mv-cp-open', 'Open github.com/login/device');
-  link.href = flow.verificationUri || 'https://github.com/login/device';
+  const href = flow.verificationUri || `https://${flow.host || 'github.com'}/login/device`;
+  const link = h(doc, 'a', 'btn btn-primary mv-cp-open', `Open ${href.replace(/^https:\/\//, '')}`);
+  link.href = href;
   link.target = '_blank'; link.rel = 'noopener';
   codeRow.appendChild(link);
   box.appendChild(codeRow);
@@ -973,6 +995,69 @@ export function renderImportSheet(models, { doc = globalThis.document } = {}) {
       if (m.inCatalog) status.push('In catalogue');
       if (m.preview) status.push('preview');
       if (disabled) status.push('disabled: enable it in your GitHub Copilot settings');
+      tr.appendChild(h(doc, 'td', 'mvi-status', status.join(' · ') || '—'));
+      tbody.appendChild(tr);
+    }
+    tbl.appendChild(tbody);
+    root.appendChild(tbl);
+  }
+  const msg = h(doc, 'p', 'form-msg mvi-msg');
+  msg.setAttribute('aria-live', 'polite');
+  root.appendChild(msg);
+  const btns = h(doc, 'div', 'mv-editor-btns');
+  const go = h(doc, 'button', 'btn btn-primary mvi-go', 'Import selected');
+  go.type = 'button'; go.disabled = !list.length;
+  const cancel = h(doc, 'button', 'btn mvi-cancel', 'Cancel');
+  cancel.type = 'button';
+  btns.appendChild(go); btns.appendChild(cancel);
+  root.appendChild(btns);
+  return root;
+}
+
+/** The import sheet over GET /api/providers/opencode/models (§8.4's Copilot import): what YOUR installed opencode can
+ *  run, as `opencode models` lists it. Same chrome and same checkbox contract as the Copilot sheet — collectImportSheet
+ *  reads both — with the columns the CLI itself gives: the model id (provider/model, its provider shown beside it) and
+ *  the catalogue status. Each entry runs on the OpenCode harness, its id as opencode takes it. */
+export function renderOpencodeSheet(models, { doc = globalThis.document } = {}) {
+  const list = Array.isArray(models) ? models : [];
+  const root = h(doc, 'section', 'card mv-editor mvi');
+  root.dataset.source = 'opencode';
+  root.appendChild(h(doc, 'h3', 'mv-editor-title', 'Import from OpenCode'));
+  root.appendChild(h(doc, 'small', 'hint',
+    'The models your installed opencode can run — its configured provider keys and sign-ins, plus the free OpenCode Zen models. Each is added as an OpenCode model under the id above, so a run (or chat) on OpenCode calls it exactly as `opencode models` lists it.'));
+  if (!list.length) {
+    root.appendChild(h(doc, 'div', 'hist-empty', 'opencode lists no models.'));
+  } else {
+    const tbl = h(doc, 'table', 'tm-tbl mvi-tbl');
+    const thead = h(doc, 'thead');
+    const hr = h(doc, 'tr');
+    const allTh = h(doc, 'th');
+    const all = h(doc, 'input', 'mvi-all'); all.type = 'checkbox'; all.title = 'Select all importable';
+    allTh.appendChild(all);
+    hr.appendChild(allTh);
+    for (const t of ['Model', 'Provider', 'Status']) hr.appendChild(h(doc, 'th', null, t));
+    thead.appendChild(hr);
+    tbl.appendChild(thead);
+    const tbody = h(doc, 'tbody');
+    for (const m of list) {
+      const tr = h(doc, 'tr');
+      tr.dataset.id = m.id;
+      const cbTd = h(doc, 'td');
+      const cb = h(doc, 'input', 'mvi-cb'); cb.type = 'checkbox'; cb.value = m.id;
+      cbTd.appendChild(cb);
+      tr.appendChild(cbTd);
+      const nameTd = h(doc, 'td');
+      const nameRow = h(doc, 'div', 'mdl-sheet-name');
+      nameRow.appendChild(sheetMark(doc, m));
+      const nameTx = h(doc, 'span', 'mdl-sheet-name-tx');
+      nameTx.appendChild(h(doc, 'b', null, m.name || m.id));
+      nameTx.appendChild(h(doc, 'small', 'hint mvi-id', m.id || ''));
+      nameRow.appendChild(nameTx);
+      nameTd.appendChild(nameRow);
+      tr.appendChild(nameTd);
+      tr.appendChild(h(doc, 'td', null, m.provider || '—'));
+      const status = [];
+      if (m.inCatalog) status.push('In catalogue');
       tr.appendChild(h(doc, 'td', 'mvi-status', status.join(' · ') || '—'));
       tbody.appendChild(tr);
     }

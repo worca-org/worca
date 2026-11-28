@@ -47,9 +47,15 @@ ask this way, and plugins can ship forms too.
 
 ### Model and effort per agent
 
-You can pick a model and a reasoning effort (medium, high, xhigh, max) for each agent node. In Workflows, use the
-toolbar over a selected agent card. For one project, use New pipeline › **Advanced** › **Agents**. The project
-keeps your picks for its later runs, and **Save as workflow defaults** moves them into the workflow.
+You can pick a model and a reasoning effort for each agent node. In Workflows, select an agent card and use **Model** in
+its toolbar, or the **Model** field under **More**: both open one picker, **inherit** (follows the run) on top, then three
+columns, **Harness**, **Provider** and **Model**. A pick names the harness it runs on, so one workflow can plan on Claude
+Code and implement on Codex; **inherit** runs the step on the run's harness. A model two harnesses run is listed under
+each (*also on …*), and a provider that needs a key or a sign-in says so. **Effort** offers what the picked model takes on
+the picked harness. For one project, use New run › **Advanced** › **Agents**: each row's model opens the same
+picker. A pick made there names its harness and is saved for the project, so the step stays on it in later runs, also
+when **Default harness** changes. **inherit** goes back to the workflow default. The project keeps your picks for its
+later runs, and **Save as workflow defaults** moves them, harness included, into the workflow.
 
 A project's pick beats a team-policy default, which beats the workflow's own. `--model` only fills nodes that have
 none. Fan-out agents also take a sub-agent model.
@@ -107,8 +113,11 @@ Flow cards express joins, choices and merges without code: **Task** (the run's r
 **AND**, **OR** and **Combine**.
 
 A selected card's toolbar sets its model, effort and await-all. **More** holds every other setting. The top bar
-keeps only Back, **Workflows ▾** (New canvas, Open…, Import…, Export…), the name, the Library toggle and **Save**.
-**Auto-layout** and the zoom menu sit bottom right. See [UI levels](ui-levels.md#workflows).
+keeps only Back, **Workflows ▾** (New canvas, Open…, Import…, Export…) and the name on the left; on the right, what
+the canvas holds and what is left to wire, then **Open** (the Library toggle) and **Save**. When the canvas is too narrow
+for both sides, those two fold into one **!** button that opens them as a menu, and the name gives way before anything
+overlaps. **Auto-layout** sits between **+** and the chat; the zoom menu and **How it works** sit bottom right. See
+[UI levels](ui-levels.md#workflows).
 
 ### The Library
 
@@ -140,7 +149,7 @@ The Library's **Workflows** section, its first, lists **Yours** on top, then **B
 split into domain folders. **Edit** (or a click on the row) opens one of yours, and Save changes it. **Use as
 template** opens a workflow as a new unsaved copy that Save keeps as your own. Built-in and plugin workflows offer
 only that; yours offer it from the row's ⋯ menu. A badge beside the name says what the canvas holds: **Editing** or
-**Unsaved copy**. Saved pipelines appear in New pipeline's **Workflow** picker, and so in schedules too.
+**Unsaved copy**. Saved pipelines appear in New run's **Workflow** picker, and so in schedules too.
 
 ### Sharing a pipeline
 
@@ -158,16 +167,30 @@ For a plugin you can also pick **Marketplace**. Worca then opens a pull request 
 team marketplace. It uses one branch, `worca/plugin/<name>`, is validated with the marketplace's own
 discovery, and comes from a fork when you can't push.
 
+With the flag `workflowTests` on and at least one saved [version](workflow-tests.md#versions), Export has a **Version**
+field: it starts on the version new runs use, and can export another version or **Your draft**. An exported skill or
+plugin keeps the workflow's name whichever version it holds.
+
+A step set to a harness carries it in every format. On a Worca server older than per-step harnesses the harness is
+ignored and the step runs on the run's harness; a review role set to one turns that node's role review off there.
+
 The CLI does the same with `worca workflow list`, `worca workflow export <id> --format json|claude|plugin` and
 `worca workflow import <file>`.
 
 ![The Workflows view with the built-in Default pipeline on the full-screen canvas — Task, Clarify, Plan, Refine Plan, Implementation, Review Implementation and End wired port to port, amber loop wires swooping back under the reviewers with ≤3 pills — beside the Library open on its Workflows tab, its architecture, coding, presentation, video and shared folders with coding opened on Default, with the black + and the composer chat pill at the bottom and Auto-layout and the zoom menu bottom right](screenshots/composer.png)
 
+### Tests (Labs)
+
+Behind the flag `workflowTests` (Settings › Labs), a workflow also has **Tests** and **Versions** pages. Save a version,
+choose which one new runs use, keep real requests as examples, then **Test a version**: Worca tries every example 3 times
+on two versions, and Compare shows what got better or worse. Your criteria, written in your own words, are checked by
+AI on every try. See [Workflow tests](workflow-tests.md).
+
 ## Presentations
 
 ### From a brief to a slide deck
 
-The built-in **Presentation** workflow turns a request into a slide deck. Pick it in New pipeline's **Workflow**
+The built-in **Presentation** workflow turns a request into a slide deck. Pick it in New run's **Workflow**
 picker (Advanced; Simple lists only Auto and Default), have Chat propose one, or run
 `worca --workflow wf_presentation --prompt "…"`.
 

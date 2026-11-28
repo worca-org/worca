@@ -6,7 +6,7 @@
 // so the CLI and the server can never disagree about what a legal graph is.
 //
 // Public surface:
-//   exportGraphJson(id)                -> { version:2, name, domain, nodes, wires, canvas?, codeGraph?, sessions? }
+//   exportGraphJson(id, {use})         -> { version:2, name, domain, nodes, wires, canvas?, codeGraph?, sessions? }
 //   saveGraphWorkflow(body, opts)      -> composer semantics: keeps a legal `id`, 409 on a minted collision (opts.origin; opts.confirmScripts = Ask's graph card, D18's rule over the list it showed)
 //   importGraphWorkflow(body, opts)    -> import semantics: id/origin ignored, name suffixed on collision
 //   listScriptNodes(graph, scripts)    -> the command/code values an import must show first (D18)
@@ -19,6 +19,8 @@
 //   ID_TAKEN (+ .id) | NOT_FOUND | UNSUPPORTED | SCRIPTS_UNCONFIRMED (+ .scriptNodes)
 
 import { listModels } from './config.mjs';
+import { runsOn, pickEffortsOn } from '../shared/connections.mjs';
+import { MODEL_ENGINE_NAMES, engineLabel } from '../shared/engine-switch.mjs';
 import { EFFORTS, ALL_EFFORTS, subagentModelIssue } from './model-env.mjs';
 import { loadAgentRegistry, DEFAULT_AGENTS_DIR } from './agent-registry.mjs';
 import { loadScriptRegistry } from './script-registry.mjs';
@@ -26,7 +28,7 @@ import { registryPortsFn } from './graph/registry-ports.mjs';
 import { validateGraph, AGENT_TUNABLES } from '../shared/graph/validate.mjs';
 import { effectiveScriptParams, CONFIRM_PARAM_TYPES } from '../shared/graph/script-meta.mjs';
 import { pickTemplateExtras } from '../shared/graph/template.mjs';
-import { readWorkflow, writeGraphWorkflow } from './workflows.mjs';
+import { readWorkflow, runnableOf, writeGraphWorkflow } from './workflows.mjs';
 
 /** How many `Name (n)` retries an import makes before giving up. */
 export const SUFFIX_CAP = 20;
@@ -102,11 +104,34 @@ export function nodeDefaultsError(raw, models, where) {
   // shared helper so a typo is a 400 with the same message every writer uses.
   const subIssue = subagentModelIssue(raw.subagentModel);
   if (subIssue) return subIssue;
+  const engine = raw.engine === undefined || raw.engine === null || raw.engine === '' ? null : raw.engine;
+  if (engine !== null) {
+    if (typeof engine !== 'string') return 'engine must be a string';
+    if (!MODEL_ENGINE_NAMES.includes(engine)) return `unknown harness "${engine.slice(0, 32)}"`;
+    if (!model) return 'select a model before choosing a harness';
+    if (!runsOn(entry, engine)) return `model "${model}" does not run on ${engineLabel(engine)}`;
+  }
   if (!effort) return '';
   if (!ALL_EFFORTS.includes(effort)) return `unknown effort "${effort}"`;
   if (!entry) return 'select a model before choosing an effort';
-  if (!entry.efforts.includes(effort)) return `model "${model}" does not support effort "${effort}"`;
+  const efforts = engine ? pickEffortsOn(entry, engine) : entry.efforts;
+  if (!efforts.includes(effort)) return `model "${model}" does not support effort "${effort}"`;
   return '';
+}
+
+/** D17: what an export exports — 'draft' (the stored row) or a saved version number. The ONE rule every export path
+ *  (JSON file, Claude Code skill, plugin, marketplace) and the HTTP routes share; 'live' is not an export choice. */
+export function isExportUse(use) { return use === 'draft' || (Number.isInteger(use) && use > 0); }
+
+/**
+ * What an export of the stored `row` carries for `use` (D17): the row for 'draft', else that saved version
+ * (runnableOf). Only this CONTENT follows `use`: an export's identity (skill slug, plugin name, PR branch) stays the
+ * stored row's, so exporting v1 after renaming the draft updates the same skill or plugin. A null row stays null.
+ * @throws code BAD_REQUEST on any other `use`; NOT_FOUND for a version that does not exist
+ */
+export function exportContentOf(row, use = 'draft') {
+  if (!isExportUse(use)) throw err(`use must be 'draft' or a version number, not ${JSON.stringify(use)}`, 'BAD_REQUEST');
+  return runnableOf(row, { use });
 }
 
 /**
@@ -114,10 +139,12 @@ export function nodeDefaultsError(raw, models, where) {
  * graph the Claude Code exporter snapshots — that one applies workspace-variant
  * substitution and drops `canvas`). No id, origin or timestamps: the importer
  * mints an id. Per-node `config` stays; project-layer overrides never ride along.
+ * `use` (D17): 'draft' (the default, the stored row) or a version number (that saved version).
  * @param {string} id
+ * @param {{use?: 'draft'|number}} [opts]
  */
-export async function exportGraphJson(id) {
-  const tpl = await readWorkflow(id);
+export async function exportGraphJson(id, { use = 'draft' } = {}) {
+  const tpl = exportContentOf(await readWorkflow(id), use);
   if (!tpl) throw err(`workflow not found: ${id}`, 'NOT_FOUND');
   if (tpl.auto) throw err('the Auto entry has no graph to export — it is decided per run', 'UNSUPPORTED');
   if (tpl.version !== 2) {
@@ -215,7 +242,7 @@ async function validateForSave(graph, { registry, scripts, agentsDir }) {
  * @returns {Promise<{workflow: object, warnings: Array}>}
  * @throws code 'SCRIPTS_UNCONFIRMED' (`.scriptNodes`) — nothing was written
  */
-export async function saveGraphWorkflow(body, { registry, agentsDir, origin = null, confirmScripts = false, acceptScripts = null } = {}) {
+export async function saveGraphWorkflow(body, { registry, agentsDir, origin = null, confirmScripts = false, acceptScripts = null, revision = null } = {}) {
   const graph = prepareGraph(body || {}, { keepId: true });
   const { warnings, scripts } = await validateForSave(graph, { registry, agentsDir });
   if (confirmScripts === true) {
@@ -225,7 +252,10 @@ export async function saveGraphWorkflow(body, { registry, agentsDir, origin = nu
         'SCRIPTS_UNCONFIRMED', { scriptNodes });
     }
   }
-  const workflow = await writeGraphWorkflow(typeof origin === 'string' && origin ? { ...graph, origin } : graph, { rejectCollision: true });
+  const workflow = await writeGraphWorkflow(typeof origin === 'string' && origin ? { ...graph, origin } : graph, {
+    rejectCollision: true,
+    ...(revision && typeof revision === 'object' ? { revisionSource: revision.source, by: revision.by ?? null } : {}),
+  });
   return { workflow, warnings };
 }
 

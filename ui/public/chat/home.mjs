@@ -6,6 +6,7 @@
 // Chat section shows with chat-page[data-view="home"] and ends when either changes; leaving destroys every tile and
 // its graph mount. Data comes from deps (app.js); findFollowingThread is the one fetch of its own.
 import { createQuickActions } from './home-actions.mjs';
+import { createHeroTitle } from './home-verbs.mjs';
 import {
   createHomeTabs, buildChatsList, buildPlansList, buildWorkflowsGrid, defaultTab, emptyState, runWorkflowText,
   HOME_TABS, HOME_TAB_EMPTY, HOME_TAB_KEY, RECENT_CHATS_MAX, WORKFLOWS_MAX,
@@ -105,7 +106,8 @@ export function createChatHome({ doc, host, heroSlot = null, deps, runsWaitMs = 
   };
 
   // ---- the hero, around P1's slot -------------------------------------------------------------------------
-  const title = h('h1', 'chat-home-title', 'What should worca do?');
+  const hero = createHeroTitle({ doc, win, clock });   // "What should worca <verb>?", the verb turning on a visit
+  const title = hero.el;
   host.insertBefore(title, heroSlot && heroSlot.parentNode === host ? heroSlot : host.firstChild);
 
   const actions = createQuickActions({ doc, deps, getRuns: pickRuns });
@@ -298,9 +300,10 @@ export function createChatHome({ doc, host, heroSlot = null, deps, runsWaitMs = 
     for (const tile of fresh) tile.fit();     // built detached at 0×0: frame the graph now that it has a box
   }
 
-  /** Answer (`follow`): the chat that follows the run when there is one, else the run itself on `tab`. The title: the
-   *  run itself on its Workflow tab, no lookup — a run proposed from a chat is always followed by it, so a lookup there
-   *  would make the run's graph unreachable from its tile (and cost a list + up to FOLLOW_SCAN_MAX snapshots). */
+  /** Both look up the chat that follows the run (a list + up to FOLLOW_SCAN_MAX snapshots). Answer (`follow`): that
+   *  chat, whose run card holds the question. The title: that chat with the run's panel beside it on `tab`, so the
+   *  conversation opens and the run's graph stays one click away. No chat follows the run: the run itself on `tab`;
+   *  Answer on a marked feature's run with no chat (slice 7): that feature's page (`deps.openFeature`). */
   async function route(snap, tab, key, { follow = false } = {}) {
     if (st.routing === st.visit) return;         // one route per visit at a time (a double click, a slow lookup)
     const token = st.visit;
@@ -310,12 +313,16 @@ export function createChatHome({ doc, host, heroSlot = null, deps, runsWaitMs = 
     try {
       const ref = runRef(snap);
       let threadId = null;
-      if (follow) {
-        try { threadId = typeof deps.threadForRun === 'function' ? await deps.threadForRun(ref) : null; } catch { threadId = null; }
-      }
+      let featureId = null;
+      try {
+        // Shaper slice 7 (D11): `homeForRun` also names a marked feature (flag on) with no chat, answered on its page.
+        if (typeof deps.homeForRun === 'function') ({ threadId = null, featureId = null } = (await deps.homeForRun(ref)) || {});
+        else threadId = typeof deps.threadForRun === 'function' ? await deps.threadForRun(ref) : null;
+      } catch { threadId = null; featureId = null; }
       if (token !== st.visit) return;            // the home was left during the lookup (another chat, another page): no late jump
-      if (threadId) deps.openThread(threadId);
-      else deps.openRunPanel(ref, { tab });
+      if (threadId && follow) deps.openThread(threadId);
+      else if (follow && featureId && typeof deps.openFeature === 'function') deps.openFeature(featureId);
+      else deps.openRunPanel(ref, threadId ? { tab, threadId } : { tab });
     } finally {
       if (st.routing === token) st.routing = false;
       if (tile) tile.setBusy(false);
@@ -408,6 +415,7 @@ export function createChatHome({ doc, host, heroSlot = null, deps, runsWaitMs = 
   }
   function visit() {
     st.visiting = true;
+    hero.start();
     const token = ++st.visit;
     st.threads = null;
     st.workflows = null;
@@ -437,6 +445,7 @@ export function createChatHome({ doc, host, heroSlot = null, deps, runsWaitMs = 
   }
   function leave() {
     st.visiting = false;
+    hero.stop();
     st.visit += 1;
     if (st.tick != null) { clock.clearInterval(st.tick); st.tick = null; }
     if (st.pending != null) { clock.clearTimeout(st.pending); st.pending = null; }

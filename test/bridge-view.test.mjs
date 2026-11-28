@@ -10,10 +10,10 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { JSDOM } from 'jsdom';
 import {
-  collectProviderRow, renderCopilotSignIn, renderImportSheet, collectImportSheet,
+  collectProviderRow, renderCopilotSignIn, renderImportSheet, renderOpencodeSheet, collectImportSheet,
   renderConnectionSection, applyConnectionMode, setModelUpstream, collectConnection, connectionWhere, setConnectionWhere,
   renderCopilotRow, renderOpenRouterRow, renderEndpointRow, renderSpeechRow, renderImagesRow, renderSoundRow,
-  collectImagesRow, applyImagesPreset,
+  collectImagesRow, applyImagesPreset, syncCopilotHostField,
 } from '../ui/public/bridge-view.mjs';
 import { renderModelEditor, collectModelEditor, applyConnectionModeIn, setModelEngine } from '../ui/public/models-view.mjs';
 import { buildCatalogue, buildModelPanel } from '../ui/public/models/catalogue-model.mjs';
@@ -87,6 +87,51 @@ test('the Providers tab\'s Copilot row: not connected / connected states; sign-i
   assert.equal(renderProvidersTab(null, { doc }).querySelectorAll('.mv-pv-row[data-provider]').length, 7);   // copilot, OpenRouter, openai, anthropic + Speech + Image generation + Sound
 });
 
+test('copilot row: GHE.com option listed; host field shown only for ghe-com; Save collects the host with ghe-com only; connected line and summary name the tenant', () => {
+  const field = (row) => row.querySelector('.mv-cp-host-field');
+  const plain = renderCopilotRow(PROVIDERS, { doc });
+  assert.deepEqual([...plain.querySelectorAll('.mv-cp-account option')].map((o) => [o.value, o.textContent]),
+    [['individual', 'Individual'], ['business', 'Business'], ['enterprise', 'Enterprise'], ['ghe-com', 'GHE.com tenant']]);
+  assert.equal(plain.querySelector('.mv-cp-account').value, 'business');
+  assert.equal(field(plain).hidden, true);
+  assert.equal(plain.querySelector('.mv-cp-host').placeholder, 'acme.ghe.com');
+  assert.deepEqual(collectProviderRow(plain, 'copilot'), { accountType: 'business', maxConcurrent: 3 });
+  // The select moves to GHE.com (nothing stored yet): the field shows, and Save sends the typed host with the type.
+  plain.querySelector('.mv-cp-account').value = 'ghe-com';
+  syncCopilotHostField(plain);
+  assert.equal(field(plain).hidden, false);
+  plain.querySelector('.mv-cp-host').value = ' typed.ghe.com ';
+  assert.deepEqual(collectProviderRow(plain, 'copilot'), { accountType: 'ghe-com', enterpriseHost: 'typed.ghe.com', maxConcurrent: 3 });
+  plain.querySelector('.mv-cp-account').value = 'enterprise';
+  syncCopilotHostField(plain);
+  assert.equal(field(plain).hidden, true);
+  assert.deepEqual(collectProviderRow(plain, 'copilot'), { accountType: 'enterprise', maxConcurrent: 3 }, 'no host without GHE.com');
+  // Stored ghe-com: the stored host shows; the connected line names the tenant (github.com stays unadorned).
+  const stored = { copilot: { connected: true, login: 'octo', accountType: 'ghe-com', enterpriseHost: 'acme.ghe.com', githubHost: 'acme.ghe.com', maxConcurrent: 4 } };
+  const row = renderCopilotRow(stored, { doc });
+  assert.equal(field(row).hidden, false);
+  assert.equal(row.querySelector('.mv-cp-host').value, 'acme.ghe.com');
+  assert.match(row.querySelector('.mv-pv-main').textContent, /Connected as @octo on acme\.ghe\.com/);
+  assert.match(renderCopilotRow({ copilot: { connected: true, login: 'octo', githubHost: 'github.com', accountType: 'individual', maxConcurrent: 4 } }, { doc }).querySelector('.mv-pv-main').textContent, /Connected as @octo(?! on)/);
+  assert.match(plain.querySelector('.mv-cp-account').closest('.mv-field').textContent, /GHE\.com tenant: everything goes to your tenant/);
+  // The folded row's summary: the tenant's host, never the "Ghe-com" id.
+  const head = renderProvidersTab(stored, { doc }).querySelector('.mv-pv-card[data-row="copilot"] .mdl-fold-sum').textContent;
+  assert.match(head, /^acme\.ghe\.com · 4 requests at a time/);
+});
+
+test('sign-in block: link text and href follow verificationUri (tenant); fallback href uses flow.host; github.com unchanged', () => {
+  const open = (flow) => renderCopilotSignIn(flow, { doc }).querySelector('.mv-cp-open');
+  const tenant = open({ userCode: 'X', verificationUri: 'https://acme.ghe.com/login/device', host: 'acme.ghe.com' });
+  assert.equal(tenant.textContent, 'Open acme.ghe.com/login/device');
+  assert.equal(tenant.href, 'https://acme.ghe.com/login/device');
+  const fallback = open({ userCode: 'X', host: 'acme.ghe.com' });
+  assert.equal(fallback.href, 'https://acme.ghe.com/login/device');
+  assert.equal(fallback.textContent, 'Open acme.ghe.com/login/device');
+  const gh = open({ userCode: 'X' });
+  assert.equal(gh.href, 'https://github.com/login/device');
+  assert.equal(gh.textContent, 'Open github.com/login/device');
+});
+
 test('collectProviderRow: unchanged masked key is omitted (keep); a new key, base URL and cap are sent', () => {
   const tab = renderProvidersTab(PROVIDERS, { doc });
   assert.deepEqual(collectProviderRow(tab, 'openai'), { baseUrl: 'https://gw.example/v1', maxConcurrent: 8 });
@@ -144,7 +189,7 @@ test('the Copilot body: Account and the cap go with Save; Refresh usage, Import 
 
 test('info tips: the Copilot Account and cap and the endpoint API keys carry today\'s hint as a tip; the label still names its control', () => {
   const TIPS = {
-    account: 'Picks the Copilot API host. The sign-in itself reports the host it was issued for and wins when it does.',
+    account: 'Picks the Copilot API host. The sign-in itself reports the host it was issued for and wins when it does. GHE.com tenant: everything goes to your tenant.',
     cap: "Fan-out children beyond this wait their turn. The one knob that lowers GitHub's abuse-detection risk. Keep it low.",
     key: 'Stored masked; leave masked to keep. A model can override this key on its Connection.',
   };
@@ -258,6 +303,28 @@ test('import sheet: rows, disabled policy rows, status column and collect', () =
   for (const c of sheet.querySelectorAll('.mvi-cb')) c.checked = true;
   assert.deepEqual(collectImportSheet(sheet), ['gpt-5', 'claude-sonnet-4.5'], 'a disabled row is never collected, even ticked');
   const empty = renderImportSheet([], { doc });
+  assert.ok(empty.querySelector('.hist-empty'));
+  assert.equal(empty.querySelector('.mvi-go').disabled, true);
+});
+
+test('opencode import sheet: id + provider columns, inCatalog status, collect', () => {
+  const models = [
+    { id: 'openrouter/z-ai/glm-5.3-prime', provider: 'openrouter', name: 'glm-5.3-prime', inCatalog: false },
+    { id: 'opencode/beam-free', provider: 'opencode', name: 'beam-free', inCatalog: true },
+  ];
+  const sheet = renderOpencodeSheet(models, { doc });
+  assert.equal(sheet.dataset.source, 'opencode', 'app.js routes the import POST on it');
+  assert.match(sheet.querySelector('.mv-editor-title').textContent, /OpenCode/);
+  const rows = [...sheet.querySelectorAll('tbody tr')];
+  assert.equal(rows.length, 2);
+  assert.equal(rows[0].querySelector('td:nth-of-type(3)').textContent, 'openrouter');
+  assert.equal(rows[0].querySelector('.mvi-status').textContent, '—');
+  assert.equal(rows[1].querySelector('.mvi-status').textContent, 'In catalogue');
+  assert.ok(rows[0].querySelector('.mvi-id').textContent.includes('openrouter/z-ai/glm-5.3-prime'), 'the id rides beside the name');
+  assert.deepEqual(collectImportSheet(sheet), []);
+  rows[0].querySelector('.mvi-cb').checked = true;
+  assert.deepEqual(collectImportSheet(sheet), ['openrouter/z-ai/glm-5.3-prime']);
+  const empty = renderOpencodeSheet([], { doc });
   assert.ok(empty.querySelector('.hist-empty'));
   assert.equal(empty.querySelector('.mvi-go').disabled, true);
 });

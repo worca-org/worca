@@ -1,6 +1,6 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import http from 'node:http';
+import { appServer } from './helpers/app-server.mjs';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -21,6 +21,22 @@ test('resolveAutoModel: env wins verbatim, then the setting (catalog only), then
     'without Sonnet 5, the first Sonnet wins');
 });
 
+test('#1450: with no stored role the Claude classifier keeps its Sonnet 5 cascade; Codex takes Worca\'s Quick default', async () => {
+  const { setRoleModelOwnerReader } = await import('../src/core/model-roles.mjs');
+  setRoleModelOwnerReader(null);
+  const prevAuto = process.env.HOME;
+  const h = await mkdtemp(join(tmpdir(), 'worca-cc-automodel-floor-'));
+  process.env.HOME = h; process.env.USERPROFILE = h;
+  try {
+    const codex = [{ id: 'gpt-6-luna', engine: 'codex', builtin: true }];
+    assert.equal(resolveAutoModel([{ id: 'claude-sonnet-5-5' }, ...MODELS], { env: {} }), 'claude-sonnet-5', 'never a Worca default (Sonnet 5.5) ahead of the measured Sonnet 5');
+    assert.equal(resolveAutoModel(codex, { env: {}, engine: 'codex' }), 'gpt-6-luna');
+  } finally {
+    process.env.HOME = prevAuto; process.env.USERPROFILE = prevAuto;
+    await rm(h, { recursive: true, force: true });
+  }
+});
+
 // The settings tier: sandbox HOME (settings.json lives under HOME, not WORCA_HOME).
 let home, srv, base, prev;
 before(async () => {
@@ -29,7 +45,7 @@ before(async () => {
   process.env.HOME = home; process.env.USERPROFILE = home; delete process.env.WORCA_HOME; delete process.env[AUTO_MODEL_ENV];
   process.env.WORCA_TEST_ALLOW_HOME_FALLBACK = '1';
   const { app } = await import('../ui/server.mjs');
-  srv = http.createServer(app);
+  srv = appServer(app);
   await new Promise((r) => srv.listen(0, '127.0.0.1', r));
   base = `http://127.0.0.1:${srv.address().port}`;
 });

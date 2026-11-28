@@ -33,7 +33,11 @@ export function connectionOf(m) {
   if (m && m.connection && typeof m.connection === 'object' && m.connection.kind) return m.connection;
   const up = m?.upstream && typeof m.upstream === 'object' ? m.upstream
     : (m?.bridged ? { provider: m.bridged, api: m.upstreamApi || null, openrouter: !!m.openrouter } : null);
-  if (up && up.provider) return { kind: 'provider', provider: up.provider, api: up.api || null, codex: codexReaches(up), prefer: signinEngine(m) };
+  if (up && up.provider) {
+    // `bridgedHost`: a composed row's GitHub host when its Copilot sign-in is a GHE.com tenant (config.mjs bridgeShape).
+    const host = up.provider === 'copilot' && typeof m.bridgedHost === 'string' && m.bridgedHost ? { host: m.bridgedHost } : {};
+    return { kind: 'provider', provider: up.provider, api: up.api || null, codex: codexReaches(up), prefer: signinEngine(m), ...host };
+  }
   if (m?.env && typeof m.env === 'object' && 'ANTHROPIC_BASE_URL' in m.env) return { kind: 'env' };
   if (m?.routed && !m?.bridged && signinEngine(m) === 'claude') return { kind: 'env' };
   return { kind: 'signin', engine: signinEngine(m) };
@@ -59,7 +63,8 @@ export function connectionLabel(m) {
   const c = connectionOf(m);
   if (c.kind === 'signin') return SIGNIN_LABELS[c.engine] || `${engineLabel(c.engine)} sign-in`;
   if (c.kind === 'env') return 'Custom endpoint';
-  return PROVIDER_LABELS[c.provider] || c.provider;
+  const name = PROVIDER_LABELS[c.provider] || c.provider;
+  return c.host ? `${name} · ${c.host}` : name;   // a GHE.com tenant says which one
 }
 
 /** A stable key for "the same connection" (a usage limit spent on one is spent for every model on it). */
@@ -107,6 +112,13 @@ export function effortsOn(m, engine) {
   const own = Array.isArray(m?.efforts) ? m.efforts : [];
   const mapped = new Set(own.map((e) => effortOn(e, engine)).filter(Boolean));
   return list.filter((e) => mapped.has(e));
+}
+
+/** The efforts a pinned pick of `m` may send on `engine`: the model's own, in its order, then what effortsOn(m, engine)
+ *  adds (the harness's mapped ones). */
+export function pickEffortsOn(m, engine) {
+  const own = Array.isArray(m?.efforts) ? m.efforts : [];
+  return [...own, ...effortsOn(m, engine).filter((e) => !own.includes(e))];
 }
 
 /** A free catalog id for a model `upstreamId` reached through `provider` ('openai', 'copilot', 'anthropic', or 'gw' for a

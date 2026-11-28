@@ -7,6 +7,9 @@ import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import express from 'express';
 import { JSDOM } from 'jsdom';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { useDesignEnv } from './helpers/design-fixture.mjs';
 import { createDesignBuilds } from '../src/core/design/registry.mjs';
 import { registerDesignRoutes } from '../src/core/design/routes.mjs';
@@ -15,6 +18,7 @@ import { designModelPick, resolveDesignModel } from '../src/core/design/spawn-op
 import { designBuildModels } from '../src/core/design/chat-thread.mjs';
 import { DESIGN_ENGINES } from '../src/core/design/engines.mjs';
 import { assertDesignModelsInput, nextDesignModels } from '../src/core/settings.mjs';
+import { assertSlotModels } from '../src/core/config.mjs';
 import { DESIGN_ENGINE_NAMES } from '../src/shared/design-names.mjs';
 import { roleOfSettingId } from '../src/shared/model-roles.mjs';
 import { enginePatchToSettingsBody, designRowId, renderEngineSection } from '../ui/public/engine-settings-view.mjs';
@@ -60,10 +64,12 @@ test('the design pick wins, then the Models page row, then the role, then the en
   assert.deepEqual(designModelPick('lead', { engine: 'claude', design, settings }), { model: 'claude-fable-5-1', effort: 'max', source: 'design' });
   assert.deepEqual(designModelPick('builder', { engine: 'claude', design, settings }), { model: 'claude-haiku-5-5', effort: 'medium', source: 'setting' }, 'no effort: the builder default');
   assert.deepEqual(designModelPick('lead', { engine: 'claude', settings }), { model: 'claude-opus-5', effort: 'xhigh', source: 'setting' });
-  assert.deepEqual(designModelPick('lead', { engine: 'codex', settings }), { model: null, effort: 'high', source: 'default' }, 'another engine has its own rows');
-  assert.deepEqual(designModelPick('builder', { engine: 'claude', settings: () => ({}) }), { model: null, effort: 'medium', source: 'default' });
-  assert.deepEqual(designModelPick('lead', { engine: 'claude', design: { models: { lead: { model: '  ' } } }, settings: () => ({}) }).source, 'default', 'a blank pick is none');
-  assert.deepEqual(designModelPick('lead', { engine: 'claude', settings: () => { throw new Error('bad file'); } }).source, 'default', 'an unreadable setting is none');
+  // #1450: unset everywhere, the role layer gives Worca's default (Deep thinking / Everyday tasks), never the CLI default.
+  assert.deepEqual(designModelPick('lead', { engine: 'codex', settings }), { model: 'gpt-5.6-sol', effort: 'high', source: 'role' }, 'another engine has its own rows');
+  assert.deepEqual(designModelPick('builder', { engine: 'claude', settings: () => ({}) }), { model: 'claude-sonnet-5-5', effort: 'medium', source: 'role' });
+  assert.deepEqual(designModelPick('builder', { engine: 'copilot', settings: () => ({}) }), { model: null, effort: 'medium', source: 'default' }, 'the tool decides');
+  assert.deepEqual(designModelPick('lead', { engine: 'claude', design: { models: { lead: { model: '  ' } } }, settings: () => ({}) }).source, 'role', 'a blank pick is none');
+  assert.deepEqual(designModelPick('lead', { engine: 'claude', settings: () => { throw new Error('bad file'); } }).source, 'role', 'an unreadable setting is none');
 });
 
 test('resolveDesignModel and designBuildModels read the design picks', () => {
@@ -72,7 +78,7 @@ test('resolveDesignModel and designBuildModels read the design picks', () => {
   assert.deepEqual(resolveDesignModel('builder', { engine: 'claude', design }), { model: 'claude-sonnet-5-5', effort: 'medium' });
   assert.deepEqual(designBuildModels(design), ['claude-opus-5-5', 'claude-sonnet-5-5']);
   assert.deepEqual(designBuildModels({ engine: 'claude', models: { lead: { model: 'claude-opus-5-5' }, builder: { model: 'claude-opus-5-5' } } }), ['claude-opus-5-5'], 'one model once');
-  assert.deepEqual(designBuildModels({ engine: 'claude' }), [], 'no picks, no role: the CLI default');
+  assert.deepEqual(designBuildModels({ engine: 'claude' }), ['claude-opus-5-5', 'claude-sonnet-5-5'], 'no picks, no role: Worca\'s defaults (#1450)');
 });
 
 // ── the store ───────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -109,6 +115,34 @@ test('POST takes picks the engine runs and stores them; a model the engine canno
   }
 });
 
+test('assertSlotModels: a pick may carry an effort an OpenCode Zen model does not offer — the effort is inert, not refused', async () => {
+  // A Zen `opencode/*` advertises no efforts (OpenCode 2.3.1+ refuses a `#variant`), so a design pick that carries
+  // the default lead/builder effort must be accepted, not refused: the effort is dropped at spawn. The slot-check
+  // HOME is sandboxed (and opted in) just for this catalog seed, then restored.
+  const prev = { HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE, FLAG: process.env.WORCA_TEST_ALLOW_HOME_FALLBACK };
+  const home = mkdtempSync(join(tmpdir(), 'worca-design-zen-'));
+  process.env.HOME = home; process.env.USERPROFILE = home;
+  process.env.WORCA_TEST_ALLOW_HOME_FALLBACK = '1';
+  const { addGlobalModel, removeGlobalModel } = await import('../src/core/settings.mjs');
+  try {
+    await addGlobalModel({ id: 'opencode/big-pickle', label: 'big-pickle', engine: 'opencode', efforts: [] });   // Zen: offers no effort
+    await addGlobalModel({ id: 'aifarm-msp/DeepSeek-V4-Flash-0731', label: 'DS', engine: 'opencode', efforts: ['medium', 'high'] });
+    await assertSlotModels([{ id: 'models.lead', engine: 'opencode', value: { model: 'opencode/big-pickle', effort: 'high' } }]);
+    await assertSlotModels([{ id: 'models.builder', engine: 'opencode', value: { model: 'opencode/big-pickle' } }]);
+    await assert.rejects(() => assertSlotModels([{ id: 'models.lead', engine: 'opencode', value: { model: 'aifarm-msp/DeepSeek-V4-Flash-0731', effort: 'low' } }]),
+      /does not offer effort "low"/, 'a model that offers efforts still refuses the ones it does not');
+    await assert.rejects(() => assertSlotModels([{ id: 'models.lead', engine: 'opencode', value: { model: 'aifarm-msp/DeepSeek-V4-Flash-0731', effort: 'max' } }]),
+      /does not offer effort "max"/);
+  } finally {
+    await removeGlobalModel('opencode/big-pickle').catch(() => {});
+    await removeGlobalModel('aifarm-msp/DeepSeek-V4-Flash-0731').catch(() => {});
+    for (const [k, v] of [['HOME', prev.HOME], ['USERPROFILE', prev.USERPROFILE], ['WORCA_TEST_ALLOW_HOME_FALLBACK', prev.FLAG]]) {
+      if (v === undefined) delete process.env[k]; else process.env[k] = v;
+    }
+    try { rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }); } catch { /* best effort */ }
+  }
+});
+
 test('PATCH merges one pick, clears one with null and all with models: null', async () => {
   const { json } = await call('POST', '/api/design', { kind: 'web', models: { lead: { model: 'claude-opus-5-5' } } });
   const id = json.design.id;
@@ -132,7 +166,7 @@ test('GET /models offers the engine models, the design picks and the defaults', 
   assert.ok(start.json.models.every((m) => (m.harnesses || ['claude']).includes('claude')), 'only models Claude runs');
   assert.deepEqual(start.json.models.find((m) => m.id === 'claude-opus-5-5').efforts, ['medium', 'high', 'xhigh', 'max']);
   assert.deepEqual(start.json.picks, { lead: null, builder: null });
-  assert.deepEqual(start.json.defaults, { lead: { model: null, effort: 'high', source: 'default' }, builder: { model: null, effort: 'medium', source: 'default' } });
+  assert.deepEqual(start.json.defaults, { lead: { model: 'claude-opus-5-5', effort: 'high', source: 'role' }, builder: { model: 'claude-sonnet-5-5', effort: 'medium', source: 'role' } });
   const codex = await call('GET', '/api/design/models?engine=codex');
   assert.equal(codex.json.engine, 'codex');
   assert.ok(codex.json.models.length && codex.json.models.every((m) => m.harnesses.includes('codex')));
@@ -205,6 +239,24 @@ test('the pickers read the answer and say who picks, as the Chat button reads', 
   const { primary, rest } = splitModels([{ id: 'claude-opus-5-5' }, { id: 'claude-opus-5' }, { id: 'claude-sonnet-5-5' }], null);
   assert.deepEqual([primary.map((m) => m.id), rest.map((m) => m.id)], [['claude-opus-5-5', 'claude-sonnet-5-5'], ['claude-opus-5']]);
   assert.deepEqual(splitModels([{ id: 'claude-opus-5-5' }, { id: 'claude-opus-5' }], 'claude-opus-5').primary.map((m) => m.id), ['claude-opus-5-5', 'claude-opus-5'], 'the pick stays up front');
+});
+
+test('coerceEffort: a model that offers no effort (an OpenCode Zen `opencode/*`) is picked without one', () => {
+  const zen = readOptions({
+    engine: 'opencode', label: 'OpenCode', efforts: ['minimal', 'low', 'medium', 'high', 'max'],
+    models: [
+      { id: 'opencode/big-pickle', label: 'big-pickle', efforts: [] },
+      { id: 'aifarm-msp/DeepSeek-V4-Flash-0731', label: 'DS', efforts: ['medium', 'high'] },
+    ],
+    picks: { lead: null, builder: null },
+    defaults: { lead: { model: null, effort: 'high', source: 'default' }, builder: { model: null, effort: 'medium', source: 'default' } },
+  });
+  assert.equal(coerceEffort('opencode/big-pickle', 'high', zen), '', 'no effort for a model that offers none (the default lead effort does not stick)');
+  assert.equal(coerceEffort('opencode/big-pickle', '', zen), '');
+  assert.equal(coerceEffort('aifarm-msp/DeepSeek-V4-Flash-0731', 'high', zen), 'high', 'a model with efforts keeps its pick');
+  assert.equal(coerceEffort('aifarm-msp/DeepSeek-V4-Flash-0731', 'low', zen), 'high', 'a foreign effort maps to high');
+  const p = pillView('lead', { model: 'opencode/big-pickle', effort: 'high' }, zen);
+  assert.equal(p.effort, '', 'the pill shows no effort for the Zen model');
 });
 
 test('a pick in the dock is saved, and a refused save puts it back; Effort opens its own pane', async () => {

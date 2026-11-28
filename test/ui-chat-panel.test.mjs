@@ -4,7 +4,9 @@
 // column folds below 1500px, and the Runs page and the panel never hold the screen at once.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { bootChat, liveRun, hello, openPanel, panelOf, pageOf, screenOf, click } from './helpers/chat-panel-boot.mjs';
+import { bootChat, liveRun, hello, openPanel, panelOf, pageOf, screenOf, click, ok } from './helpers/chat-panel-boot.mjs';
+import { applyFlags } from '../ui/public/flags.mjs';
+import { careRunPlan } from '../src/shared/shape/feature-record.mjs';
 
 async function bootLive(extra = {}) {
   const ctx = await bootChat();
@@ -21,7 +23,10 @@ test('a live run opens in the panel on Details; the Runs page stays empty and re
   assert.equal(screen.dataset.presentation, 'panel');
   assert.equal(screen.dataset.mode, 'details');
   assert.equal(screen.querySelector('.rd-details').hidden, false);
-  assert.equal(screen.querySelector('.rd-glance').hidden, true);
+  // One level: the run card is the Overview tab's body, inside Details (no glance of its own).
+  assert.equal(screen.querySelector('.rd-tab.active').dataset.sec, 'overview');
+  assert.ok(screen.querySelector('.rd-sec[data-sec="overview"] > .rd-glance'), 'the card sits in the Overview tab');
+  assert.equal(screen.querySelector(':scope > .rd-glance'), null);
   assert.equal(screen.querySelector('.rd-title').textContent, 'Add dark mode');
   assert.equal(panelOf(ctx).hidden, false);
   assert.equal(panelOf(ctx).getAttribute('aria-label'), 'Run details');
@@ -484,4 +489,27 @@ test("a history column the user opens and then closes again beside the panel sta
   click(ctx, screen.querySelector('.crp-close'));
   await ctx.settle();
   assert.equal(pageOf(ctx).dataset.history, 'closed', "Close never undoes the user's own close");
+});
+
+// Shaper small runs D2 (D10, D11): the panel re-hosts the run page, so a marked run's overview shows its facts once
+// and one Agents place.
+test('D2: the panel overview of a marked Care run shows 1 .run-facts, "Starts from" once and 1 Agents place', async () => {
+  const agent = (id, key) => ({ id, kind: 'agent', key, x: 0, y: 0, label: key, ports: { inputs: [], outputs: [] } });
+  const stepper = { version: 2, template: { id: 'wf_shape_slice_req' }, careRun: careRunPlan('balanced', { runRoles: ['product'] }),
+    graph: { nodes: [['n_clarify', 'clarify'], ['n_plan', 'planner'], ['n_refine', 'refiner'], ['n_impl', 'implementer'], ['n_review', 'reviewer'],
+      ['n_roles', 'planReviewer'], ['n_tests', 'testWriter']].map(([id, key]) => agent(id, key)), wires: [] } };
+  const slice = { featureId: 'feat_d2', title: 'Charts', index: 2, total: 3, sliceTitle: 'Export', state: 'running', next: null, threadId: null,
+    owns: [{ id: 'R-po-1', text: 'Export the report', pass: null }],
+    startsFrom: { kind: 'run', run: 1, branch: 'f/1', text: 'the latest finished run (run 1)' }, stored: { planVersion: 1, planReviewed: false, tests: null } };
+  const ctx = await bootChat({ arms: (url) => (url.endsWith('/api/shape/pipelines/p1/slice') ? ok(slice) : null) });
+  applyFlags({ shaperSmallRuns: true }, ctx.window.document);
+  hello(ctx, [liveRun({ stepper, steps: [{ key: 'x:n_plan:1', executionId: 'x:n_plan:1', nodeId: 'n_plan', ordinal: 1, cycle: 1, status: 'start' }],
+    active: [{ nodeId: 'n_plan', executionId: 'x:n_plan:1' }] })]);
+  await ctx.settle();
+  const screen = await openPanel(ctx, 'p1/overview', 10);
+  assert.equal(screen.querySelectorAll('.run-facts').length, 1);
+  assert.equal((screen.textContent.match(/Starts from/g) || []).length, 1);
+  const places = [...screen.querySelectorAll('.rd-run-agents')].filter((x) => !x.hidden).length
+    + [...screen.querySelectorAll('.rd-tab[data-sec="agents"]')].filter((x) => !x.hidden).length;
+  assert.equal(places, 1);
 });

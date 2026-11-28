@@ -4,9 +4,13 @@ import { loadAgentRegistry } from '../../../src/core/agent-registry.mjs';
 import { applyActionsChange } from '../../../src/core/ask/actions-deps.mjs';
 import { applyAwayChange } from '../../../src/core/ask/away-deps.mjs';
 import { composerCardPatch, isComposerCard } from '../../../src/core/ask/composer-payload.mjs';
-import { designAnswersEventPrompt, validateDesignAnswers } from '../../../src/core/ask/design-payload.mjs';
+import { designAnswersEventPrompt, validateDesignAnswers, validateDesignRequest } from '../../../src/core/ask/design-payload.mjs';
 import { applyMcpChange } from '../../../src/core/ask/mcp-deps.mjs';
 import { scrub } from '../../../src/core/ask/mcp-proposal.mjs';
+import { designIdForThread } from '../../../src/core/design/chat-thread.mjs';
+import { DESIGN_KINDS } from '../../../src/core/design/ids.mjs';
+import { titleFromBrief } from '../../../src/shared/design-names.mjs';
+import { TabToolError } from '../../../src/core/tab-tools.mjs';
 import { applyMetricsChange } from '../../../src/core/ask/metrics-deps.mjs';
 import { applyModelChange } from '../../../src/core/ask/model-deps.mjs';
 import { chatEngine as askChatEngineOf } from '../../../src/core/ask/models.mjs';
@@ -15,6 +19,9 @@ import { applyProjectChange } from '../../../src/core/ask/project-deps.mjs';
 import { projectEventPrompt, projectNoticeText } from '../../../src/core/ask/project-proposal.mjs';
 import { checkQuestionAnswer, questionEventPrompt, questionNoticeText } from '../../../src/core/ask/question-card.mjs';
 import { applyProxyChange } from '../../../src/core/ask/proxy-deps.mjs';
+import { applyEnvironmentChange } from '../../../src/core/ask/env-proposal.mjs';
+import { startEnvironmentBuild, publicBuildJob } from '../../../src/core/exec-env/build.mjs';
+import { mockEnabled } from '../../../src/core/claude-runner.mjs';
 import { chatScopeOf, scopeEventPrompt, scopeNoticeText } from '../../../src/core/ask/scope.mjs';
 import { applyScriptCard } from '../../../src/core/ask/script-approval.mjs';
 import { defaultScriptDeps as askScriptDeps } from '../../../src/core/ask/script-deps.mjs';
@@ -29,8 +36,10 @@ import { FS_OUTSIDE_ALLOWED, checkInside, outsideAllowedMessage } from '../../..
 import { actorOf } from '../../../src/core/identity.mjs';
 import { displayPath, listProjects, normalizeProjectPath } from '../../../src/core/projects.mjs';
 import { PROXY_AGENT_TEXT } from '../../../src/core/proxy-host.mjs';
+import { isInContainer } from '../../../src/core/remote-access.mjs';
+import { HARDENED_CLONE_ONLY_TEXT, isHardenedBox } from '../../../src/core/security-posture.mjs';
 import { addAskWebHost } from '../../../src/core/settings.mjs';
-import { applyChanges, applyRoute } from '../../../src/core/shape/changes.mjs';
+import { applyChanges, applyRoute, applyRequirementCard } from '../../../src/core/shape/changes.mjs';
 import { addFeatureNote, appendFeatureRun, currentFeatureId } from '../../../src/core/shape/features.mjs';
 import { nextRound } from '../../../src/core/shape/rounds.mjs';
 import { shipCardVerb } from '../../../src/core/shape/ship.mjs';
@@ -40,12 +49,20 @@ import { readWorkflow, writeGraphWorkflow } from '../../../src/core/workflows.mj
 import { RESCAN_CHOICES, memoGitProbe, readWorkspace, removeWorkspaceMember } from '../../../src/core/workspaces.mjs';
 import { formatInstant } from '../../../src/shared/schedule/recurrence.mjs';
 import { changesCardVerb, routeCardVerb } from '../../../src/shared/shape/route.mjs';
-import { AGENTS_DIR, ASK_DEFERRED_REPLIES_MAX, afterMembersChanged, afterProjectRegistered, agentMayBeCaller, askChatActions, askDeferred, askDeferredReplies, askEventPick, askIdParam, askInFlight, askViewer, askWebAccessFor, badRequest, broadcast, broadcastFeature, emitChanged, failedEventTurn, flipCard, followCloneCard, fsAllowedRoots, fsLimitedHere, pinUiLevel, postAskSystemNotice, proxyHost, prunedNote, refuseAgentCaller, removeRecommendation, runs, scheduleVerb, schedulerTick, shipFeatureNow, soundCards, startAskTurn, startCloneJob, startMetricsEventTurn, startRunAs, startScopeEventTurn, workspaceMembersBusy } from '../../server.mjs';
+import { AGENTS_DIR, ASK_DEFERRED_REPLIES_MAX, afterMembersChanged, afterProjectRegistered, agentMayBeCaller, askChatActions, askDeferred, askDeferredReplies, askEventPick, askIdParam, askInFlight, askTabBridges, askTabsEnabled, askViewer, askWebAccessFor, badRequest, broadcast, broadcastFeature, chatLinkRoots, chatLinks, designApi, designChatActions, emitChanged, failedEventTurn, flipCard, followCloneCard, fsAllowedRoots, fsLimitedHere, pinUiLevel, postAskSystemNotice, proxyHost, prunedNote, refuseAgentCaller, removeRecommendation, reqChanges, runs, scheduleVerb, schedulerTick, shipFeatureNow, soundCards, startAskTurn, startCloneJob, startMetricsEventTurn, startRunAs, startScopeEventTurn, tabFailure, tabTools, terminalCallerOk, terminalSameOrigin, toolPanelOn, workspaceMembersBusy } from '../../server.mjs';
+import { FILE_PATH_MAX, FILE_REFS_MAX } from '../../../src/shared/file-refs.mjs';
 
 /** The cards route's handler, set by register(): the chat bridge applies a chat channel's card actions through it
  *  in-process (ui/server.mjs invokeAskCard, with req._chatOrigin set). */
 let cardRoute = null;
 export const askCardRoute = (req, res) => cardRoute(req, res);
+
+/** start_design rides the tab bridge of a plain chat with no design yet (one design per chat) and the design flag on;
+ *  never a Workflows chat's. The prompt (askSystemPromptFor) and the bridge (askTabBridge) both ask this. */
+export function askDesignHandoff(threadId) {
+  if (!flagEnabled('design')) return false;
+  try { const t = askGetThread(threadId); return !!t && !t.mode && !designIdForThread(threadId); } catch { return false; }
+}
 
 export function register(app) {
 
@@ -72,6 +89,71 @@ async function applyScheduleCard(card, { by = null } = {}) {
   else detail = card.action === 'cancel' ? 'canceled' : 'deleted';
   return { ok: true, detail, ...(b.runId ? { runId: b.runId } : {}), ...(b.pipelineId ? { pipelineId: b.pipelineId } : {}) };
 }
+/**
+ * start_design (a plain chat's hand-off, over the tab bridge): a new design through the Design button's own create path,
+ * so the engine gate binds it and only the person can allow an unguarded engine (from the Design button), attached to
+ * THIS chat; then its first build on the brief (designChatActions, as start_design_build would), whose receipt is a row
+ * of this chat. The design is the chat's owner's. The name comes from the brief (titleFromBrief), never from the model.
+ * → {ok, designId, title, kind, started, notice?}; a refusal throws a TabToolError the model reads.
+ */
+async function askStartDesign(threadId, input) {
+  const no = (msg, code = 'REFUSED') => new TabToolError(`start_design: ${msg}`, code);
+  if (!flagEnabled('design')) throw no('Design is off on this worca', 'OFF');
+  const thread = askGetThread(threadId);
+  if (!thread) throw no('this chat is gone', 'NOT_FOUND');
+  if (thread.mode) throw no('only a plain chat starts a design');
+  if (designIdForThread(threadId)) throw no('this chat has a design already: change it with change_design, or the user presses Design in the sidebar for another');
+  const brief = validateDesignRequest({ kind: 'design-start', brief: input.brief });
+  if (!brief.ok) throw no(brief.error, 'BAD_INPUT');
+  const kind = typeof input.kind === 'string' ? input.kind : '';
+  if (!DESIGN_KINDS.includes(kind)) throw no(`kind is one of ${DESIGN_KINDS.join(', ')}`, 'BAD_INPUT');
+  const projectKey = typeof input.projectKey === 'string' && input.projectKey.trim() ? input.projectKey.trim() : null;
+  const title = titleFromBrief(brief.value.brief) || 'Untitled design';
+  let r;
+  try { r = await designApi.create({ kind, title, ...(projectKey ? { projectKey } : {}) }, thread.createdBy ?? null, { threadId }); }
+  catch (e) { throw no(String(e?.message || e)); }
+  if (!r.ok) throw no(`${r.gate.error} Only the user can allow that: they start this design from the Design button in the sidebar.`, 'GATE');
+  // The design's frame opens its Design tab beside this chat (the panel follows `design-attached`).
+  broadcast({ type: 'design-attached', threadId, designId: r.design.id });
+  // The receipt (or a video's sound card) is a row of its own: this reply is still streaming, the tool call inside it.
+  const a = await designChatActions.apply({ kind: 'design-start', brief: brief.value.brief }, { threadId, by: thread.createdBy || 'local' });
+  if (a.ok) a.posted(false);
+  return { ok: true, designId: r.design.id, title: r.design.title, kind, started: a.ok, ...(a.ok ? {} : { notice: a.notice }) };
+}
+const TAB_OPS = Object.freeze({ open: (id, i, turn) => tabTools.open(id, i, { turn }), screenshot: (id, i) => tabTools.screenshot(id, i), read: (id, i) => tabTools.read(id, i),
+  startDesign: (id, i) => askStartDesign(id, i) });   // a plain chat's hand-off to a design in the same chat (askStartDesign above)
+app.post('/api/ask/tabs', async (req, res) => {
+  if (!isInContainer(req)) return res.status(403).json({ error: 'tabs: loopback callers only' });   // the /api/ask/relay gate
+  const token = String(req.headers['x-worca-ask-tabs'] || '');
+  const threadId = askTabBridges.get(token);
+  if (!threadId) return res.status(403).json({ error: 'tabs: unknown or finished turn' });
+  if (!askTabsEnabled()) return res.status(403).json({ error: 'tabs: not available while agent isolation is on' });
+  const op = req.body && req.body.op;
+  const input = req.body && req.body.input && typeof req.body.input === 'object' && !Array.isArray(req.body.input) ? req.body.input : {};
+  if (typeof op !== 'string' || !Object.hasOwn(TAB_OPS, op)) return badRequest(res, 'tabs: unknown op');
+  if (op !== 'startDesign' && !toolPanelOn()) return res.status(403).json({ error: `tabs: ${op} needs the Tool panel feature (Settings › Labs)` });
+  try { res.json({ result: await TAB_OPS[op](threadId, input, token) }); } catch (e) { tabFailure(res, e); }
+});
+// Chat file links (issue 1064 §2): which candidate paths of an answer exist in the chat's root. Same guard as the Files
+// tab (terminalCallerOk: exact origin, never a possible agent). Refused paths answer {ok:false} like missing ones.
+app.post('/api/ask/files/resolve', async (req, res) => {
+  if (!terminalCallerOk(req, res)) return;
+  const b = req.body && typeof req.body === 'object' ? req.body : {};
+  const id = askIdParam(res, b.threadId, 'thread'); if (!id) return;
+  const paths = Array.isArray(b.paths) ? b.paths : null;
+  if (!paths || !paths.length || paths.length > FILE_REFS_MAX || paths.some((p) => typeof p !== 'string' || !p || p.length > FILE_PATH_MAX)) {
+    return res.status(400).json({ error: `paths: 1 to ${FILE_REFS_MAX} strings of at most ${FILE_PATH_MAX} characters`, code: 'BAD_INPUT' });
+  }
+  try {
+    const r = await chatLinkRoots(id, req);
+    if (r.gone) return res.status(404).json({ error: 'This chat is gone or archived.', code: 'SCOPE_GONE' });
+    if (r.error) return res.json({ root: null, paths: Object.fromEntries(paths.map((p) => [p, { ok: false }])) });
+    res.json({ root: r.root, paths: await chatLinks.resolve(r.roots, [...new Set(paths)]) });
+  } catch (e) {
+    console.error(`[worca-ui] files resolve: ${e?.message || e}`);
+    res.status(500).json({ error: 'resolve failed' });
+  }
+});
 
 // Card ids with a Save in flight: the mint + the row write await, so the
 // `state === 'proposed'` check alone would let two Saves both pass and write two rows.
@@ -367,6 +449,23 @@ async function askCardHandler(req, res) {
       if (!block) return res.status(409).json({ error: 'card vanished' });
       return res.json({ block });
     }
+    if (found.block.card && found.block.card.type === 'req-change') {
+      // Small runs C4 (D13): Change it applies the card's one change through the one change path; Not now declines.
+      const c = found.block.card;
+      const v = changesCardVerb(body);
+      if (!v.ok) return badRequest(res, v.error);
+      if (found.block.state !== 'proposed') return res.status(409).json({ error: `card is ${found.block.state}` });
+      if (askCardBusy.has(cardId)) return res.status(409).json({ error: 'card is being applied' });
+      if (v.verb === 'not-now') { const block = flipCard(id, cardId, { state: 'declined' }); return block ? res.json({ block }) : res.status(409).json({ error: 'card vanished' }); }
+      askCardBusy.add(cardId);
+      let r;
+      try { r = applyRequirementCard(c, { apply: reqChanges.apply, by: actorOf(req) }); }
+      catch (err) { r = { ok: false, status: 500, error: err && err.message ? err.message : String(err) }; }
+      finally { askCardBusy.delete(cardId); }
+      if (!r.ok) return res.status(r.status || 500).json({ error: r.error, ...(r.code ? { code: r.code } : {}) });
+      const block = flipCard(id, cardId, { state: 'applied', card: { result: r.result } });
+      return block ? res.json({ block }) : res.status(409).json({ error: 'card vanished' });
+    }
     if (found.block.card && (found.block.card.type === 'changes' || found.block.card.type === 'route')) {
       // Shaper s5 (D5, D6): the card type decides the verbs; anything else is refused before any state check.
       const c = found.block.card;
@@ -384,9 +483,9 @@ async function askCardHandler(req, res) {
           addNote: (fid, n) => addFeatureNote(currentFeatureId(fid), { ...n, by }),
           appendRun: (fid, o) => appendFeatureRun(currentFeatureId(fid), { ...o, by }), tick: () => { void schedulerTick(); } };
         r = c.type === 'changes' ? await applyChanges(c, deps) : await applyRoute(c, v, deps);
-      } catch (err) { r = { ok: false, status: 500, error: err && err.message ? err.message : String(err) }; }
+      } catch (err) { r = { ok: false, status: 500, ...(err?.code === 'SHIPPING' ? { status: 409, code: 'SHIPPING' } : {}), error: err && err.message ? err.message : String(err) }; }
       finally { askCardBusy.delete(cardId); }
-      if (!r.ok) return res.status(r.status || 500).json({ error: r.error });
+      if (!r.ok) return res.status(r.status || 500).json({ error: r.error, ...(r.code ? { code: r.code } : {}) });
       if (c.featureId) broadcastFeature(currentFeatureId(c.featureId));
       if (c.type === 'changes' && c.landing.kind === 'round') broadcast({ type: 'round-changed', origin: c.landing.target.roundOf });
       const block = flipCard(id, cardId, { state: 'applied', card: { result: { ...r.result, verb: v.verb, where: v.where || null } } });
@@ -681,6 +780,34 @@ async function askCardHandler(req, res) {
       const turn = await startMetricsEventTurn(id, block);
       return res.json({ block, turn });
     }
+    if (found.block.card && found.block.card.type === 'environment') {
+      // Environment card (docs/environment-spec.md "From Chat"): proposed → applied | failed | declined. Apply goes
+      // through the code the project page's routes call (put / delete …/exec-env/spec, PATCH …/exec-env/config, POST
+      // …/exec-env/build), behind their guards: an isolated agent and a page served by another origin are refused (the
+      // spec decides what every later sandbox holds, a build spends the server's backend credit).
+      if (body.state !== 'applied' && body.state !== 'declined') return badRequest(res, 'state must be "applied" or "declined"');
+      if (found.block.state !== 'proposed') return res.status(409).json({ error: `card is ${found.block.state}` });
+      if (body.state === 'applied' && agentMayBeCaller(req)) return res.status(403).json({ error: 'Sandbox environments cannot be changed or built from inside the container while agent isolation is on. Open Worca through its published address.', code: 'EXEC_ENV_AGENT_BLOCKED' });
+      if (body.state === 'applied' && !terminalSameOrigin(req)) return res.status(403).json({ error: 'Sandbox environments can only be changed from pages served by this Worca.', code: 'EXEC_ENV_CROSS_ORIGIN' });
+      if (askCardBusy.has(cardId)) return res.status(409).json({ error: 'card is being applied' });
+      if (body.state === 'declined') {
+        const block = flipCard(id, cardId, { state: 'declined' });
+        if (!block) return res.status(409).json({ error: 'card vanished' });
+        return res.json({ block, turn: await startMetricsEventTurn(id, block) });
+      }
+      askCardBusy.add(cardId);
+      let block;
+      try {
+        let result;
+        try {
+          result = await applyEnvironmentChange(found.block.card, { startBuild: ({ projectKey, backend }) => startEnvironmentBuild({ projectKey, backend, mock: mockEnabled(),
+            onState: (j) => broadcast({ type: 'exec-env-build-changed', job: publicBuildJob(j) }) }) });
+        } catch (err) { result = { ok: false, error: err && err.message ? err.message : String(err), code: (err && err.code) || 'ERROR' }; }
+        block = flipCard(id, cardId, result.ok ? { state: 'applied', card: { result } } : { state: 'failed', error: result.error, card: { result } });
+      } finally { askCardBusy.delete(cardId); }
+      if (!block) return res.status(409).json({ error: 'card vanished' });
+      return res.json({ block, turn: await startMetricsEventTurn(id, block) });
+    }
     if (found.block.card && found.block.card.type === 'clone') {
       // Clone card (docs/deploy-railway.md "First project"): proposed → cloning → applied | failed, or declined.
       // The clone happens HERE, behind the click, as the same job the Projects view starts (startCloneJob);
@@ -728,6 +855,7 @@ async function askCardHandler(req, res) {
       try {
         try {
           const card = found.block.card; const ch = card.change || {};
+          if (ch.kind === 'add' && isHardenedBox()) throw Object.assign(new Error(HARDENED_CLONE_ONLY_TEXT), { code: 'HARDENED_CLONE_ONLY' });
           if (ch.kind === 'add' && fsLimitedHere(req)) {
             const p = normalizeProjectPath(ch.path);
             if (!p || !(await checkInside(p, await fsAllowedRoots())).inside) {

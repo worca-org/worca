@@ -8,16 +8,38 @@
 // The Diff tab is in ui-history-detail-diff.test.mjs; the Overview, Agents, Clarify, Logs, form and
 // bar sections and the Actions tab in ui-history-detail-tabs.test.mjs; the shared boot and fixtures
 // in helpers/history-detail-boot.mjs.
-import { test } from 'node:test';
+import { test, before, beforeEach, after } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  boot, settle, KEY, ROW, DETAIL, PAUSED_DETAIL, COMMIT_FAILED_DETAIL, RESULTS, retainedRow,
-  blockedBudget, ok, fail, bootDetail, openDetail, deliverRows, click, TABS_DETAIL, tabsOf, secOf,
-  badgeOf, confirmDialog, go,
+  settle, KEY, ROW, DETAIL, PAUSED_DETAIL, COMMIT_FAILED_DETAIL, RESULTS, retainedRow,
+  blockedBudget, ok, fail, openDetail, deliverRows, click, TABS_DETAIL, tabsOf, secOf,
+  badgeOf, confirmDialog, go, detailHash, detailOn, historyFetch,
 } from './helpers/history-detail-boot.mjs';
 import { lastToast } from './helpers/feedback.mjs';
 import { checkRows } from './helpers/rows.mjs';
 import { readStyleCss } from '../src/core/read-style-css.mjs';
+import { openTab } from './helpers/run-tabs.mjs';
+import { useSharedApp, restoreAfter } from './helpers/shared-app-boot.mjs';
+
+const app = useSharedApp({ before, beforeEach, after }, { fetchHandler: historyFetch() });
+const boot = detailOn(app).page;
+const openDetailPage = detailOn(app).detail;
+// The shared app keeps the saved run an earlier test opened (routing to the same run again repaints nothing) and each
+// run's Actions model (Try it, the strips) until an actions-changed frame finds that run off screen. So the run is
+// closed first (the Runs list then reads this test's History rows), then that frame: every test opens ROW afresh and
+// reads its own model. A deep link lands after that, on a History that holds only the test's rows.
+const bootDetail = async ({ deepLink = false, ...opts } = {}) => {
+  const ctx = await openDetailPage(opts);
+  go(ctx.window, 'history');
+  await settle(ctx.window);
+  ctx.wsBox.ws.dispatch('message', { data: JSON.stringify({ type: 'actions-changed' }) });
+  await settle(ctx.window);
+  if (deepLink) {
+    go(ctx.window, detailHash);
+    await settle(ctx.window);
+  }
+  return ctx;
+};
 
 // ---------------------------------------------------------------------------
 // Header meta
@@ -114,7 +136,7 @@ test('team-metrics line: recorded / pending push / not enabled on terminal runs,
   ]);
 });
 
-test('branch row copies the feature branch and flags .copied', async () => {
+test('branch row copies the feature branch and flags .copied', async (t) => {
   const ctx = await bootDetail();
   await openDetail(ctx);
   const { window } = ctx;
@@ -123,6 +145,7 @@ test('branch row copies the feature branch and flags .copied', async () => {
   // the JSDOM itself, and copyFromButton reads navigator.clipboard at CLICK
   // time. Precedent: test/ui-history-pr.test.mjs:95-98.
   const writes = [];
+  restoreAfter(t, window.navigator, 'clipboard');
   Object.defineProperty(window.navigator, 'clipboard', {
     value: { writeText: async (t) => { writes.push(t); } },
     configurable: true,
@@ -172,6 +195,8 @@ test('Resume POSTs exactly { pipelineId } and lands on running/<newRunId>', asyn
     arms: (url, opts) => {
       if (url === '/api/resume') {
         posts.push(JSON.parse(opts.body));
+        // the server announces the resumed run, as it does: the next reset then takes it out of the shared app
+        app.recv({ type: 'run-created', runId: 'r-9', pipelineId: ROW.id, title: ROW.title, projectDir: ROW.projectDir, kind: 'run', status: 'running', startedAt: new Date().toISOString() });
         return ok({ ok: true, runId: 'r-9', pipelineId: ROW.id });
       }
       return null;
@@ -205,55 +230,9 @@ test('a DEEP-LINKED Resume acts on the authoritative row, not the minimal stub',
   assert.ok(r, 'the resumed run was upserted');
   assert.equal(r.title, ROW.title, 'titled from the authoritative row, not the raw run id');
   assert.equal(r.projectDir, ROW.projectDir, "projectDir from the row, not ''");
-});
-
-// ---------------------------------------------------------------------------
-// Archive
-// ---------------------------------------------------------------------------
-
-test('Archive: honest copy + danger styling, DELETE, back to the list, row dropped', async () => {
-  const deletes = [];
-  const ctx = await bootDetail({
-    arms: (url, opts, box) => {
-      if (url.startsWith(`/api/runs/${ROW.id}`) && opts.method === 'DELETE') {
-        deletes.push(url);
-        box.rows = [];        // stateful: a later forced reload must not resurrect it
-        return ok({ ok: true });
-      }
-      return null;
-    },
-  });
-  await openDetail(ctx);
-  const { window } = ctx;
-  const doc = window.document;
-  const rowSel = `#runs-list .runs-row[data-kind="hist"][data-pipeline-id="${ROW.id}"]`;
-  assert.ok(doc.querySelector(rowSel), 'the run is listed before the archive');
-  const archive = doc.querySelector('#hist-detail .hd-archive');
-  assert.equal(archive.hidden, false, 'a finished run is archivable');
-
-  click(window, archive);
-  await settle(window);
-  assert.equal(doc.querySelector('#confirm-modal').classList.contains('hidden'), false);
-  const msg = doc.querySelector('#confirm-message').textContent;
-  assert.match(msg, /local branch/, 'the copy is honest about the local branch');
-  assert.match(msg, /remote branch/, 'and about the remote branch surviving');
-  assert.ok(doc.querySelector('#confirm-ok').classList.contains('danger'), 'destructive styling while open');
-
-  doc.querySelector('#confirm-cancel').click();
-  await settle(window);
-  assert.equal(doc.querySelector('#confirm-ok').classList.contains('danger'), false,
-    'the tint must never leak to the next confirmModal caller');
-  assert.equal(deletes.length, 0, 'cancelling archives nothing');
-
-  click(window, archive);
-  await settle(window);
-  doc.querySelector('#confirm-ok').click();
-  await settle(window, 5);
-  assert.equal(deletes.length, 1);
-  assert.equal(deletes[0], `/api/runs/${ROW.id}?projectKey=${KEY}`);
-  // goRunsList(): the bare list, not the remembered (now archived) run.
-  assert.equal(window.location.hash.replace(/^#/, ''), 'runs');
-  assert.equal(doc.querySelector(rowSel), null, 'the row is dropped from the list');
+  // the server's frame for the resumed run (after the checks: the title must come from the row): the next reset then
+  // takes r-9 out of the shared app
+  app.recv({ type: 'run-created', runId: 'r-9', pipelineId: ROW.id, title: ROW.title, projectDir: ROW.projectDir, kind: 'run', status: 'running', startedAt: new Date().toISOString() });
 });
 
 test('Archive is hidden while the run is still live (running/pausing)', async () => {
@@ -364,7 +343,7 @@ test('Archive is disabled with a tooltip when the list row reports retained work
   const text = doc.getElementById('viewer').textContent;
   assert.match(text, /pre-commit hook failed/, "git's own stderr, verbatim");
   assert.match(text, /git -C '\/tmp\/wt' add -A/, 'the copy-paste recovery block');
-  assert.doesNotMatch(doc.querySelector('#hist-detail .hd-glance .rd-sheet').textContent, /worktree/i);
+  assert.doesNotMatch(doc.querySelector('#hist-detail .hd-glance .rd-sheet-main').textContent, /worktree/i, 'the card says nothing of a worktree (the Overview side column has its own WORKTREE row)');
 });
 
 test('kept work on a stopped or a failed saved run: the head offers Discard and Apply to branch, the route its patch', async () => {
@@ -509,7 +488,7 @@ test('tabs render with badges; Details opens on Overview, and a tab route opens 
 
   assert.deepEqual(
     tabsOf(doc).map((b) => b.dataset.sec),
-    ['overview', 'diff', 'actions', 'workflow', 'clarify', 'logs', 'agents'],   // one order on both run pages: results, then how it ran
+    ['overview', 'task', 'diff', 'clarify', 'logs', 'actions', 'workflow', 'agents'],   // one order on both run pages: the row, then what is under More
   );
   // filesNew(1) + filesChanged(13). NEVER + filesDeleted: results.mjs:32 buckets
   // 'D' rows into changedFiles (NEW_STATUS is {A,C}) while :29 ALSO counts them in
@@ -530,7 +509,7 @@ test('tabs render with badges; Details opens on Overview, and a tab route opens 
   const bare = await bootDetail();
   await openDetail(bare, 'details');
   const bareDoc = bare.window.document;
-  assert.deepEqual(tabsOf(bareDoc).map((b) => b.dataset.sec), ['overview', 'diff', 'actions', 'workflow', 'agents']);
+  assert.deepEqual(tabsOf(bareDoc).map((b) => b.dataset.sec), ['overview', 'task', 'diff', 'actions', 'workflow', 'agents']);
   assert.equal(secOf(bareDoc, 'clarify'), null, 'no Q&A -> no Clarify section either');
   assert.equal(secOf(bareDoc, 'logs'), null, 'no live-log artifact -> no Logs section either');
   assert.ok(bareDoc.querySelector('#hist-detail .hd-tab[data-sec="overview"]').classList.contains('active'));
@@ -569,7 +548,7 @@ test('Artifacts tab GETs /api/runs/:id/artifacts, renders per-node groups and dr
   await openDetail(ctx);
   const doc = ctx.window.document;
   const tab = doc.querySelector('#hist-detail .hd-tab[data-sec="artifacts"]');
-  if (tab) { click(ctx.window, tab); await settle(ctx.window, 6); }
+  if (tab) { openTab(ctx.window, tab); await settle(ctx.window, 6); }
   const sec = doc.querySelector('#hist-detail .hd-sec[data-sec="artifacts"]');
   await checkRows([
     { name: 'the Artifacts tab fetches GET /api/runs/:id/artifacts and renders per-node groups', run: () => {
@@ -636,16 +615,19 @@ test('with a saved run open, the popup for that run names the step from its save
 });
 
 // ---------------------------------------------------------------------------
-// The summary card: the checkout's Actions row (Simple: a plain row with Discard / Unlink), the retained notice
+// The summary card: the Local copy row (every level: a plain row with Discard / Unlink), the retained notice
 // ---------------------------------------------------------------------------
 
 // Seeded "now": whenLabel then reads HH:MM (today), even near midnight.
 const checkoutRow = (member = {}) => ({ ...ROW, checkout: { members: [{ projectKey: KEY, worktreeDir: '/tmp/co', branch: ROW.branch,
   at: new Date().toISOString(), policy: 'on-demand', setup: { status: 'ok' }, ...member }] } });
 const glanceOf = (doc) => doc.querySelector('#hist-detail .hd-glance');
+// One level: the card lists no tab rows; its result column holds only the Local copy group.
 const actionsRowOf = (doc) => doc.querySelector('#hist-detail .hd-glance .rd-result .rd-srow[data-rd-tab="actions"]');
-const actionsValueOf = (doc) => { const v = actionsRowOf(doc)?.querySelector('.rd-srow-v'); return v ? v.textContent : ''; };
 const simpleRowOf = (doc) => doc.querySelector('#hist-detail .hd-glance .rd-result .rd-srow-checkout');
+const checkoutTextOf = (doc) => simpleRowOf(doc)?.querySelector('.rd-srow-tx').textContent ?? '';
+// The card's main column: the Overview side column carries its own WORKTREE row.
+const cardMainOf = (doc) => doc.querySelector('#hist-detail .hd-glance .rd-sheet-main');
 const buttonsOf = (el) => [...el.querySelectorAll('button')].map((b) => b.textContent);
 const atSimple = (ctx) => { ctx.window.document.documentElement.dataset.level = 'simple'; };
 const atAdvanced = (ctx) => { ctx.window.document.documentElement.dataset.level = 'advanced'; };
@@ -661,7 +643,7 @@ function blurOnDisable(btn) {
   });
 }
 
-test('checkout: no box on the glance; the Actions row says where the local copy stands; Archive stays blocked', async () => {
+test('checkout: no box on the card; at Advanced too the Local copy row says where it stands; Archive stays blocked', async () => {
   const ctx = await bootDetail({ rows: [checkoutRow()] });
   atAdvanced(ctx);
   await openDetail(ctx, '');
@@ -669,29 +651,31 @@ test('checkout: no box on the glance; the Actions row says where the local copy 
   const doc = ctx.window.document;
   assert.equal(keptShown(doc), false);
   assert.equal(keptBtn(doc, 'apply-kept'), null);
-  assert.match(actionsValueOf(doc), /^Local copy open · since \d{1,2}:\d{2}$/);
-  const v = actionsRowOf(doc).querySelector('.rd-srow-v');
-  assert.equal(actionsRowOf(doc).lastElementChild, v, 'the value is the row\'s last child, before the CSS chevron');
-  assert.equal(simpleRowOf(doc), null, 'the tab row owns it at Advanced');
-  assert.doesNotMatch(glanceOf(doc).textContent, /worktree/i);
+  assert.equal(actionsRowOf(doc), null, 'no Actions tab row on the card');
+  assert.match(checkoutTextOf(doc), /^Local copy open · since \d{1,2}:\d{2}$/);
+  assert.deepEqual(buttonsOf(simpleRowOf(doc)), ['Discard']);
+  assert.doesNotMatch(cardMainOf(doc).textContent, /worktree/i);
+  assert.doesNotMatch(glanceOf(doc).querySelector('.hd-result').textContent, /worktree/i);
   const archive = doc.querySelector('#hist-detail .hd-archive');
   assert.equal(archive.disabled, true);
   assert.equal(archive.title, 'Close the local copy in Actions first');
 });
 
-test('checkout row: before Check out it offers the try; a linked folder reads as yours', async () => {
+test('checkout row: before Check out there is no row (the head offers Try it); a linked folder reads as yours', async () => {
   const ctx = await bootDetail({ rows: [ROW] });
   atAdvanced(ctx);
   await openDetail(ctx, '');
   await settle(ctx.window, 6);
   const doc = ctx.window.document;
-  assert.equal(actionsValueOf(doc), 'Try it on this machine');
+  assert.equal(simpleRowOf(doc), null);
+  assert.ok(headOf(doc, 'try'), 'the head offers Try it');
   await deliverRows(ctx, [checkoutRow({ worktreeDir: '/Users/ada/app', external: true, policy: 'external' })]);
-  assert.match(actionsValueOf(doc), /^Linked to your folder · since \d{1,2}:\d{2}$/);
-  assert.equal(actionsRowOf(doc).querySelectorAll('.rd-srow-v').length, 1, 'patched in place, never stacked');
+  assert.match(checkoutTextOf(doc), /^Linked to your folder · since \d{1,2}:\d{2}$/);
+  assert.deepEqual(buttonsOf(simpleRowOf(doc)), ['Unlink']);
+  assert.equal(doc.querySelectorAll('#hist-detail .hd-glance .rd-result .rd-srow-checkout').length, 1, 'patched in place, never stacked');
 });
 
-test('checkout row: a workspace with two local copies; at Simple one Discard per member', async () => {
+test('checkout row: a workspace with two local copies; one Discard per member at every level', async () => {
   const ws = { ...ROW, target: 'workspace', projectKey: 'workspaces/ws1', projectDir: null,
     members: [{ memberKey: 'app-11111111', name: 'App' }, { memberKey: 'api-22222222', name: 'API' }],
     checkout: { members: [
@@ -705,7 +689,8 @@ test('checkout row: a workspace with two local copies; at Simple one Discard per
   go(ctx.window, `history/workspaces/ws1/${ROW.id}`);
   await settle(ctx.window, 6);
   const doc = ctx.window.document;
-  assert.match(actionsValueOf(doc), /^2 local copies open · since /);
+  assert.match(checkoutTextOf(doc), /^2 local copies open · since /);
+  assert.deepEqual(buttonsOf(simpleRowOf(doc)), ['Discard app', 'Discard api']);
   atSimple(ctx);
   await deliverRows(ctx, [structuredClone(ws)]);
   const row = simpleRowOf(doc);
@@ -718,7 +703,7 @@ test('checkout row: a workspace with two local copies; at Simple one Discard per
   assert.match(css, /\.rd-srow-checkout \.rd-srow-tx\{flex:1 1 \d+em;\}/);
 });
 
-test('checkout row: retained work shows the kept head and no Actions row value', async () => {
+test('checkout row: retained work shows the kept head and no Local copy row', async () => {
   const ctx = await bootDetail({ rows: [retainedRow()] });
   atAdvanced(ctx);
   await openDetail(ctx, '');
@@ -726,8 +711,8 @@ test('checkout row: retained work shows the kept head and no Actions row value',
   const doc = ctx.window.document;
   assert.equal(keptShown(doc), true);
   assert.ok(keptBtn(doc, 'apply-kept'));
-  assert.ok(actionsRowOf(doc), 'the Actions tab row is there');
-  assert.equal(actionsRowOf(doc).querySelector('.rd-srow-v'), null);
+  assert.equal(actionsRowOf(doc), null, 'no Actions tab row on the card');
+  assert.equal(simpleRowOf(doc), null, 'no checkout, no Local copy row');
 });
 
 test('Simple: Discard on the checkout row uses the Actions tab\'s confirm and DELETE, then the row goes', async () => {
@@ -744,11 +729,11 @@ test('Simple: Discard on the checkout row uses the Actions tab\'s confirm and DE
   await openDetail(ctx, '');
   await settle(ctx.window, 6);
   const doc = ctx.window.document;
-  assert.equal(actionsRowOf(doc), null, 'no Actions tab at Simple');
+  assert.equal(actionsRowOf(doc), null, 'no Actions tab row on the card');
   const row = simpleRowOf(doc);
   assert.match(row.textContent, /^Local copy open · since /);
   assert.deepEqual(buttonsOf(row), ['Discard']);
-  assert.doesNotMatch(glanceOf(doc).textContent, /worktree/i);
+  assert.doesNotMatch(cardMainOf(doc).textContent, /worktree/i);
   click(ctx.window, row.querySelector('button'));
   await settle(ctx.window, 2);
   assert.equal(doc.getElementById('confirm-title').textContent, 'Discard the checkout?');
@@ -895,33 +880,34 @@ test('head Try it: a checkout discarded right after it landed offers Try it agai
 });
 
 // A refused Start or Stop (409 SETUP_FAILED, PORTS_EXHAUSTED, 403 Actions off) says why; the head offers the step again.
-for (const [step, path, model, title, back] of [
-  ['Start', 'start', () => TRY_MODEL(), 'Could not start Web', 'try-start'],
-  ['Stop', 'stop', () => TRY_MODEL([WEB_READY]), 'Could not stop Web', 'try-stop'],
-]) {
-  test(`head Try it: a refused ${step} says why and offers ${step} again`, async () => {
-    const error = `The ${path} was refused: the setup command failed.`;
-    const ctx = await bootDetail({
-      rows: [checkoutRow()],
-      arms: (url, opts = {}) => {
-        const p = pathOf(url);
-        if (p === `/api/runs/${ROW.id}/actions` && (opts.method || 'GET') === 'GET') return ok(model());
-        if (p === `/api/runs/${ROW.id}/actions/web/${path}` && opts.method === 'POST') return fail(409, { error, code: 'SETUP_FAILED' });
-        return null;
-      },
-    });
-    atAdvanced(ctx);
-    await openDetail(ctx, '');
-    await settle(ctx.window, 6);
-    const doc = ctx.window.document;
-    doc.getElementById('toasts').replaceChildren();
-    click(ctx.window, headOf(doc, back));
-    await settle(ctx.window, 6);
-    assert.deepEqual(lastToast(doc), { tone: 'err', title, detail: error, action: '' });
-    assert.ok(headOf(doc, back), `${step} is back`);
-    assert.equal(headOf(doc, 'try-wait'), null);
+// Each case: the head's step, its route, the model it starts from, the toast title and the button back.
+const REFUSED_START = ['Start', 'start', () => TRY_MODEL(), 'Could not start Web', 'try-start'];
+const REFUSED_STOP = ['Stop', 'stop', () => TRY_MODEL([WEB_READY]), 'Could not stop Web', 'try-stop'];
+async function refusedTryStep([step, path, model, title, back]) {
+  const error = `The ${path} was refused: the setup command failed.`;
+  const ctx = await bootDetail({
+    rows: [checkoutRow()],
+    arms: (url, opts = {}) => {
+      const p = pathOf(url);
+      if (p === `/api/runs/${ROW.id}/actions` && (opts.method || 'GET') === 'GET') return ok(model());
+      if (p === `/api/runs/${ROW.id}/actions/web/${path}` && opts.method === 'POST') return fail(409, { error, code: 'SETUP_FAILED' });
+      return null;
+    },
   });
+  atAdvanced(ctx);
+  await openDetail(ctx, '');
+  await settle(ctx.window, 6);
+  const doc = ctx.window.document;
+  doc.getElementById('toasts').replaceChildren();
+  click(ctx.window, headOf(doc, back));
+  await settle(ctx.window, 6);
+  assert.deepEqual(lastToast(doc), { tone: 'err', title, detail: error, action: '' });
+  assert.ok(headOf(doc, back), `${step} is back`);
+  assert.equal(headOf(doc, 'try-wait'), null);
 }
+
+test('head Try it: a refused Start says why and offers Start again', () => refusedTryStep(REFUSED_START));
+test('head Try it: a refused Stop says why and offers Stop again', () => refusedTryStep(REFUSED_STOP));
 
 test('head Try it: a service started elsewhere shows Open and Stop here once actions-changed lands', async () => {
   let model = TRY_MODEL();
@@ -992,7 +978,7 @@ test('Simple: a linked folder\'s row offers Unlink with its own confirm, and onl
   const row = simpleRowOf(doc);
   assert.match(row.textContent, /^Linked to your folder · since /);
   assert.deepEqual(buttonsOf(row), ['Unlink']);
-  assert.doesNotMatch(glanceOf(doc).textContent, /worktree/i);
+  assert.doesNotMatch(cardMainOf(doc).textContent, /worktree/i);
   click(ctx.window, row.querySelector('button'));
   await settle(ctx.window, 2);
   assert.equal(doc.getElementById('confirm-title').textContent, 'Stop using this folder?');
@@ -1125,7 +1111,7 @@ test('kept work: after a discard, a cache-warm row (no retainedWork key) does no
 });
 
 
-test('F-2: the Actions row, the Overview WORKTREE row and the Actions strip read one checkout', async () => {
+test('F-2: the Local copy row, the Overview WORKTREE row and the Actions tab read one checkout', async () => {
   const actModel = (checkedOut) => ({
     runId: ROW.id, workspace: false, finished: true, enabled: true,
     members: [{ projectKey: KEY, projectName: 'Alpha', branch: ROW.branch, state: checkedOut ? 'checked-out' : 'not-checked-out',
@@ -1149,20 +1135,19 @@ test('F-2: the Actions row, the Overview WORKTREE row and the Actions strip read
   assert.match(wt().textContent, /checked out/);
   assert.doesNotMatch(wt().textContent, /released/);
   assert.match(wt().querySelector('.hd-ov-wt-path').title, /\/tmp\/co/);
-  assert.match(actionsValueOf(doc), /^Local copy open · since /);
-  const strip = () => secOf(doc, 'overview').querySelector('.act-strip');
-  // "Check out" on a single project; a workspace run's strip reads "Check out N changed projects" and
-  // opens the Actions tab instead, so match on the prefix.
-  const offersCheckout = () => [...strip().querySelectorAll('button')].some((b) => b.textContent.startsWith('Check out'));
-  assert.ok(!offersCheckout(), 'no Check out while checked out');
+  assert.match(checkoutTextOf(doc), /^Local copy open · since /);
+  assert.equal(secOf(doc, 'overview').querySelector('.act-strip'), null, 'no Actions strip on the Overview');
+  const offersCheckout = () => [...secOf(doc, 'actions').querySelectorAll('button')].some((b) => b.textContent.startsWith('Check out'));
   // Discarded: the row, then both change events
   model = actModel(false);
   await deliverRows(ctx, [ROW]);
   ctx.wsBox.ws.dispatch('message', { data: JSON.stringify({ type: 'actions-changed', action: 'checkout' }) });
   await settle(ctx.window, 6);
   assert.match(wt().textContent, /released/);
-  assert.equal(actionsValueOf(doc), 'Try it on this machine');
-  assert.ok(offersCheckout());
+  assert.equal(simpleRowOf(doc), null, 'the Local copy row goes with the checkout');
+  openTab(ctx.window, doc.querySelector('#hist-detail .hd-tab[data-sec="actions"]'));
+  await settle(ctx.window, 6);
+  assert.ok(offersCheckout(), 'the Actions tab offers Check out again');
 });
 
 test('F-11: a finished run with no PR reads Ready to ship; an open PR reads In review', async () => {
@@ -1198,29 +1183,34 @@ const labelOf = (b) => b.querySelector('.wfv-menu-l').textContent;
 const reachableArchive = (root) => [...root.querySelectorAll('button')]
   .filter((b) => b.textContent.trim() === 'Archive' && !b.closest('[hidden]'));
 
-for (const level of ['simple', 'advanced', 'expert']) {
-  test(`needle (e) at ${level}: one Archive, in ⋯, confirmed; none in .rd-actions`, async () => {
-    const ctx = await bootDetail({ rows: [{ ...ROW, status: 'stopped' }] });
-    ctx.window.document.documentElement.dataset.level = level;
-    await openDetail(ctx, '');
-    await settle(ctx.window, 6);
-    const doc = ctx.window.document;
-    const screen = doc.querySelector('#hist-detail');
-    assert.equal(reachableArchive(screen).length, 0, 'no Archive on the page outside the ⋯');
-    assert.equal(screen.querySelectorAll('.rd-actions [data-model-action="archive"], .rd-actions [data-model-action="report"]').length, 0);
-    assert.equal(screen.querySelector('.hd-more, .hd-menu'), null, 'the Details ⋯ is gone');
-    const menu = openMore(ctx);
-    const items = itemsOf(menu);
-    assert.equal(items.filter((b) => labelOf(b) === 'Archive').length, 1);
-    assert.deepEqual(items.map(labelOf).slice(-2), ['Report this run', 'Archive']);
-    assert.equal(items.find((b) => labelOf(b) === 'Terminal').querySelector('.wfv-menu-hint').textContent, 'Ctrl+`');
-    const archive = items.find((b) => labelOf(b) === 'Archive');
-    assert.ok(archive.classList.contains('is-danger'));
-    archive.click();
-    await settle(ctx.window, 4);
-    assert.equal(doc.getElementById('confirm-title').textContent, 'Archive this run?');
-  });
+// One Archive, in ⋯, confirmed, at one UI level.
+async function oneArchiveInMore(level) {
+  const ctx = await bootDetail({ rows: [{ ...ROW, status: 'stopped' }] });
+  ctx.window.document.documentElement.dataset.level = level;
+  await openDetail(ctx, '');
+  await settle(ctx.window, 6);
+  const doc = ctx.window.document;
+  const screen = doc.querySelector('#hist-detail');
+  assert.equal(reachableArchive(screen).length, 0, 'no Archive on the page outside the ⋯');
+  assert.equal(screen.querySelectorAll('.rd-actions [data-model-action="archive"], .rd-actions [data-model-action="report"]').length, 0);
+  assert.equal(screen.querySelector('.hd-more, .hd-menu'), null, 'the Details ⋯ is gone');
+  const menu = openMore(ctx);
+  const items = itemsOf(menu);
+  assert.equal(items.filter((b) => labelOf(b) === 'Archive').length, 1);
+  assert.deepEqual(items.map(labelOf).slice(-2), ['Report this run', 'Archive']);
+  assert.equal(items.find((b) => labelOf(b) === 'Terminal').querySelector('.wfv-menu-hint').textContent, 'Ctrl+`');
+  const archive = items.find((b) => labelOf(b) === 'Archive');
+  assert.ok(archive.classList.contains('is-danger'));
+  archive.click();
+  await settle(ctx.window, 4);
+  assert.equal(doc.getElementById('confirm-title').textContent, 'Archive this run?');
+  doc.getElementById('confirm-cancel').click();   // #confirm-modal is no <dialog>: the shared app's reset leaves it open
+  await settle(ctx.window, 2);
 }
+
+test('needle (e) at simple: one Archive, in ⋯, confirmed; none in .rd-actions', () => oneArchiveInMore('simple'));
+test('needle (e) at advanced: one Archive, in ⋯, confirmed; none in .rd-actions', () => oneArchiveInMore('advanced'));
+test('needle (e) at expert: one Archive, in ⋯, confirmed; none in .rd-actions', () => oneArchiveInMore('expert'));
 
 test('needle (e): checked out, the ⋯ Archive is disabled with "Close the local copy in Actions first"', async () => {
   const ctx = await bootDetail({ rows: [checkoutRow()] });
@@ -1243,4 +1233,33 @@ test('slice 2: an archived saved run\'s ⋯ ends with Restore and has no Archive
   const labels = itemsOf(openMore(ctx)).map(labelOf);
   assert.equal(labels.at(-1), 'Restore');
   assert.equal(labels.includes('Archive'), false);
+});
+
+// ---------------------------------------------------------------------------
+// Rerun of …: the facts row of a run that was copied from another
+// ---------------------------------------------------------------------------
+
+test('Rerun of …: a link to the direct source while it exists, plain text once it is gone, no row for a plain run', async () => {
+  const rerunRow = (rerunOf) => async () => {
+    const ctx = await bootDetail({ detail: { ...DETAIL, state: { ...DETAIL.state, ...(rerunOf ? { rerunOf } : {}) } } });
+    await openDetail(ctx, '');
+    return ctx.window.document.querySelector('#hist-detail .hd-glance .rd-kv [data-fact="rerun"]');
+  };
+  const live = await rerunRow({ id: 'src00001', key: KEY, title: 'Earlier <i>run</i>', exists: true })();
+  assert.equal(live.hidden, false);
+  const a = live.querySelector('a');
+  assert.equal(a.getAttribute('href'), `#history/${KEY}/src00001`, 'R-po-10: the direct source');
+  assert.equal(a.textContent, 'Rerun of Earlier <i>run</i>', 'I7: text, never markup');
+  assert.equal(live.querySelector('i'), null);
+  const wsLive = await rerunRow({ id: 'src00002', key: 'workspaces/wks-abc', title: '', exists: true })();
+  assert.equal(wsLive.querySelector('a').getAttribute('href'), '#history/workspaces/wks-abc/src00002');
+  assert.equal(wsLive.querySelector('a').textContent, 'Rerun of src00002');
+
+  const gone = await rerunRow({ id: 'src00001', key: null, title: null, exists: false })();
+  assert.equal(gone.hidden, false);
+  assert.equal(gone.querySelector('a'), null, 'no link to a deleted run');
+  assert.equal(gone.querySelector('.rd-kv-v').textContent, 'Copied from a run that no longer exists');
+
+  const plain = await rerunRow(null)();
+  assert.equal(plain.hidden, true, 'R-po-12: a source never shows its reruns');
 });

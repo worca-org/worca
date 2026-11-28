@@ -4,6 +4,7 @@
 // file tools (file-deps.mjs) check every path against the SAME rules through askPathDenied below — the two
 // engines cannot drift.
 import { homedir } from 'node:os';
+import { SECRET_FILE_RULE_PATHS, VAULT_NAME_PREFIX } from '../secrets/files.mjs';
 
 // Deny beats allow, and the chat's worktrees live INSIDE the home
 // (<home>/ask/<thread>/wt/…), so the home cannot be denied as a whole: worca's
@@ -17,6 +18,7 @@ export const ASK_DENY_RULES = Object.freeze([
   'Read(//**/worca-cc.db*)',           // the DB (+ -wal/-shm/backups), wherever the home is
   'Read(//**/worca.db*)',              // the pre-rename DB file, still present on older homes
   'Read(//**/secrets.json)',           // plugins/*/data/secrets.json and any other
+  ...SECRET_FILE_RULE_PATHS.filter((p) => p.includes(VAULT_NAME_PREFIX)).map((p) => `Read(${p})`),   // the vault, its key and locks, wherever the home is (the proxy login: below)
   'Read(//**/.env*)',
   'Read(//**/.worca-cc/settings.json)',
   'Read(//**/.worca-cc/store/**)',     // run store: transcripts, logs, artifacts
@@ -36,6 +38,12 @@ export const ASK_DENY_RULES = Object.freeze([
   'Read(~/.npmrc)',
   'Read(~/.config/gh/**)',
   'Read(//proc/**)',                   // the server's own environment (/proc/<pid>/environ holds its GitHub and model tokens)
+  // The corporate proxy login (docs/network-proxy.md "Where the login lives"): <home>/proxy-login.json holds an NT hash,
+  // enough to log in. Anywhere: a differently named home, the egress sidecar's copy, a `.tmp` beside it.
+  'Read(//**/proxy-login.json*)',
+  'Read(//run/secrets/**)',            // Docker / compose secrets (a mounted proxy login, the box's git token file)
+  'Read(//var/run/secrets/**)',        // the same folder through the /var/run -> /run symlink
+  'Read(//worca/egress/**)',           // the egress sidecar's data folder (WORCA_EGRESS_DATA_DIR's default): its login
 ]);
 
 /** The same denies minus the run store and checkouts, for a read of ONE run: the night decider and the Auto
@@ -45,8 +53,8 @@ export const RUN_READ_DENY_RULES = Object.freeze(ASK_DENY_RULES.filter((r) => !/
 // Every folder Worca makes under <home>/tmp except requirements/ (a read's one-file folder and a look's checkout). The
 // rule syntax has no "all but": `tmp/*` would match requirements/ too under gitignore folder semantics, so the others are
 // named; test/file-read-guard.test.mjs fails when the code makes a tmp folder this list does not name.
-const OTHER_TMP_DIRS = Object.freeze(['agent-gen', 'ask', 'chat-selftest', 'classifier', 'codex-roles', 'copilot', 'cursor-prompts', 'gemini',
-  'goose', 'night', 'opencode', 'pinpoint', 'qwen', 'skills']);
+const OTHER_TMP_DIRS = Object.freeze(['agent-gen', 'ask', 'chat-selftest', 'classifier', 'codex-roles', 'copilot', 'cursor-prompts', 'docker-fake', 'e2b-fake',
+  'gemini', 'goose', 'guide-check', 'night', 'opencode', 'pinpoint', 'pr-comment-check', 'qwen', 'skills', 'workflow-tests']);
 
 /** Requirements reads and the product brief's look (plans/requirements-a8-design.md D3, D6, D15): Ask's denies with the
  *  tmp one narrowed to every tmp folder but requirements/ (a read's one-file folder and a look's checkout live there),
@@ -65,10 +73,19 @@ export const REQUIREMENTS_READ_DENY_RULES = Object.freeze([
 
 const READ_RULE = /^Read\((.+)\)$/;
 export const toPosix = (p) => String(p).replace(/\\/g, '/');
+// A Windows drive path (`C:/x`) has no POSIX root, so a `//**/…` rule (glob `/**/…`) never matched one: `.env` and
+// secrets.json under a Windows root were readable. Rooting the drive as `/C:/x`, in the path and in the home the `~/`
+// rules sit under, lets the same globs deny on every platform. A UNC path (`//server/…`) is rooted already. An
+// extended-length or device path (`\\?\C:\x`, `\\.\C:\x`, `\\?\UNC\server\x`) names the same file, so it loses that prefix
+// first: else the `~/` rules, built from a plain home, would never match it.
+const rooted = (p) => {
+  const s = toPosix(p).replace(/^\/\/[?.]\/UNC\//i, '//').replace(/^\/\/[?.]\/(?=[A-Za-z]:\/)/, '');
+  return /^[A-Za-z]:\//.test(s) ? `/${s}` : s;
+};
 
 /** The path globs of the Read(...) rules, absolute: `//x` is `/x`, `~/x` is under `home`. Tool-only rules carry no path. */
 export function askDenyGlobs({ rules = ASK_DENY_RULES, home = homedir() } = {}) {
-  const base = toPosix(home).replace(/\/+$/, '');
+  const base = rooted(home).replace(/\/+$/, '');
   const out = [];
   for (const rule of rules) {
     const m = READ_RULE.exec(rule);
@@ -163,7 +180,7 @@ function compiled(rules, home) {
 
 /** The rule that denies `absPath`, or null — the matcher every Codex file tool uses. */
 export function askPathDenied(absPath, { rules = ASK_DENY_RULES, home = homedir() } = {}) {
-  const p = toPosix(absPath);
+  const p = rooted(absPath);
   for (const { rule, re } of compiled(rules, home)) if (re.test(p)) return rule;
   return null;
 }

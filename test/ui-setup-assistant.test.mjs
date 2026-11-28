@@ -44,7 +44,7 @@ function deferred() { let resolve; const promise = new Promise((r) => { resolve 
  */
 const TEAM_NONE = { file: { found: false }, homes: [] };
 async function open({ entry = 'first', step = 'check', settings = SETTINGS, proxy = PROXY_OFF, providers = PROVIDERS, detect = DETECT, routes = {}, level = 'simple',
-  team = TEAM_NONE, teamHome = null } = {}) {
+  team = TEAM_NONE, teamHome = null, deps = undefined } = {}) {
   const dom = new JSDOM('<!doctype html><html><body><button id="opener">open</button></body></html>', { url: 'http://localhost/' });
   const { window } = dom; const doc = window.document;
   if (level) doc.documentElement.dataset.level = level;
@@ -71,7 +71,7 @@ async function open({ entry = 'first', step = 'check', settings = SETTINGS, prox
   };
   const clock = { t: 1_000_000 };
   const closes = []; const closeInfos = [];
-  const handle = openSetupAssistant({ doc, fetchJson, entry, step, team: teamHome, timers, now: () => clock.t, onClose: (how, info) => { closes.push(how); closeInfos.push(info); } });
+  const handle = openSetupAssistant({ doc, fetchJson, entry, step, team: teamHome, timers, deps, now: () => clock.t, onClose: (how, info) => { closes.push(how); closeInfos.push(info); } });
   await settle();
   const $ = (sel) => doc.querySelector(`#setup-modal ${sel}`);
   const h = {
@@ -486,7 +486,7 @@ test('re-run gate: the saved proxy still needs a Test; Skip keeps it and the bod
     await h.click('.sa-next');
     assert.equal(h.next().disabled, true);
     assert.equal(h.status().textContent, 'Test the connection to continue');
-    assert.equal(h.$('.sa-skip').textContent, 'Skip for now', 'Next is blocked: the way past keeps the saved proxy');
+    assert.equal(h.$('.sa-skip').textContent, 'Skip step', 'Next is blocked: the way past keeps the saved proxy');
     await h.click('.sa-skip');
     assert.equal(h.title(), 'Where should Worca get its models?');
     await applyLimit(h);
@@ -563,7 +563,8 @@ test('Network applies on Next: unchanged values post nothing (D19); Direct after
         assert.equal(h.next().textContent, 'Finish');
         assert.equal(h.status().textContent, 'Direct connection saved. Nothing else to change.');
         await h.click('.sa-next');
-        assert.deepEqual(h.closes, ['done']); assert.deepEqual(h.closeInfos.at(-1), { applied: true });
+        await h.click('.sa-continue');
+        assert.deepEqual(h.closes, ['done']); assert.deepEqual(h.closeInfos.at(-1), { applied: true, next: undefined, readyShown: true });
       } finally { h.close(); }
     } },
     { name: 'editing the domain, user or password after a pass needs a new Test', run: async () => {
@@ -577,7 +578,7 @@ test('Network applies on Next: unchanged values post nothing (D19); Direct after
         }
       } finally { h.close(); }
     } },
-    { name: 'Set up later after Network applied: the dialog says the proxy is saved and on', run: async () => {
+    { name: 'Skip all after Network applied: the dialog says the proxy is saved and on', run: async () => {
       const net = netServer();
       const h = await open({ entry: 'first', step: 'network', routes: net.routes });
       try {
@@ -616,8 +617,10 @@ test('Apply rows: one per step, a spinner on the first unfinished one, frames fi
         assert.equal(rows[1].dataset.state, 'running');
         h.handle.onFrame({ type: 'setup-apply', id: 'stp_1', done: true, ok: true });
         assert.equal(h.title(), 'Worca is ready');
+        assert.equal(h.$('.confirm-actions').children.length, 0, 'no button while finishSetup is asked');
+        await h.settle();
         await h.click('.sa-continue');
-        assert.deepEqual(h.closes, ['done']); assert.deepEqual(h.closeInfos.at(-1), { applied: true });
+        assert.deepEqual(h.closes, ['done']); assert.deepEqual(h.closeInfos.at(-1), { applied: true, next: undefined, readyShown: true });
         assert.equal(h.doc.getElementById('setup-modal'), null);
       } finally { h.close(); }
     } },
@@ -870,7 +873,8 @@ test('fix: nothing changed on Review offers Finish, which posts nothing and clos
     assert.equal(h.next().textContent, 'Finish'); assert.equal(h.next().disabled, false);
     assert.equal(h.status().textContent, NO_CHANGES_LINE);
     await h.click('.sa-next');
-    assert.deepEqual(h.closes, ['done']); assert.deepEqual(h.closeInfos, [{ applied: false }]);
+    await h.click('.sa-continue');
+    assert.deepEqual(h.closes, ['done']); assert.deepEqual(h.closeInfos, [{ applied: false, next: undefined, readyShown: true }]);
     assert.deepEqual(h.writes(), []);
   } finally { h.close(); }
 });
@@ -882,6 +886,8 @@ test('a first start with nothing to apply ends on Finish, without a POST (A23)',
     assert.equal(h.next().textContent, 'Finish');
     assert.equal(h.status().textContent, 'Nothing to change: your current setup already works.');
     await h.click('.sa-next');
+    assert.deepEqual(h.closes, [], 'Finish paints the ready screen first');
+    await h.click('.sa-continue');
     assert.deepEqual(h.closes, ['done']);
     assert.equal(h.applies().length, 0);
   } finally { h.close(); }
@@ -1162,10 +1168,10 @@ test('foot order: Cancel, then Use saved values, then Back and Next side by side
   } finally { h.close(); }
 });
 
-test('close rules: Set up later / Cancel close at once untouched and ask after an edit; Escape on an edit asks; a backdrop click never closes (AC-4.1)', async () => {
+test('close rules: Skip all / Cancel close at once untouched and ask after an edit; Escape on an edit asks; a backdrop click never closes (AC-4.1)', async () => {
   let h = await open();
   try {
-    assert.equal(h.$('.sa-later').textContent, 'Set up later');
+    assert.equal(h.$('.sa-later').textContent, 'Skip all');
     await h.click('.sa-later');
     assert.deepEqual(h.closes, ['later']);
     assert.equal(discardPrompt(h.doc), null);
@@ -1397,8 +1403,12 @@ test('module source: no HTML sinks, no CSS.escape; built on layoutDialog and gua
   assert.ok(read('docs/setup-assistant.md').includes('## The dialog'));
   // A finished re-run goes to the welcome only when it applied something. Source check: booting app.js in jsdom is the heavy suite.
   assert.ok(read('ui/public/app.js').includes("entry === 'rerun' && how === 'done' && applied"));
+  // The ready screen's three calls and the close rule live in app.js; booting it in jsdom is the heavy suite, so a source check.
+  const app = read('ui/public/app.js');
+  assert.ok(app.includes("setOnboardingPrefs({ setupFinished: true })") && app.includes('loadOnboarding({ recheck: true })') && app.includes('fetchWorcaLevel()'));
+  assert.ok(app.includes('if (next) location.hash = next;') && app.includes('if (readyShown || finishing) { gs.welcomeShown = true;') && app.includes('else showWelcome();'));
   const gs = read('docs/getting-started.md');
-  assert.ok(gs.includes('Set up later')); assert.ok(gs.includes('Setup assistant › **Run setup**'));
+  assert.ok(gs.includes('Skip all')); assert.ok(gs.includes('Setup assistant › **Run setup**'));
 });
 
 const bodyOf = (w) => (typeof w.body === 'string' ? JSON.parse(w.body) : w.body);
@@ -1531,6 +1541,7 @@ test('AC-5.7: entry team with nothing differing says it already matches and offe
     assert.equal(h.$('.sa-review-empty').textContent, "Your setup already matches your team's recommendation.");
     assert.equal(h.next().textContent, 'Finish'); assert.equal(h.next().disabled, false);
     await h.click('.sa-next');
+    await h.click('.sa-continue');
     assert.deepEqual(h.closes, ['done']);
     assert.deepEqual(h.writes(), []);
   } finally { h.close(); }
@@ -1569,6 +1580,7 @@ test('entry team with a vanished home says so and offers an enabled Finish', asy
     assert.equal(h.$('.sa-review-empty').textContent, "Your team's setup is no longer available.");
     assert.equal(h.next().textContent, 'Finish'); assert.equal(h.next().disabled, false);
     await h.click('.sa-next');
+    await h.click('.sa-continue');
     assert.deepEqual(h.closes, ['done']); assert.deepEqual(h.writes(), []);
   } finally { h.close(); }
 });
@@ -1592,6 +1604,7 @@ test('AC-5.6: Share as team setup downloads the draft as team-setup.json; it is 
   try {
     await applyLimit(h);
     h.handle.onFrame({ type: 'setup-apply', id: 'stp_1', done: true, ok: true });
+    await h.settle();
     const kids = [...h.$('.confirm-actions').children].map((b) => b.textContent);
     assert.deepEqual(kids, ['Share as team setup', 'Continue']);
     const clicks = []; h.window.HTMLAnchorElement.prototype.click = function () { clicks.push(this.download); };
@@ -1622,6 +1635,7 @@ test('Share: a failed draft shows the server error in the err class', async () =
   try {
     await applyLimit(h);
     h.handle.onFrame({ type: 'setup-apply', id: 'stp_1', done: true, ok: true });
+    await h.settle();
     await h.click('.sa-share');
     assert.equal(h.status().textContent, 'Worca could not prepare the team setup. Try again.');
     assert.ok(h.status().classList.contains('err'));
@@ -1663,4 +1677,249 @@ test('networkAnswered: only a working direct connection, no proxy in the environ
   assert.equal(networkAnswered(a, d('ok', 'ok')), false, 'a proxy is set here');
   assert.equal(networkAnswered({ network: { mode: 'proxy' } }, d('ok', 'no')), false);
   assert.equal(networkAnswered(a, null), false, 'no check, no answer');
+});
+
+test('#1450: empty Claude Code roles start on Worca\'s defaults, a saved role or "Let Claude Code decide" is kept, Review says so', () => {
+  const ROLE_DEFAULTS = { claude: { deep: { model: 'claude-opus-5-5' }, everyday: { model: 'claude-sonnet-5-5' }, quick: { model: 'claude-haiku-5-5' } } };
+  const s = saved({ settings: { ...SETTINGS, roleDefaults: ROLE_DEFAULTS, claudeAuth: 'signed-in' } });
+  const first = initialAnswers({ saved: s, entry: 'first' });
+  assert.deepEqual(first.models.modelRoles.claude, { deep: { model: 'claude-opus-5-5' }, everyday: { model: 'claude-sonnet-5-5' }, quick: { model: 'claude-haiku-5-5' } });
+  assert.deepEqual(buildApplyBody(s, first).models.modelRoles.claude, first.models.modelRoles.claude, 'the defaults ride the apply body');
+  const lines = diffRows(s, first).find((r) => r.group === 'models').lines;
+  assert.deepEqual(lines.slice(0, 3).map((l) => [l.role, l.model, !!l.defaulted]), [
+    ['Deep thinking', 'claude-opus-5-5', true], ['Everyday tasks', 'claude-sonnet-5-5', true], ['Quick jobs', 'claude-haiku-5-5', true]]);
+  assert.match(diffRows(s, first).find((r) => r.group === 'models').value, /^Deep thinking · Worca’s default \(Opus 5\.5\)/);
+
+  const mine = saved({ settings: { ...SETTINGS, roleDefaults: ROLE_DEFAULTS, modelRoles: { claude: { deep: { model: 'claude-haiku-5-5', effort: 'high' }, everyday: { cliDecides: true } } } } });
+  const rerun = initialAnswers({ saved: mine, entry: 'rerun' });
+  assert.deepEqual(rerun.models.modelRoles.claude.deep, { model: 'claude-haiku-5-5', effort: 'high' }, 'a saved role is never overwritten');
+  assert.deepEqual(rerun.models.modelRoles.claude.everyday, { cliDecides: true });
+  assert.deepEqual(rerun.models.modelRoles.claude.quick, { model: 'claude-haiku-5-5' }, 'only the empty one is filled');
+  const rerunLines = diffRows(mine, rerun).find((r) => r.group === 'models').lines;
+  assert.equal(rerunLines[1].fallback, 'Let Claude Code decide');
+
+  const out = initialAnswers({ saved: saved({ settings: { ...SETTINGS, roleDefaults: ROLE_DEFAULTS, claudeAuth: 'signed-out' } }), entry: 'first' });
+  assert.equal(out.models.modelRoles.claude, undefined, 'signed out: no Claude default is preselected');
+});
+
+// ── the ready screen and the level subtitle (Phase 8) ──
+const EARNED = { earned: true, held: 0, level: { index: 1, name: 'Curious', avatar: '/img/curious.png', hue: 235 }, missing: [],
+  nextName: 'Runner', nextNeeds: ['Getting started steps 1 to 6', '3 real runs'] };
+const readyDeps = (result, levelIndex = () => 0) => ({ levelIndex, finishSetup: async () => result });
+const ACK = '/api/worca-level/ack';
+const acks = (h) => h.log.filter((r) => r.url === ACK);
+
+test('subtitle line shows before apply when no level, never on the apply step or for someone who holds a level', async () => {
+  const h = await open({ entry: 'rerun', deps: readyDeps(null, () => 0) });
+  try {
+    const hint = h.$('.sa-level-hint');
+    assert.equal(hint.textContent, 'Finish to earn your first level.'); assert.equal(hint.hidden, false);
+    assert.ok(hint.previousElementSibling.classList.contains('sa-progress'), 'right under the progress bar');
+    await h.goTo('review');
+    assert.equal(h.$('.sa-level-hint').hidden, false, 'every step before apply');
+  } finally { h.close(); }
+  const first = await open({ entry: 'first', deps: readyDeps(null, () => null) });
+  try { assert.equal(first.$('.sa-level-hint').hidden, false, 'view not loaded on a first start'); } finally { first.close(); }
+  const rerunUnknown = await open({ entry: 'rerun', deps: readyDeps(null, () => null) });
+  try { assert.equal(rerunUnknown.$('.sa-level-hint').hidden, true, 'unknown view on a re-run says nothing'); } finally { rerunUnknown.close(); }
+  const runner = await open({ entry: 'first', deps: readyDeps(null, () => 2) });
+  try { assert.equal(runner.$('.sa-level-hint').hidden, true, 'a held level never sees it'); } finally { runner.close(); }
+});
+
+test('apply ok + earned -> level block, one button "Start your first run", no Share on entry first (R-po-2)', async () => {
+  const h = await open({ entry: 'first', deps: readyDeps(EARNED), routes: { '/api/setup/apply': reply({ id: 'stp_1', steps: STEPS3 }, 202) } });
+  try {
+    await h.goTo('work'); await h.type('work.pipelineCostLimitUsd', '7'); await h.goTo('review'); await h.click('.sa-next');
+    h.handle.onFrame({ type: 'setup-apply', id: 'stp_1', done: true, ok: true });
+    await h.settle();
+    assert.equal(h.title(), 'Worca is ready');
+    assert.equal(h.$('.sa-level-hint').hidden, true);
+    assert.equal(h.$('.sa-ready-level').textContent, 'Curious · Level 1 of 5');
+    assert.equal(h.$('.sa-ready-avatar').getAttribute('src'), '/img/curious.png');
+    assert.equal(h.$('.sa-ready-next').textContent, 'Runner needs: Getting started steps 1 to 6 and 3 real runs');
+    assert.deepEqual([...h.$('.confirm-actions').children].map((b) => b.textContent), ['Start your first run']);
+    assert.equal(h.$('.sa-share'), null);
+    await h.click('.sa-continue');
+    assert.deepEqual(h.closes, ['done']); assert.deepEqual(h.closeInfos.at(-1), { applied: true, next: '#new', readyShown: true });
+  } finally { h.close(); }
+});
+
+test('not signed in -> missing line + Continue', async () => {
+  const h = await open({ entry: 'first', deps: readyDeps({ earned: false, held: 0, level: null, missing: ['provider'], nextName: null, nextNeeds: [] }) });
+  try {
+    await h.goTo('review'); await h.click('.sa-next');
+    assert.equal(h.$('.sa-ready-missing').textContent, 'Sign in to a model provider to earn your first level.');
+    assert.equal(h.$('.sa-ready-level'), null);
+    assert.deepEqual([...h.$('.confirm-actions').children].map((b) => b.textContent), ['Continue']);
+    assert.equal(acks(h).length, 0, 'nothing earned: nothing acknowledged');
+    await h.click('.sa-continue');
+    assert.deepEqual(h.closeInfos.at(-1), { applied: false, next: undefined, readyShown: true });
+  } finally { h.close(); }
+});
+
+test('finishSetup null -> plain ready screen', async () => {
+  const h = await open({ entry: 'rerun', deps: readyDeps(null) });
+  try {
+    await h.goTo('review'); await h.click('.sa-next');
+    assert.equal(h.title(), 'Worca is ready');
+    assert.equal(h.$('.sa-ready-level'), null); assert.equal(h.$('.sa-ready-missing'), null);
+    assert.deepEqual([...h.$('.confirm-actions').children].map((b) => b.textContent), ['Continue']);
+  } finally { h.close(); }
+});
+
+test('Finish with nothing to apply also shows the ready screen', async () => {
+  let calls = 0;
+  const h = await open({ entry: 'first', deps: { levelIndex: () => 0, finishSetup: async () => { calls++; return EARNED; } } });
+  try {
+    await h.goTo('review');
+    assert.equal(h.next().textContent, 'Finish');
+    await h.click('.sa-next');
+    assert.equal(calls, 1); assert.deepEqual(h.closes, []);
+    assert.ok(h.$('.sa-ready-level'));
+    assert.equal(h.applies().length, 0);
+  } finally { h.close(); }
+});
+
+test('Escape on the earned ready screen: celebration already acked, no #welcome-modal, no level dialog after close (R-po-3)', async () => {
+  const h = await open({ entry: 'first', deps: readyDeps(EARNED) });
+  try {
+    await h.goTo('review'); await h.click('.sa-next');
+    assert.deepEqual(acks(h).map((r) => [r.method, r.body.what, r.body.index]), [['POST', 'celebration', 1]], 'acked when the screen paints');
+    assert.equal(h.window.sessionStorage.getItem('worca-level:shown-in-session'), '1');
+    pressEscape(h.window); await h.settle();
+    assert.deepEqual(h.closes, ['later']); assert.equal(h.closeInfos.at(-1).readyShown, true);
+    assert.equal(h.closeInfos.at(-1).next, undefined);
+    assert.equal(acks(h).length, 1, 'closing acks nothing more');
+    assert.equal(h.doc.getElementById('welcome-modal'), null);
+    assert.equal(h.doc.querySelector('.viewer-modal'), null);
+  } finally { h.close(); }
+});
+
+test('Escape while the ready screen is still being asked reports finishing, so the app skips the welcome (D-11)', async () => {
+  let release;
+  const gate = new Promise((r) => { release = r; });
+  const h = await open({ entry: 'first', deps: { levelIndex: () => 0, finishSetup: () => gate } });
+  try {
+    await h.goTo('review'); await h.click('.sa-next');
+    pressEscape(h.window); await h.settle();
+    assert.deepEqual(h.closes, ['later']);
+    assert.equal(h.closeInfos.at(-1).finishing, true);
+    assert.equal(h.closeInfos.at(-1).readyShown, false);
+  } finally { release(EARNED); h.close(); }
+});
+
+test('a re-run by a Runner shows no level line', async () => {
+  const h = await open({ entry: 'rerun', deps: readyDeps({ earned: false, held: 2, level: { index: 2, name: 'Runner', avatar: '/x.png', hue: 195 }, missing: [], nextName: 'Hooked', nextNeeds: ['x'] }, () => 2) });
+  try {
+    assert.equal(h.$('.sa-level-hint').hidden, true);
+    await h.goTo('review'); await h.click('.sa-next');
+    assert.equal(h.$('.sa-ready-level'), null); assert.equal(h.$('.sa-ready-missing'), null); assert.equal(h.$('.sa-ready-next'), null);
+    assert.deepEqual([...h.$('.confirm-actions').children].map((b) => b.textContent), ['Continue']);
+    assert.equal(acks(h).length, 0);
+  } finally { h.close(); }
+});
+
+const NOTE = 'The corporate proxy login on this instance is managed by the operator. Worca shows its status only.';
+const PROXY_MANAGED = { ...PROXY_ON, sidecar: true, managed: true, managedNote: NOTE, upstream: 'proxy.acme.example:8080',
+  login: { domain: 'ACME', user: 'svc-worca', label: 'ACME\\svc-worca' }, line: 'ready: via proxy.acme.example:8080 (NTLMv2) as ACME\\svc-worca.' };
+
+test('Network with a login the operator manages: who is logged in and the state, no form, no Test needed', async () => {
+  const h = await open({ entry: 'fix', step: 'network', proxy: PROXY_MANAGED });
+  try {
+    const text = h.$('.sa-managed').textContent;
+    assert.match(text, /managed by the operator/);
+    assert.match(text, /Logged in as ACME\\svc-worca to proxy\.acme\.example:8080\./);
+    assert.match(text, /ready: via proxy\.acme\.example:8080/);
+    for (const f of ['network.networkProxy', 'network.login.domain', 'network.login.password']) assert.equal(h.field(f), undefined, f);
+    assert.equal(h.$('.sa-test'), null);
+    assert.equal(h.next().disabled, false, 'nothing to test: the operator owns the login');
+    assert.equal(nextGate('network', { network: { mode: 'proxy' } }, { saved: { proxy: PROXY_MANAGED } }).ok, true);
+  } finally { h.close(); }
+});
+
+test('Network with a managed login the proxy rejected: the line says the operator replaces the login file, not "log in again"', async () => {
+  const { stateLine } = await import('../src/core/proxy-credentials.mjs');
+  const line = stateLine({ state: 'needs-login', managed: true, login: { label: 'ACME\\svc-worca', rejected: { at: '2026-11-20T10:00:00.000Z' } } });
+  const h = await open({ entry: 'fix', step: 'network', proxy: { ...PROXY_MANAGED, state: 'needs-login', line } });
+  try {
+    const text = h.$('.sa-managed').textContent;
+    assert.match(text, /operator manages this login: they must replace the login file/);
+    assert.doesNotMatch(text, /Log in again|worca proxy login/);
+    assert.doesNotMatch(text, /Logged in as/, 'a rejected login is not shown as logged in');
+  } finally { h.close(); }
+});
+
+// ── Where agents run (How you work; docs/choose-a-setup.md) ──
+const DETECT_SANDBOXES = { checks: [...DETECT.checks, check('docker', 'ok'), check('e2b', 'no')] };
+const POSTURE_NATIVE = { where: 'native', whereLabel: 'Native install', rows: [] };
+const POSTURE_BOX = { where: 'hardened', whereLabel: 'Hardened box', rows: [
+  { id: 'broker', label: 'Credential broker', status: 'on', value: 'On', tone: 'ok', detail: 'The broker holds the model key. Worca and its agents hold none.' },
+  { id: 'network', label: 'Outbound network', status: 'unknown', value: 'Sidecar', tone: 'neutral', detail: 'Through the egress sidecar.' }] };
+
+test('Where agents run: Local and the Docker sandbox the check found; a pick is the default execution environment', async () => {
+  const h = await open({ entry: 'rerun', detect: DETECT_SANDBOXES, routes: { '/api/security/posture': reply(POSTURE_NATIVE) } });
+  try {
+    await h.goTo('work');
+    const pick = h.$('.sa-where-pick');
+    assert.deepEqual([...pick.querySelectorAll('button')].map((b) => b.dataset.value), ['local', 'docker'], 'no E2B: its check is no');
+    assert.equal(pick.querySelector('[aria-pressed="true"]').dataset.value, 'local');
+    assert.match(h.$('.sa-where-line').textContent, /not sandboxed/);
+    const link = h.$('.sa-where-guide a');
+    assert.equal(link.getAttribute('href'), 'https://github.com/worca-org/worca/blob/dev/docs/choose-a-setup.md');
+    assert.equal(link.target, '_blank');
+    await h.click(pick.querySelector('[data-value="docker"]'));
+    assert.match(h.$('.sa-where-line').textContent, /own container/);
+    await h.goTo('review');
+    assert.match(h.$('.sa-review tr[data-group="work"]').textContent, /agents in Local sandbox \(Docker\)/);
+    await h.click('.sa-next');
+    assert.equal(h.applies()[0].body.work.execEnv, 'docker');
+  } finally { h.close(); }
+});
+
+test('Where agents run: no sandbox found offers Local only and says how to get one; untouched, nothing is sent', async () => {
+  const h = await open({ entry: 'rerun' });
+  try {
+    await h.goTo('work');
+    assert.equal(h.$('.sa-where-pick'), null, 'one choice is a plain line, not a one-button control');
+    assert.match(h.$('.sa-where-line').textContent, /^Local · Agents run on this machine/);
+    assert.match(h.$('.sa-where-none').textContent, /Start Docker .* set an E2B key/);
+    assert.equal(buildApplyBody(saved(), initialAnswers({ saved: saved(), entry: 'rerun' })).work, undefined);
+  } finally { h.close(); }
+});
+
+test('Where agents run: a saved sandbox stays offered and Local clears it', async () => {
+  const h = await open({ entry: 'rerun', settings: { ...SETTINGS, execEnv: 'e2b' } });
+  try {
+    await h.goTo('work');
+    assert.equal(h.$('.sa-where-pick [aria-pressed="true"]').dataset.value, 'e2b');
+    await h.click(h.$('.sa-where-pick [data-value="local"]'));
+    await h.goTo('review'); await h.click('.sa-next');
+    assert.equal(h.applies()[0].body.work.execEnv, null);
+  } finally { h.close(); }
+});
+
+test('Where agents run in the hardened box: the posture instead of a choice', async () => {
+  const h = await open({ entry: 'rerun', detect: DETECT_SANDBOXES, routes: { '/api/security/posture': reply(POSTURE_BOX) } });
+  try {
+    await h.goTo('work');
+    assert.equal(h.$('.sa-where-pick'), null);
+    const rows = h.$$('.sa-where-posture [data-posture]');
+    assert.deepEqual(rows.map((r) => r.dataset.posture), ['broker', 'network']);
+    assert.match(rows[0].textContent, /On.*Credential broker/);
+    assert.equal(rows[0].querySelector('.badge').className, 'badge green posture-badge', 'the Security card\'s chip: green for a protection that is on');
+    assert.equal(rows[1].querySelector('.badge').textContent, 'Sidecar');
+    assert.equal(rows[1].querySelector('.badge').className, 'badge grey posture-badge');
+    assert.match(h.$('.sa-where-posture').closest('.sa-section').textContent, /runs in the hardened box/);
+    assert.ok(h.$('.sa-where-guide a'));
+  } finally { h.close(); }
+});
+
+test('Network in a container: the password note names the sidecar, and More has no local proxy port', async () => {
+  const h = await open({ entry: 'fix', step: 'network', proxy: { ...PROXY_ON, sidecar: true, managed: false } });
+  try {
+    assert.match(h.$('.sa-sidecar-note').textContent, /egress sidecar holds the login/);
+    await h.click('.sa-more');
+    assert.equal(h.field('network.networkProxy.fixedPort'), undefined);
+    assert.ok(h.field('network.networkProxy.timeouts.connectMs'));
+  } finally { h.close(); }
 });

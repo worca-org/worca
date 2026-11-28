@@ -14,7 +14,7 @@ import { join, basename, resolve, isAbsolute } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { realpathSync, existsSync, statSync, lstatSync, constants as fsConstants } from 'node:fs';
 import { hostname } from 'node:os';
-import { projectKey, projectKey as projectKeyOf, projectStorePath, canonicalProjectRoot, workspaceStorePath, isNoProjectKey, noProjectWorkDir, NO_PROJECT_KEY } from './store.mjs';
+import { projectKey, projectKey as projectKeyOf, projectStorePath, canonicalProjectRoot, workspaceStorePath, isNoProjectKey, noProjectWorkDir, NO_PROJECT_KEY, testCopyKeyOf, testCopyDirFor, PROJECT_KEY_RE } from './store.mjs';
 import { NO_PROJECT_NAME } from '../shared/no-project.mjs';
 import { workModeOfRow } from './project-kind.mjs';
 import { rollupChanges } from './folder-members.mjs';
@@ -22,7 +22,7 @@ import { harvestWork, WORK_ARTIFACT_KIND } from './no-project-work.mjs';
 import { updateRunManifest } from './run-manifest.mjs';
 import { listProjects, worcaHome, runOnboarded } from './projects.mjs';
 import { claimRunDir, claimRunExtras, shareFailureReason } from './agent-pool.mjs';
-import { branchExists, diffShortstat, anyPrHost, findPrForBranch, commitsAhead, withRefSnapshot } from './git-info.mjs';
+import { branchExists, diffShortstat, anyPrHost, lookupPrForBranch, commitsAhead, withRefSnapshot } from './git-info.mjs';
 import { getDb, tx } from './db.mjs';
 import { cleanOutcome } from './shape/rounds.mjs';
 import { rollupMemberPrs, workspaceMembers, changedFileCount } from './workspace-prs.mjs';
@@ -36,6 +36,8 @@ import { attachWatchPipeline, getWatch, watchActive } from './pr-watch.mjs';
 import { insertRunTags, readRunTags, readTagsFor } from './run-tags-store.mjs';
 import { insertRunLabels, readLabelsFor, readRunLabels } from './run-labels-store.mjs';
 import { workInBase } from './in-base.mjs';
+import { readNightDecisions } from './night/store.mjs';
+import { planVersionOf } from '../shared/shape/run-facts.mjs';
 
 // ── DB row <-> state object mapping (Phase 3) ──────────────────────────────────
 // JSON columns are TEXT; (de)serialize at THIS boundary only. Reads are fail-safe:
@@ -61,6 +63,18 @@ const DIR_ID_RE = /-([0-9a-f]{8})$/i;
  * @param {string} key
  * @returns {object|null}
  */
+/**
+ * The folder a single-project pipelines row worked in: a run without a project, its own work folder; a workflow-test try
+ * (is_test), Worca's copy of the project (3a, final review round 2: never the person's folder); else the project's
+ * registered path (store meta). null when unknown. Workspace rows keep their members' own dirs (workspace_meta).
+ */
+export function projectDirOfRow(row) {
+  if (!row) return null;
+  if (isNoProjectKey(row.project_key)) return noProjectWorkDir(row.id);
+  if (row.is_test) return PROJECT_KEY_RE.test(String(row.project_key ?? '')) ? testCopyDirFor(row.project_key) : null;
+  return readStoreMeta(row.project_key)?.path ?? null;
+}
+
 /** Was this run started as a mock (pipelines.run_setup)? A row without the column, or unreadable JSON: no. */
 function isMockSetup(raw) {
   try { return JSON.parse(raw || 'null')?.mock === true; } catch { return false; }
@@ -401,9 +415,8 @@ export async function listRunArtifacts(pipelineId, filter = {}) {
  */
 export async function newestPlanPath(pipelineId, storeRoot) {
   if (!pipelineId || !storeRoot) return null;
-  const ver = (rel) => Number(/-v(\d+)\.md$/.exec(rel)?.[1] || 1);
   const plans = (await listRunArtifacts(pipelineId, { kind: 'plan' }))
-    .sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')) || ver(b.relPath) - ver(a.relPath));
+    .sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')) || planVersionOf(b.relPath) - planVersionOf(a.relPath));
   for (const a of plans) {
     const f = join(storeRoot, a.relPath);
     try { if (lstatSync(f).isFile()) return f; } catch { /* gone: try the next one */ }
@@ -653,7 +666,9 @@ export function readPipelineExtras(pipelineId) {
       ...(Array.isArray(v.checklist) ? { checklist: v.checklist } : {}),
     };
   });
-  return { clarify, reviews, stepQuestions: readStepQuestions(pipelineId) };
+  // Away mode's stored answers, for the Q&A tab (only when it gave any: the shape stays as it was otherwise).
+  const awayAnswers = readNightDecisions(pipelineId);
+  return { clarify, reviews, stepQuestions: readStepQuestions(pipelineId), ...(awayAnswers.length ? { awayAnswers } : {}) };
 }
 
 /**
@@ -992,6 +1007,9 @@ async function ensureMeta(projectDir, _root, { projectKey, plain = false } = {})
   if (existing) return existing;                       // firstSeenAt preserved
   // P1 (v8): a non-git run's folder is its own root — never an enclosing repo's (a parent git-inited after registration)
   const canonical = plain ? (() => { const d = resolve(projectDir); try { return realpathSync(d); } catch { return d; } })() : canonicalProjectRoot(projectDir);
+  // Workflow tests 3a (D52): Worca's copy of a project is never written as the project's meta. The first write wins
+  // (firstSeenAt), so a project that never ran would otherwise keep the copy as its path for good.
+  if (!plain && testCopyKeyOf(canonical)) return { key, path: canonical, name: basename(canonical), firstSeenAt: new Date().toISOString() };
   let name = basename(canonical) || 'project';
   try {
     const projects = await listProjects();
@@ -1192,6 +1210,7 @@ export async function readPromptFile(projectDir, promptFile) {
  * @param {string} [opts.guardrailsId] the run's selected guardrail set id (per-run)
  * @param {string|null} [opts.runSetup] JSON of the run's setup (pipelines.run_setup, v62); never on the state object
  * @param {object|null} [opts.prAuto] the run's PR-when-done decision (pipelines.pr_auto, v86); same rule as runSetup
+ * @param {string|null} [opts.rerunOf] the id of the run this one was copied from (pipelines.rerun_of); same rule as runSetup
  * @param {string[]} [opts.extras]    paths to extra files copied into dir/extras
  * @param {string} [opts.title]       human title (defaults to derived text)
  * @param {string} [opts.workspaceKey]   opt-in: route to the workspace store
@@ -1203,9 +1222,9 @@ export async function readPromptFile(projectDir, promptFile) {
  */
 export async function createPipeline(projectDir, opts = {}) {
   const {
-    prompt, promptFile, extras = [], title,
+    prompt, promptFile, extras = [], title, isTest = false,
     promptText: precomputedPromptText = null, sourceType = null, sourceMeta = null,
-    guardrailsId = null, startedBy = null, prWatchRunId = null, tags = [], labels = [], runSetup = null, prAuto = null,
+    guardrailsId = null, startedBy = null, prWatchRunId = null, tags = [], labels = [], runSetup = null, prAuto = null, rerunOf = null,
     workspaceKey = null, workspaceId = null, workspaceName = null,
     workspaceDescription = '', projects = null,
   } = opts;
@@ -1357,7 +1376,7 @@ export async function createPipeline(projectDir, opts = {}) {
   // no more state.json on disk. writeState also seeds the dir->id cache
   // (rememberDir) so appendAudit resolves this run without any call-site change
   // (A4). recordArtifact runs AFTER the row exists (FK -> pipelines).
-  await writeState(dir, state, { prWatchRunId, runSetup, prAuto });
+  await writeState(dir, state, { prWatchRunId, runSetup, prAuto, isTest, rerunOf, extrasNames: [...new Set(copiedExtras.map((rel) => basename(rel)))] });   // two sources with one name share one file
   // Run tags (#718): written once, after the row exists (FK) and after writeState's tx has
   // committed (tx cannot nest). writeState updates never touch them.
   insertRunTags(id, tags);
@@ -1465,7 +1484,7 @@ function rememberDir(dir, id) { if (dir && id) _dirIdCache.set(resolve(dir), id)
  * @param {object} stateObj
  * @returns {Promise<object>}
  */
-export async function writeState(pipelineDir, stateObj, { prWatchRunId = null, runSetup = null, prAuto = null } = {}) {
+export async function writeState(pipelineDir, stateObj, { prWatchRunId = null, runSetup = null, prAuto = null, isTest = false, rerunOf = null, extrasNames = null } = {}) {
   const obj = { ...stateObj, updatedAt: new Date().toISOString() };
   const id = obj.id;
   if (!id) return obj; // pre-id state (constructor default): nothing to persist yet
@@ -1475,26 +1494,34 @@ export async function writeState(pipelineDir, stateObj, { prWatchRunId = null, r
       INSERT INTO pipelines (id, project_key, workspace_key, target, title, base_name,
         date_prefix, status, phase, cycle, started_at, updated_at, total_cost_usd,
         total_active_ms, prompt, branch, workspace_meta, stepper, tools, resume_point,
-        source_type, source_ref, guardrails_id, outcome, human_hours, started_by, shape_stats, run_size, run_setup, review_stats, pr_auto)
+        source_type, source_ref, guardrails_id, outcome, human_hours, started_by, shape_stats, run_size, run_setup, review_stats, pr_auto, rerun_of, extras_names, is_test,
+        elapsed_ms, elapsed_since, finished_at)
       VALUES (@id,@project_key,@workspace_key,@target,@title,@base_name,@date_prefix,
         @status,@phase,@cycle,@started_at,@updated_at,@total_cost_usd,@total_active_ms,
         @prompt,@branch,@workspace_meta,@stepper,@tools,@resume_point,
-        @source_type,@source_ref,@guardrails_id,@outcome,@human_hours,@started_by,@shape_stats,@run_size,@run_setup,@review_stats,@pr_auto)
+        @source_type,@source_ref,@guardrails_id,@outcome,@human_hours,@started_by,@shape_stats,@run_size,@run_setup,@review_stats,@pr_auto,@rerun_of,@extras_names,@is_test,
+        COALESCE(@elapsed_ms, 0),@elapsed_since,
+        CASE WHEN @status = 'done' THEN @updated_at END)
       ON CONFLICT(id) DO UPDATE SET
         status=excluded.status, phase=excluded.phase, cycle=excluded.cycle,
         updated_at=excluded.updated_at, total_cost_usd=excluded.total_cost_usd,
         total_active_ms=excluded.total_active_ms, human_hours=excluded.human_hours,
+        elapsed_ms=COALESCE(@elapsed_ms, elapsed_ms),
+        elapsed_since=CASE WHEN @elapsed_ms IS NULL THEN elapsed_since ELSE excluded.elapsed_since END,
         branch=excluded.branch,
         workspace_meta=excluded.workspace_meta, stepper=excluded.stepper,
         tools=excluded.tools,
         resume_point=excluded.resume_point,
         outcome=excluded.outcome,
+        finished_at=CASE WHEN excluded.status='done' THEN COALESCE(pipelines.finished_at, excluded.updated_at) ELSE pipelines.finished_at END,
         shape_stats=COALESCE(excluded.shape_stats, shape_stats),
         review_stats=COALESCE(excluded.review_stats, review_stats),
         run_size=COALESCE(excluded.run_size, run_size),
         base_name=COALESCE(excluded.base_name, base_name),
         date_prefix=COALESCE(excluded.date_prefix, date_prefix)
-    `).run({ ...toPipelineRow(obj), run_setup: typeof runSetup === 'string' ? runSetup : null, pr_auto: prAuto ? JSON.stringify(prAuto) : null });
+    `).run({ ...toPipelineRow(obj), run_setup: typeof runSetup === 'string' ? runSetup : null, pr_auto: prAuto ? JSON.stringify(prAuto) : null,
+      rerun_of: typeof rerunOf === 'string' ? rerunOf : null,
+      extras_names: Array.isArray(extrasNames) ? JSON.stringify(extrasNames) : null, is_test: isTest ? 1 : null });
 
     // A Watch PR fix run (#619): ownership lands in the same transaction that creates the row.
     if (prWatchRunId) attachWatchPipeline(prWatchRunId, id, obj.updatedAt);
@@ -1976,7 +2003,7 @@ export function readPipelineForResume(pipelineId) {
 /** Paused / interrupted runs whose resume point carries a network outage (the server's network watch). */
 export function listNetworkWaitRuns() {
   const rows = getDb().prepare(`SELECT id, status, resume_point FROM pipelines
-    WHERE status IN ('paused', 'interrupted') AND archived_at IS NULL
+    WHERE status IN ('paused', 'interrupted') AND archived_at IS NULL AND is_test IS NULL   -- D22: the network watch never resumes a try
       AND json_extract(resume_point, '$.network.since') IS NOT NULL`).all();
   const out = [];
   for (const r of rows) {
@@ -2046,6 +2073,10 @@ function toPipelineRow(o) {
     updated_at: o.updatedAt ?? null,
     total_cost_usd: Number.isFinite(o.totalCostUsd) ? o.totalCostUsd : 0,
     total_active_ms: Number.isFinite(o.totalActiveMs) ? o.totalActiveMs : 0,
+    // The run clock. A writer without the figure (a partial writer, a seed) binds NULL and writeState
+    // then keeps BOTH stored columns; a writer that has it writes both, and a null anchor clears it.
+    elapsed_ms: Number.isFinite(o.elapsedMs) ? Math.round(o.elapsedMs) : null,
+    elapsed_since: Number.isFinite(o.elapsedMs) && Number.isFinite(o.elapsedSince) ? o.elapsedSince : null,
     human_hours: Number.isFinite(o.humanHours) ? o.humanHours : 0,
     prompt: o.prompt ?? null,
     branch: s(o.branch),
@@ -2064,7 +2095,7 @@ function toPipelineRow(o) {
     review_stats: (() => { const r = runReviewStats(o.roleReviews); return r ? s(r) : null; })(),
     // §5.9 outcome: the derived run-level v2 facts, so a rehydrated state matches
     // a live one. NULL for a v1 run (nothing to say), so v1 rows are unchanged.
-    outcome: (o.engine === 2 || o.endReached !== undefined || (typeof o.runEngine === 'string' && o.runEngine !== 'claude'))
+    outcome: (o.engine === 2 || o.endReached !== undefined || (typeof o.runEngine === 'string' && o.runEngine !== 'claude') || Array.isArray(o.runEngines))
       ? s({
           endReached: !!o.endReached,
           result: o.result ?? null,
@@ -2076,8 +2107,12 @@ function toPipelineRow(o) {
           wireDeliveries: o.wireDeliveries ?? {},
           tokens: o.tokens ?? {},
           ...(typeof o.runEngine === 'string' && o.runEngine && o.runEngine !== 'claude' ? { runEngine: o.runEngine } : {}),
+          // Every harness a run's steps used: only a run that used more than one (its state holds it then).
+          ...(validEngines(o.runEngines) ? { runEngines: validEngines(o.runEngines) } : {}),
           // Session groups (C6): each session's summary — only on a run that has one, so other rows are unchanged.
           ...(o.sessionHosts && typeof o.sessionHosts === 'object' && Object.keys(o.sessionHosts).length ? { sessionHosts: o.sessionHosts } : {}),
+          // Where it executed (plans/e2b-execution-design.md): written for a remote run only.
+          ...(typeof o.execEnv === 'string' && o.execEnv !== 'local' ? { execEnv: o.execEnv } : {}),
         })
       : null,
   };
@@ -2108,6 +2143,22 @@ export function totalsFor(row) {
     ? row.total_active_ms
     : (agg.ca ? (agg.sa || 0) : null);
   return { cost, active };
+}
+
+/**
+ * A row's elapsed run time (the run clock), or null when the row carries no figure (a run saved
+ * before the clock existed: elapsed_ms 0 and no anchor), so readers fall back to the summed time.
+ * A row whose clock still runs (its process is alive, or died mid-work) is credited up to its last
+ * heartbeat, else its last write. A function of the row only: it never reads the current time, so
+ * a dead row's figure does not grow.
+ * @param {object} row a pipelines DB row (elapsed_ms, elapsed_since, heartbeat_at, updated_at)
+ * @returns {number|null}
+ */
+export function rowElapsedMs(row) {
+  const ms = Number(row.elapsed_ms) || 0;
+  if (row.elapsed_since == null) return ms > 0 ? ms : null;
+  const seen = Date.parse(row.heartbeat_at || row.updated_at);
+  return ms + (Number.isFinite(seen) ? Math.max(0, seen - row.elapsed_since) : 0);
 }
 
 /** [[projectKey, branchRecord]] of a pipelines row: every workspace member's, else the single run's own.
@@ -2243,11 +2294,20 @@ export function baseCheckSummary(c) {
   return { status: c.status, base: c.base ?? null, behind: Number.isFinite(c.behind) ? c.behind : null,
     fileCount: c.fileCount | 0, kind: c.kind ?? null, stale: !!c.stale, at: c.at ?? null };
 }
-/** The worst member's summary (a workspace row), else the run's own. */
+const PR_FINAL = new Set(['MERGED', 'CLOSED']);
+const prFinal = (pr) => !!pr?.url && PR_FINAL.has(String(pr.state || '').toUpperCase());
+/** The worst member's summary (a workspace row), else the run's own. A branch whose recorded PR is merged or closed
+ *  is final and has no summary: after a squash merge its check would always read "base moved". */
 export function baseCheckSummaryFor(row) {
   const branch = typeof row.branch === 'string' ? j(row.branch, null) : row.branch;
   const wm = typeof row.workspace_meta === 'string' ? j(row.workspace_meta, null) : row.workspace_meta;
-  const recs = row.target === 'workspace' && wm?.branches ? Object.values(wm.branches).map((b) => b?.baseCheck) : [branch?.baseCheck];
+  let recs;
+  if (row.target === 'workspace' && wm?.branches) {
+    const prs = row.id ? readMemberPrStates(row.id) : {};
+    recs = Object.entries(wm.branches).filter(([key]) => !prFinal(prs[key])).map(([, b]) => b?.baseCheck);
+  } else {
+    recs = prFinal({ url: row.pr_url, state: row.pr_state }) ? [] : [branch?.baseCheck];
+  }
   return recs.map(baseCheckSummary).filter(Boolean)
     .sort((a, b) => (BASE_RANK[b.status] ?? 0) - (BASE_RANK[a.status] ?? 0))[0] || null;
 }
@@ -2396,9 +2456,12 @@ async function workspaceMemberFacts(row, results, opts = {}) {
     out.added = ev.added | 0;
     out.removed = ev.removed | 0;
     if (opts.withPr) {
-      out.pr = gh && m.projectDir && m.feature
-        ? withFixing(await findPrForBranch({ projectDir: m.projectDir, head: m.feature, prUrl: known[m.memberKey]?.url || null }))
-        : null;
+      const res = gh && m.projectDir && m.feature
+        ? await lookupPrForBranch({ projectDir: m.projectDir, head: m.feature, prUrl: known[m.memberKey]?.url || null })
+        : { ok: true, pr: null };
+      // A failed lookup is no evidence of "no PR": the member keeps its stored PR, marked stale (null when none).
+      const stored = res.ok ? null : known[m.memberKey];
+      out.pr = res.ok ? withFixing(res.pr) : (stored ? withFixing({ ...stored, stale: true }) : null);
     }
     return out;
   }));
@@ -2516,7 +2579,11 @@ async function rowToHistoryEntry(row, repoDir = null, opts = {}) {
     pauseDetail: row.pause_detail ?? null,
     limitEngine: row.limit_engine ?? null,
     limitResetAt: row.limit_reset_at ?? null,
+    // #1450: a usage limit's model and scope; the model a 'model_confirm' pause waits on.
+    ...(row.limit_scope ? { limitScope: row.limit_scope, limitModel: row.limit_model ?? null } : {}),
+    ...(row.model_confirm ? { modelConfirm: j(row.model_confirm, null) } : {}),
     runEngine: row.run_engine || 'claude',
+    ...(runEnginesOfJson(row.run_engines) ? { runEngines: runEnginesOfJson(row.run_engines) } : {}),
     // E2/2.3: the done-run caveat (open issues left by a forced loop, End not reached). Only on a v2 row.
     ...(row.open_issue_count ? { openIssueCount: Number(row.open_issue_count) } : {}),
     ...(row.end_reached === 0 ? { endReached: false } : row.end_reached === 1 ? { endReached: true } : {}),
@@ -2539,6 +2606,7 @@ async function rowToHistoryEntry(row, repoDir = null, opts = {}) {
     files: resultsFilesCount(results),
     totalCostUsd: cost,
     totalActiveMs: active,
+    elapsedMs: rowElapsedMs(row),
     mtime: row.updated_at ? (Date.parse(row.updated_at) || 0) : 0,
   };
   // A round of another run (Runs list fold, plan D1): the key only when the marker is valid.
@@ -2568,16 +2636,22 @@ async function rowToHistoryEntry(row, repoDir = null, opts = {}) {
   // available we still set pr:null (the field is present whenever requested), so
   // callers can distinguish "looked, none" from "did not look".
   if (hasMembers && opts.withPr) {
-    entry.pr = rollupMemberPrs(Object.fromEntries(entry.members.filter((m) => m.pr).map((m) => [m.memberKey, m.pr])));
+    const rollup = rollupMemberPrs(Object.fromEntries(entry.members.filter((m) => m.pr).map((m) => [m.memberKey, m.pr])));
+    entry.pr = rollup && entry.members.some((m) => m.pr?.stale) ? { ...rollup, stale: true } : rollup;
   } else if (opts.withPr && repoDir && feature) {
     // Single-project runs AND legacy workspace rows (empty workspace_meta.projects):
     // the unchanged primary-only lookup, pr_url first — never overwritten with null.
     // The fresh lookup wins over the stored row (a PR merged since the last refresh, or a newer PR for the branch);
     // stored fields (the CI verdict) are used only for the same URL. Persisting is the enrich path's job.
-    const found = (await anyPrHost())
-      ? await findPrForBranch({ projectDir: repoDir, head: feature, prUrl: row.pr_url || null, withVerdict: true })
-      : null;
-    if (found) {
+    const res = (await anyPrHost())
+      ? await lookupPrForBranch({ projectDir: repoDir, head: feature, prUrl: row.pr_url || null, withVerdict: true })
+      : { ok: true, pr: null };
+    const found = res.ok ? res.pr : null;
+    if (!res.ok) {
+      // A failed lookup is no evidence of "no PR": keep the stored PR, marked stale (null when nothing is stored).
+      const known = readPrState(row.id);
+      entry.pr = known ? { ...known, stale: true } : null;
+    } else if (found) {
       const { verdict, ...fresh } = found;
       const stored = readPrState(row.id);
       entry.pr = { ...(stored && stored.url === fresh.url ? stored : {}), ...fresh, ...(verdict || {}),
@@ -2627,16 +2701,21 @@ async function listPipelinesNow(projectDir, opts, workspaceKey) {
   const dirById = await runDirIndex(pipelinesDir);
   const rows = getDb().prepare(`
     SELECT id, project_key, workspace_key, target, title, status, started_at, updated_at, total_cost_usd, total_active_ms,
-           branch, workspace_meta, guardrails_id, run_setup, started_by, pr_url,
+           elapsed_ms, elapsed_since, heartbeat_at,
+           branch, workspace_meta, guardrails_id, run_setup, started_by, pr_url, pr_state,
            json_extract(CASE WHEN json_valid(resume_point) THEN resume_point END, '$.pauseReason') AS pause_reason,
            json_extract(CASE WHEN json_valid(resume_point) THEN resume_point END, '$.pauseDetail') AS pause_detail,
            json_extract(CASE WHEN json_valid(resume_point) THEN resume_point END, '$.limitEngine') AS limit_engine,
            json_extract(CASE WHEN json_valid(resume_point) THEN resume_point END, '$.limitResetAt') AS limit_reset_at,
+           json_extract(CASE WHEN json_valid(resume_point) THEN resume_point END, '$.limitScope') AS limit_scope,
+           json_extract(CASE WHEN json_valid(resume_point) THEN resume_point END, '$.limitModel') AS limit_model,
+           json_extract(CASE WHEN json_valid(resume_point) THEN resume_point END, '$.modelConfirm') AS model_confirm,
            resume_point IS NOT NULL AS has_resume_point,
            ${RUN_ENGINE_SQL} AS run_engine,
+           ${RUN_ENGINES_SQL} AS run_engines,
            ${OUTCOME_NOTE_SQL}
     FROM pipelines
-    WHERE ${workspaceKey ? 'workspace_key = ?' : 'project_key = ?'} AND archived_at IS NULL
+    WHERE ${workspaceKey ? 'workspace_key = ?' : 'project_key = ?'} AND archived_at IS NULL AND is_test IS NULL
     ORDER BY started_at DESC
   `).all(workspaceKey ? workspaceKey : projectKey(projectDir));
   const out = [];
@@ -2675,16 +2754,21 @@ export function listAllPipelines(opts = {}, cfg = {}) {
 async function listAllPipelinesNow(opts, { batchSize = 16 } = {}) {
   const rows = getDb().prepare(`
     SELECT id, project_key, workspace_key, target, title, status, started_at, updated_at,
-           total_cost_usd, total_active_ms, branch, workspace_meta, guardrails_id, run_setup, started_by, pr_url, archived_at,
+           total_cost_usd, total_active_ms, elapsed_ms, elapsed_since, heartbeat_at,
+           branch, workspace_meta, guardrails_id, run_setup, started_by, pr_url, pr_state, archived_at,
            json_extract(CASE WHEN json_valid(resume_point) THEN resume_point END, '$.pauseReason') AS pause_reason,
            json_extract(CASE WHEN json_valid(resume_point) THEN resume_point END, '$.pauseDetail') AS pause_detail,
            json_extract(CASE WHEN json_valid(resume_point) THEN resume_point END, '$.limitEngine') AS limit_engine,
            json_extract(CASE WHEN json_valid(resume_point) THEN resume_point END, '$.limitResetAt') AS limit_reset_at,
+           json_extract(CASE WHEN json_valid(resume_point) THEN resume_point END, '$.limitScope') AS limit_scope,
+           json_extract(CASE WHEN json_valid(resume_point) THEN resume_point END, '$.limitModel') AS limit_model,
+           json_extract(CASE WHEN json_valid(resume_point) THEN resume_point END, '$.modelConfirm') AS model_confirm,
            resume_point IS NOT NULL AS has_resume_point,
            ${RUN_ENGINE_SQL} AS run_engine,
+           ${RUN_ENGINES_SQL} AS run_engines,
            ${OUTCOME_NOTE_SQL}
     FROM pipelines
-    WHERE archived_at IS ${opts.archived ? 'NOT NULL' : 'NULL'} AND deleted_at IS NULL
+    WHERE archived_at IS ${opts.archived ? 'NOT NULL' : 'NULL'} AND deleted_at IS NULL AND is_test IS NULL
     ORDER BY COALESCE(updated_at, started_at) DESC, project_key, id
     LIMIT ?
   `).all(Number.isInteger(opts.limit) && opts.limit > 0 ? opts.limit : -1); // -1 = unlimited (SQLite)
@@ -2777,9 +2861,12 @@ async function listAllPipelinesNow(opts, { batchSize = 16 } = {}) {
  * @returns {number}
  */
 export function countPipelines({ archived = false } = {}) {
-  const row = getDb().prepare(`SELECT COUNT(*) AS n FROM pipelines WHERE archived_at IS ${archived ? 'NOT ' : ''}NULL`).get();
+  const row = getDb().prepare(`SELECT COUNT(*) AS n FROM pipelines WHERE archived_at IS ${archived ? 'NOT ' : ''}NULL AND is_test IS NULL`).get();
   return row ? Number(row.n) : 0;
 }
+
+// enrichPipelinesPr's marker for a row left out of its batch (a failed lookup with nothing stored).
+const OMIT = Symbol('omit');
 
 /**
  * Re-walk the skeleton and resolve live PR state per branch, pushed to `onBatch`
@@ -2793,6 +2880,11 @@ export function countPipelines({ archived = false } = {}) {
  * spinner provably clears. A workspace item (a row WITH member facts) also carries
  * `members: [{ memberKey, pr }]`, each `pr` in the same shape; its `pr` is the rollup
  * of the open and merged ones.
+ * `null` means a lookup that succeeded and found no PR, never a failure. On a failed lookup
+ * (lookupPrForBranch ok:false: quota, network, gh error) nothing is persisted: the row resends its stored PR with
+ * `stale: true`, or is left out of the batch when nothing is stored. A failed member resends its stored PR stale
+ * (null when none); the rollup is then `stale` too, and a row whose every member failed with nothing stored is left
+ * out. `stale` is only ever present as `true`. A batch may hence be shorter than its slice, even empty.
  */
 export async function enrichPipelinesPr(onBatch, { batchSize = 16 } = {}) {
   if (!(await anyPrHost())) { await onBatch([], true); return; } // no PR host: one empty final batch
@@ -2808,18 +2900,34 @@ export async function enrichPipelinesPr(onBatch, { batchSize = 16 } = {}) {
       if (isWs(r)) {
         // Per member: pr_url-first lookup, positive observations persisted (+ rollup).
         const known = readMemberPrStates(r.id);
+        let failed = 0;
         const members = await Promise.all(r.members.map(async (m) => {
-          const pr = m.projectDir && m.branch
-            ? (await findPrForBranch({ projectDir: m.projectDir, head: m.branch, prUrl: known[m.memberKey]?.url || null, includeClosed: true })) || null
-            : null;
+          const res = m.projectDir && m.branch
+            ? await lookupPrForBranch({ projectDir: m.projectDir, head: m.branch, prUrl: known[m.memberKey]?.url || null, includeClosed: true })
+            : { ok: true, pr: null };
+          if (!res.ok) {
+            // A failed member lookup resends its stored PR stale (null when nothing is stored) and writes nothing.
+            failed++;
+            const stored = known[m.memberKey];
+            return { memberKey: m.memberKey, pr: stored ? withFixing({ ...stored, stale: true }) : null };
+          }
+          const pr = res.pr || null;
           if (pr && pr.state !== 'CLOSED') persistMemberPrState(r.id, m.memberKey, pr);   // a closed PR is shown, never recorded
           return { memberKey: m.memberKey, pr: withFixing(pr) };
         }));
-        const pr = rollupMemberPrs(Object.fromEntries(members.filter((m) => m.pr).map((m) => [m.memberKey, m.pr])));
+        if (failed === members.length && !members.some((m) => m.pr)) return OMIT;
+        const rollup = rollupMemberPrs(Object.fromEntries(members.filter((m) => m.pr).map((m) => [m.memberKey, m.pr])));
+        const pr = rollup && failed ? { ...rollup, stale: true } : rollup;
         return { projectKey: r.projectKey, id: r.id, pr, members };
       }
       const prUrl = readPrState(r.id)?.url || null;
-      const found = (await findPrForBranch({ projectDir: r.projectDir, head: r.branch, prUrl, withVerdict: true, includeClosed: true })) || null;
+      const res = await lookupPrForBranch({ projectDir: r.projectDir, head: r.branch, prUrl, withVerdict: true, includeClosed: true });
+      if (!res.ok) {
+        // A failed lookup is no evidence of "no PR": resend the last known PR stale, or omit the row. Writes nothing.
+        const known = readPrState(r.id);
+        return known ? { projectKey: r.projectKey, id: r.id, pr: { ...known, stale: true } } : OMIT;
+      }
+      const found = res.pr || null;
       // Positive observations only (null never clears). A closed PR is shown, never
       // recorded: pr_url keeps naming the open or merged PR the other readers act on.
       // The recorded PR itself closing is recorded, so it stops counting as open (a chain's ship ends, Create PR again).
@@ -2832,7 +2940,7 @@ export async function enrichPipelinesPr(onBatch, { batchSize = 16 } = {}) {
         ...(watchActive(getWatch(fresh.url)) ? { fixing: true } : {}) };
       return { projectKey: r.projectKey, id: r.id, pr };
     }));
-    await onBatch(items, i + batchSize >= targets.length); // (items, isFinal)
+    await onBatch(items.filter((it) => it !== OMIT), i + batchSize >= targets.length); // (items, isFinal)
   }
 }
 
@@ -2889,6 +2997,27 @@ function stepRowToStep(r) {
 }
 
 /**
+ * The bare `wks-…` id of a workspace row, else null. Live rows store it bare. Rows from the legacy fs→DB migration can
+ * hold the composite `workspaces/<dir>` and even `target = 'project'` (migrate-fs-to-db.mjs:360-374), so any row with a
+ * workspace_key counts.
+ */
+export const bareWorkspaceKey = (row) => (row.workspace_key ? String(row.workspace_key).replace(/^workspaces\//, '') : null);
+
+/**
+ * Rerun: the run a rerun was copied from, as the run page links it. `exists` is false for a deleted run (its row is
+ * anonymised, so no title or key is given) and for an id with no row; an archived source still exists and opens.
+ * @param {string|null} id  pipelines.rerun_of
+ * @returns {{id:string, key:string|null, title:string|null, exists:boolean}|null}
+ */
+export function resolveRerunOf(id) {
+  if (typeof id !== 'string' || !id) return null;
+  const row = findPipelineRowById(id);
+  if (!row || row.deleted_at) return { id, key: null, title: null, exists: false };
+  const ws = bareWorkspaceKey(row);
+  return { id: row.id, key: ws ? `workspaces/${ws}` : row.project_key, title: row.title ?? null, exists: true };
+}
+
+/**
  * Reconstruct the full state object (the old state.json shape the UI consumed)
  * from a pipelines row + its pipeline_steps rows. Inverse of toPipelineRow + the
  * step INSERT. projectDir is recovered from the project's store_meta row (the old
@@ -2910,6 +3039,7 @@ function rowToState(row) {
     updatedAt: row.updated_at ?? null,
     totalCostUsd: row.total_cost_usd ?? 0,
     totalActiveMs: row.total_active_ms ?? 0,
+    elapsedMs: rowElapsedMs(row),   // null = no figure (an old run); no anchor on the wire: a saved state never ticks
     humanHours: Number(row.human_hours || 0),
     prompt: row.prompt ?? null,
     baseName: row.base_name ?? null,
@@ -2949,9 +3079,18 @@ function rowToState(row) {
   state.pauseDetail = typeof rp?.pauseDetail === 'string' ? rp.pauseDetail : null;
   state.limitEngine = typeof rp?.limitEngine === 'string' ? rp.limitEngine : null;
   state.limitResetAt = typeof rp?.limitResetAt === 'string' ? rp.limitResetAt : null;
+  // #1450: the model a confirmation pause waits on, a usage limit's model and scope.
+  state.modelConfirm = rp?.modelConfirm && typeof rp.modelConfirm.model === 'string' ? { ...rp.modelConfirm } : null;
+  state.limitModel = typeof rp?.limitModel === 'string' ? rp.limitModel : null;
+  state.limitScope = rp?.limitScope === 'model' || rp?.limitScope === 'connection' ? rp.limitScope : null;
   state.runEngine = runEngineOfRow(row);
+  const runEngines = runEnginesOfRow(row);
+  if (runEngines) state.runEngines = runEngines;
   // Shaper D28: only a shaped run carries shapeStats (run_size is write-only: Statistics reads the column)
   if (row.shape_stats) state.shapeStats = j(row.shape_stats, null);
+  if (row.rerun_of) state.rerunOf = resolveRerunOf(row.rerun_of);   // one lookup, only for a rerun; a source never lists its reruns
+  const execEnv = execEnvOfRow(row);
+  if (execEnv) state.execEnv = execEnv;
   const outcome = j(row.outcome, null);
   if (outcome) {
     state.engine = 2;
@@ -2966,9 +3105,8 @@ function rowToState(row) {
     state.active = [];        // nothing is in flight in a rehydrated snapshot
     state.gate = null;
   }
-  const meta = readStoreMeta(row.project_key);
-  state.projectDir = meta?.path ?? null;
-  if (isNoProjectKey(row.project_key)) state.projectDir = noProjectWorkDir(row.id);   // P3: the run's own work folder
+  // P3: a run without a project, its own work folder; 3a: a test try, Worca's copy of the project (projectDirOfRow).
+  state.projectDir = projectDirOfRow(row);
   // Workspace superset: spread workspace_meta back onto the top level + target.
   if (row.target === 'workspace') {
     const wm = j(row.workspace_meta, {}) || {};
@@ -3006,7 +3144,7 @@ function buildAuditMarkdown(row) {
   const header =
     `# Pipeline: ${row.title ?? row.id}\n\n` +
     `- **id**: ${row.id}\n` +
-    `- **project**: ${(readStoreMeta(row.project_key)?.path) ?? ''}\n` +
+    `- **project**: ${(row.is_test ? projectDirOfRow(row) : readStoreMeta(row.project_key)?.path) ?? ''}\n` +
     `- **started**: ${row.started_at ?? ''}\n` +
     (actorLabel(row.started_by) ? `- **started by**: ${actorLabel(row.started_by)}\n` : '') +
     `- **prompt file**: prompt.md\n\n` +
@@ -3033,6 +3171,29 @@ export function runEngineOfRow(row) {
   if (outcome && typeof outcome.runEngine === 'string' && outcome.runEngine) return outcome.runEngine;
   const rp = j(row.resume_point, null);
   return typeof rp?.claude?.engine === 'string' && rp.claude.engine ? rp.claude.engine : 'claude';
+}
+/** runEnginesOfRow as a SELECT expression: the outcome's harness list as JSON text, NULL for a one-harness run. */
+const RUN_ENGINES_SQL = `json_extract(CASE WHEN json_valid(outcome) THEN outcome END, '$.runEngines')`;
+/** A list of harness names (two or more strings), or null. */
+const validEngines = (v) => (Array.isArray(v) && v.length > 1 && v.every((e) => typeof e === 'string' && e) ? [...v] : null);
+/** The `run_engines` column of a list row (JSON text), or null. */
+function runEnginesOfJson(text) {
+  if (typeof text !== 'string' || !text) return null;
+  try { return validEngines(JSON.parse(text)); } catch { return null; }
+}
+/** Every harness a run's steps used (`outcome.runEngines`), or null for a run that used one. */
+export function runEnginesOfRow(row) {
+  if (!row) return null;
+  const outcome = j(row.outcome, null);
+  return validEngines(outcome?.runEngines);
+}
+/** Where a run executed: `outcome.execEnv`, else the resume point's `execEnv.kind`, else null (local). */
+export function execEnvOfRow(row) {
+  if (!row) return null;
+  const outcome = j(row.outcome, null);
+  if (outcome && typeof outcome.execEnv === 'string' && outcome.execEnv) return outcome.execEnv;
+  const rp = j(row.resume_point, null);
+  return typeof rp?.execEnv?.kind === 'string' && rp.execEnv.kind ? rp.execEnv.kind : null;
 }
 
 /** How many runs of `projectKey` started on or after `sinceIso` ran on each engine (NULL engine = 'claude').
@@ -3090,6 +3251,13 @@ export function findPipelineRowById(id) {
 export function readPipelineStateById(id) {
   const row = findPipelineRowById(id);
   return row ? rowToState(row) : null;
+}
+
+/** Workflow tests (D21/D22): whether a pipeline is a test try, hidden from the Runs lists, Statistics and team metrics. */
+export function isTestPipeline(id) {
+  if (typeof id !== 'string' || !id) return false;
+  const row = getDb().prepare('SELECT is_test FROM pipelines WHERE id = ?').get(id.toLowerCase());
+  return !!(row && row.is_test);
 }
 
 /**

@@ -17,6 +17,7 @@ const sessionGuard = installSessionGuard();
 // ---------------------------------------------------------------------------
 // App state
 // ---------------------------------------------------------------------------
+let newFormVisit = 0;   // bumped each time New run is left: a prefill from an earlier visit must not hold a rerun
 const state = {
   ws: null,
   wsReady: false,
@@ -39,7 +40,11 @@ const state = {
   engine: 'claude', // New pipeline: who runs the agent nodes, per run, never remembered
   runDefaults: null,
   engineTouched: false,
+  execEnv: 'local',          // New pipeline: where the run executes (docs/e2b.md); per run, never remembered
+  execEnvDefault: 'local',   // GET /api/run-defaults' execEnv: the saved default (runExecEnvDefault says if it applies)
+  execEnvTouched: false,
   presets: [],    // GET /api/presets (run presets, #712)
+  rerun: null,    // Rerun: { runId, label, setup, broken[], modified, applying } while the form holds an earlier run's setup (no preset id, no chip)
   preset: null,   // the applied preset: { id, name, scope, setup, modified, applying, broken[] } — preset mode
   presetWorkflowNames: null,   // { id: name } from GET /api/workflows for preset summaries (run-presets-names.mjs); null = unknown
   guardrailSets: [], // GET /api/guardrails cache for the picker + hint
@@ -80,11 +85,12 @@ const state = {
 };
 // The group page host (runs redesign slice 4, D16). Up here, next to `state`: the boot's synchronous showView runs
 // mountGroupPage on a #feature/… reload, and a `const` declared below that call would still be in its TDZ.
-const GROUP_PAGE = { host: null, route: '', id: '', tab: 'runs', featureId: '', gone: false, failed: false, resolving: false, reentered: false, paintQueued: false, unmarked: 0 };
+const GROUP_PAGE = { host: null, route: '', id: '', tab: 'runs', featureId: '', gone: false, failed: false, resolving: false, reentered: false, paintQueued: false, unmarked: 0, stackedOnly: false, feature: null, requirements: false, featureSeq: 0, featureApplied: 0, memberKey: '', memberPending: '', memberFailed: '', at: '' };
 
-import { icon } from './icons.mjs';
-import { subagentAliasLabel, subagentAliasTitle, roleOf, ROLE_LABELS } from '../../src/shared/model-roles.mjs';
+import { icon, iconSvg } from './icons.mjs';
+import { subagentAliasLabel, subagentAliasTitle, roleOf, ROLE_LABELS, toolDecidesText } from '../../src/shared/model-roles.mjs';
 import { HELPER_JOBS } from '../../src/shared/model-jobs.mjs';
+import { CHAT_SOURCE_BRANCH_SETTING, CHAT_SOURCE_BRANCH_ROW, CHAT_SOURCE_BRANCH_INFO, CHAT_SOURCE_BRANCH_MODES, CHAT_SOURCE_BRANCH_LABELS, normalizeChatSourceBranch } from '../../src/shared/chat-source-branch.mjs';
 import { paintMarkedSelect } from './models/brand-marks.mjs';
 import { telemetrySlotHtml, paintTelemetry } from './run-telemetry-view.mjs';
 import { copyButton, copyFromButton, flashCopy, writeClipboard } from './copy-button.mjs';
@@ -102,24 +108,29 @@ import { mountRunsResize } from './runs-resize.mjs';
 import { decorFromState, applyDecor, isGraphManifest, ledgerRows } from './graph/run-decor.mjs';
 import { mountRunGraph } from './graph/run-hosts.mjs';
 import { paintRunScope } from './run-scope-line.mjs';
-import { trailColumns, nowRows, glanceCopy, nodeLabel, preflightOpen, dotState } from './run-glance.mjs';
+import { nowRows, glanceCopy, nodeLabel, preflightOpen, dotState } from './run-glance.mjs';
+import { foldTabs } from './tab-fold.mjs';
 import { workModeOf, isGitRun, isFolderRun, isNoProjectRun, NO_PROJECT_KEY, projectKind, kindChip, RUN_KIND_CHIP, folderMembersOf } from './run-kind.mjs';
 import { changesCounts, filesWord, renderCountsNode, applyBarModel, paintApplyBar, runChangesUrl, openApplyDialog, discardChanges, CHANGE_SIGN, CHANGE_WORD } from './folder-changes.mjs';
 import { runProgress, progressWidth } from '../../src/shared/run-progress.mjs';
+import { runElapsedMs, runHeadlineMs, showAgentTime } from '../../src/shared/run-elapsed.mjs';
 import { claudeCheckedWhere } from '../../src/shared/claude-sign-in.mjs';
+import { renderEngineSetup, paintSetupDocsLink, setupTitle, setupStatusLine, setupCheckedLine } from './engine-setup.mjs';
+import { engineSetup } from '../../src/shared/engine-setup.mjs';
 import { DEFAULT_HOME_PINS, isPinned, pinWorkflow, unpinWorkflow } from '../../src/shared/home-pins.mjs';
 import { outcomeNote } from './run-outcome.mjs';
 import { CREATE_PR_LABEL, CREATE_PR_FAILED, CREATING_PR, PR_CREATED, VIEW_PR_LABEL, VIEW_PRS_LABEL, viewPrLabel, createPrLabel, doneStatusWord } from './ship-words.mjs';
 import { worktreeNoticeModel, worktreeRowState, retainedCommands, recoveryPatchKind, uncommittedPatchName, applyConfirmMessage, applyOutcome, checkoutRowValue, memberLabel } from './worktree-notice.mjs';
 import { limitNotice, resumeTicketOf, countdownText } from './limit-notice.mjs';
 import { buildRunsModel, countNeedsYou, isRowSelected, isMemberOpen, renderRunsList, paintStageBlocks, RECENT_PAGE, groupRow, memberPrsOf, rowMenuPrs, prChip, memberCostUsd, whenLabel, isFolded, setFolded } from './runs-list.mjs';
-import { paintRunStatus, syncActions, pauseResumeOwn } from './run-status-card.mjs';
+import { paintRunStatus, paintStateLine, stageBarOf, syncActions, pauseResumeOwn, sliceHeadModel } from './run-status-card.mjs';
 import { buildGroupPage, paintGroupPage, runReceipts, groupPrList } from './group-page.mjs';
 import { paintGroupShip, resetGroupShip } from './ship-group-dialog.mjs';
 import { setShipDialogOpener, shipReason } from './shape/ship-card.mjs';
-import { pageModel, runCrumbs, paintCrumbs, syncFacts } from './run-page-head.mjs';
+import { pageModel, runCrumbs, paintCrumbs, syncFacts, groupHrefOf } from './run-page-head.mjs';
+import { rerunGate, rerunPrefill, rerunNotes, rerunLinkModel } from './run-rerun.mjs';
 import { headModel, routeModel, routeGroupOf, renderHeadButtons, renderRoute, prMenuItems, canResolvePr, showsFixConflicts, HD_PR_WATCH_ACTIVE,
-  hdPrWatchLabel, WATCH_HELP, pushLabel, pushTip, tryServiceOf } from './run-head.mjs';
+  hdPrWatchLabel, WATCH_HELP, pushLabel, pushTip, tryServiceOf, withTip } from './run-head.mjs';
 import { delegateQuestion } from './question-delegate.mjs';
 import { loadRunsView, saveRunsView, viewChip, viewMenuItems } from './runs-view-menu.mjs';
 import { createRunsSelection, rowTarget, barModel, bulkBody, rangeKeys, labelTargets, pipelineTargets } from './runs-selection.mjs';
@@ -144,8 +155,10 @@ import {
   collectSeedDecisions, seedSummary, seedableCount, renderTeamAvailableLine,
 } from './memory-view.mjs';
 import { createScriptsController, nextCopyKey } from './scripts-view.mjs';
-import { renderRunPill, renderOverviewStrip, renderShipItStrip, shipItTryState, renderRunningActionRows, historyActionBadges, createActionsController, releaseCheckout } from './actions-view.mjs';
+import { editorOpenFor, runFolderOpenFor, firstChangedLine, buildOpenFileButton, buildOpenRunButton, clearOpenError } from './diff-open-editor.mjs';
+import { renderRunPill, renderOverviewStrip, renderShipItStrip, shipItTryState, renderRunningActionRows, historyActionBadges, createActionsController, releaseCheckout, withPort } from './actions-view.mjs';
 import { editorFieldEl, renderProjectActionsEditor, renderStackEditor } from './actions-config-view.mjs';
+import { createConnectorLayers } from './mcp-servers/connectors-layers.mjs';
 import { createMcpView, mountProjectMcp, paintMcpResolution, paintAskMcpBlock, setMcpStripRenderer, parseMcpParam } from './mcp-view.mjs';
 import { createAskPanel } from './ask-panel.mjs';
 import { pageChips, pageScopeOf } from './ask-page-chips.mjs';
@@ -154,15 +167,37 @@ import { ATTACH_MAX_MESSAGE_BYTES } from './attach-files.mjs';
 // worca Chat P2: the receipt, stop and pull-request cards (registered below, before the chat mounts).
 import { registerChatActionCards, refreshChatPrWatch } from './chat/action-cards.mjs';
 import { registerScopeSwitchCard } from './chat/scope-switch-card.mjs';
+import { registerEnvironmentCard } from './chat/environment-card.mjs';
 import { registerQuestionCard } from './chat/question-card.mjs';
 import { registerFilesCard, filesForViewer, fileViewerUrls } from './chat/files-card.mjs';
-import { createTerminalPane } from './terminal-pane.mjs';
+import { createTerminalTool } from './terminal-pane.mjs';
+import { createToolPanel } from './tool-panel.mjs';
+import { createOverview } from './tool-overview.mjs';
+import { overviewSourceFor } from './tool-overview-sources.mjs';
+import { resolveRefKeys } from './ask-ref-chips.mjs';
+import { createToolRegistry } from './tool-kinds.mjs';
+import { createTabModel } from './tool-tabs.mjs';
+import { createTabMirror } from './tool-mirror.mjs';
+import { createFilesKind } from './tool-files.mjs';
+// Changes is turned off (2026-11-17): in a chat it diffed only the project's checkout, not the chat's runs or PRs, which read as "no changes" beside a PR full of them. The kind (tool-changes.mjs) and its route (GET /api/tools/changes) are kept; to bring it back, undo the lines marked "Changes is turned off".
+// import { createChangesKind } from './tool-changes.mjs';
+import { createBrowserKind, readRecentUrls, classifyUrl } from './tool-browser.mjs';
+import { createFrameVerdicts } from './frame-verdicts.mjs';
+import { linkDecision, linkHint, sameAddress } from './chat-link-route.mjs';
+import { stateOfTarget } from './tool-tabs.mjs';
+import { filePreviewOf } from './chat/file-renderers.mjs';
 import { notify, announce, withButton, fieldError, clearFieldErrors, cardAlert, trackDirty, splitMessage, BUTTON_DONE_MS, feedbackIcon } from './feedback.mjs';
 import { layoutDialog, watchDialogEdges } from './dialog-layout.mjs';
 import { setEngineLocks, engineLock, applyEngineLocks } from './engine-locks.mjs';
+import { loadExecEnvs, execEnvKnown, execEnvLabel, execEnvTitle, execEnvTitleWithArticle, fillExecEnvSelect, setExecEnvSelectValue } from './exec-envs.mjs';
+import { paintExecEnvStatusChip, watchExecEnvStatus } from './exec-env-status.mjs';
+import { paintExecEnvCardBackend, paintExecEnvCardValues, readExecEnvCard } from './exec-env-settings-card.mjs';
+import { paintProjectAddForBox, projectAddModeForBox, setWorcaBox, worcaBox } from './worca-box.mjs';
+import { execEnvSegNode, paintLocalRunNote, paintRunExecLine, runExecEnvSeg } from './run-sandbox-note.mjs';
+import { loadSecurityStatus } from './security-status-view.mjs';
 import { guardModal, dialogOpen, DISCARD_MESSAGE } from './modal-guard.mjs';
 import { createVoiceController } from './ask-voice.mjs';
-import { renderGettingStarted, renderGettingStartedPill, bindWelcome, doneCount, allStepsDone, GETTING_STARTED_STEPS } from './getting-started.mjs';
+import { renderGettingStarted, renderGettingStartedPill, bindWelcome, doneCount, allStepsDone, gsPillText, GETTING_STARTED_STEPS } from './getting-started.mjs';
 import { createGuideSpot } from './guide-spot.mjs';
 import {
   splitPatchSections, parseFileSection, patchIndex, sectionKey, MAX_FILE_SECTION_CODE_UNITS,
@@ -176,6 +211,7 @@ import {
 } from './file-tree.mjs';
 import { groupCommentThreads, commentWhen } from './comment-thread.mjs';
 import { createMarkdownRenderer } from './ask-markdown.mjs';
+import { runSetupModel, renderRunSetup } from './run-setup-view.mjs';
 import { exportSlugPreview } from './export-slug.mjs';
 import { fillMarketplaceSelect, marketplaceExportBody, marketplaceNameProblem, marketplacePlanExtras, marketplaceDoneView,
   renderMarketplaceSkipped, marketplaceLoadError, syncMarketplaceButtons, requestTicket, ticketIsCurrent } from './export-marketplace.mjs';
@@ -198,19 +234,21 @@ import { renderCatalogue, renderModelPanel } from './models/catalogue-view.mjs';
 import { buildJobs, jobsSaved, jobsSaveBody, jobsDirty } from './models/jobs-model.mjs';
 import { renderJobs, openOverrideMenu } from './models/jobs-view.mjs';
 import { openModelPicker } from './models/model-picker.mjs';
-import { renderChatSettings, collectChatSettings, renderScriptToolsToggle, collectScriptToolsToggle, renderSuggestionsToggle, collectSuggestionsToggle, renderSummariesToggle, collectSummariesToggle, renderAskWebFields, collectAskWebFields } from './chat-settings-view.mjs';
+import { modelTrigger, columnsValue } from './models/model-columns.mjs';
+import { renderChatSettings, collectChatSettings, renderScriptToolsToggle, collectScriptToolsToggle, renderSuggestionsToggle, collectSuggestionsToggle, renderSummariesToggle, collectSummariesToggle, renderAskWebFields, collectAskWebFields, mountRoleSetting } from './chat-settings-view.mjs';
 import { renderCredentials } from './credentials-view.mjs';
 import { renderExtensionPairings, browserLabel, formatPairCode, renderExtensionInstall, selectInstallBrowser, detectBrowser } from './extension-settings-view.mjs';
 import { mountNetworkProxyCard } from './settings-network-proxy.mjs';
 import { openSetupAssistant, teamNotice, TEAM_SEEN_KEY } from './setup-assistant.mjs';
-import { loadCredentials, credentialSuffix } from './credential-badges.mjs';
+import { loadCredentials } from './credential-badges.mjs';
 import { freeRequestsSuffix, typicalFreeRun, newRunFreeWarning, providerFreeLine } from './openrouter-free-view.mjs';
 import { PORT_ID_RE, MAX_PORTS_PER_SIDE, PORT_TYPES, SYNC_EXECUTION_ID } from '../../src/shared/graph/constants.mjs';
 import { FORM_ID_RE, validateFormDef, normalizeAskBlock } from '../../src/shared/forms/form-def.mjs';
 import { ASK_LIMITS } from '../../src/shared/forms/catalog.mjs';
 import { WORKSPACE_MAX_PROJECTS, workspaceSizeLevel } from '../../src/shared/workspace-size.mjs';
-import { engineLabel, usageLimitSwitches, engineSwitchNote, engineReportsCost, ENGINE_NAMES, MODEL_ENGINE_NAMES, isBetaEngine, SIGN_IN_ENGINE_NAMES, SESSION_SUBAGENTS_VERIFIED } from '../../src/shared/engine-switch.mjs';
-import { runsOn, effortsOn, harnessesLabel, connectionKey, modelGroups, PROVIDER_LABELS, connectionOf } from '../../src/shared/connections.mjs';
+import { engineLabel, usageLimitSwitches, engineSwitchNote, engineReportsCost, runCostKnown, runCostLabel, engineList, ENGINE_NAMES, MODEL_ENGINE_NAMES, isBetaEngine, SIGN_IN_ENGINE_NAMES, SESSION_SUBAGENTS_VERIFIED } from '../../src/shared/engine-switch.mjs';
+import { remoteRefusesDefault } from '../../src/shared/exec-env.mjs';
+import { runsOn, effortsOn, pickEffortsOn, harnessesLabel, connectionKey, modelGroups, PROVIDER_LABELS, connectionOf } from '../../src/shared/connections.mjs';
 import {
   guardrailSummary, renderGuardrailList, renderGuardrailEditor, collectGuardrailEditor,
   renderStartStep, collectStartStep, renderGuardrailReferences409, isReadOnlyGuardrailSet,
@@ -221,10 +259,10 @@ import {
   renderExportWizard, collectExportWizard, applyConnectionModeIn, setModelEngine, paintEditorSave, setFormWhere,
 } from './models-view.mjs';
 import {
-  collectProviderRow, collectSpeechRow, formatSpeechBytes, renderImportSheet, renderEndpointSheet, collectImportSheet,
+  collectProviderRow, collectSpeechRow, formatSpeechBytes, renderImportSheet, renderEndpointSheet, renderOpencodeSheet, collectImportSheet,
   collectOpenRouterRow, endpointRowMatches, ENDPOINT_PRESETS,
   setModelUpstream, applyImagesPreset, collectImagesRow, imagesRowProblem, showImagesTest, showImagesSaveError, collectSoundRow,
-  connectionWhere,
+  connectionWhere, syncCopilotHostField,
 } from './bridge-view.mjs';
 import {
   renderSourcePane, collectSourcePane, renderProfileGate, renderProfileBar,
@@ -237,6 +275,9 @@ import { createComposer, isReservedWorkflowId, isBuiltinWorkflow } from './graph
 import { createWorkflowsShell, toSpawnEntry } from './workflows/shell.mjs';
 import { createLibrary, folderLabel, folderKeys } from './workflows/library.mjs';
 import { createChatDock } from './workflows/chat-dock.mjs';
+import { createWorkflowVersions, workflowVersionsApi, workflowCanHaveVersions, hasVersionInUse, keepPicksForVersionInUse } from './workflows/versions-app.mjs';
+import { createWorkflowTests } from './workflows/tests-app.mjs';
+import { createExportUse } from './workflows/export-use.mjs';
 import { mintId } from '../../src/shared/graph/template.mjs';
 // mountStaticGraph is NOT imported here: the New-Pipeline workflow picker is a
 // bare <select> with no preview host on this branch (the v1 read-only mini-graph
@@ -289,7 +330,9 @@ import {
   renderProjectTmCell, renderProjectTmChip, projectTmSummary, renderEnableDialogBody, renderMetricsHomePicker, renderWsMetricsRow, renderWsSummary, renderRouteResults, renderWsMetricsPending } from './team-metrics-surfaces.mjs';
 import { renderMapTab, emptyMapFilters } from './workspace-map-view.mjs';
 import { openWorkspaceGuide, shouldAutoOpenWorkspaceGuide } from './workspace-guide.mjs';
+import { createHowItWorks } from './how-it-works/how-it-works.mjs';
 import { paintAboutInto, paintVersionStatusInto, paintUpdateMarkerInto } from './about-links.mjs';
+import { loadSecretVaultCard } from './settings/secret-vault-card.mjs';
 import { createUpdateUi } from './update-view.mjs';
 import { renderReasonOptions, renderOptIns, previewText, reportBlobParts, REPORT_PREVIEW_DEBOUNCE_MS } from './report-run.mjs';
 import { openScheduleSheet, closeScheduleSheet, browserTimeZone } from './schedule-sheet.mjs';
@@ -300,16 +343,20 @@ import {
 import { gitActionFor, GIT_DIALOG, gitDoneMessage } from './project-git.mjs';
 import { baseCheckModel, baseRowNote, newerBaseCheck } from './base-check.mjs';
 import { describeRule } from '../../src/shared/schedule/recurrence.mjs';
-import { statusActions, RUN_SWITCH_OPTIONS, RUN_SWITCH_TIP, kindShort, awayAnswerRows, awayAnswerCounts, checksFirst, awayAnswersSummary, decidedByText, awayAskCaption } from '../../src/shared/away-mode/labels.mjs';
+import { statusActions, RUN_SWITCH_OPTIONS, RUN_SWITCH_TIP, askShort, awayAnswerRows, awayAnswerCounts, checksFirst, awayAnswersSummary, decidedByText, awayAskCaption } from '../../src/shared/away-mode/labels.mjs';
 import { parseWindow } from '../../src/shared/away-mode/activation.mjs';
 import { runCostBreakdown, floorText, auxLabelForSubagent } from '../../src/shared/cost/breakdown.mjs';
 import { costBreakdownEl, costSummaryText, awayTotalText } from './cost-breakdown.mjs';
 import { describeRun, describeNewRun, describeAwayRow } from '../../src/shared/away-mode/describe.mjs';
 import { createSchedulesView } from './schedules-view.mjs';
-import { createRunPrFields, mountWorkspacePrSetting, paintRunPrAuto } from './pr-auto-view.mjs';
+import { createRunPrFields, mountWorkspacePrSetting, paintRunPrAuto, knownPrExempt } from './pr-auto-view.mjs';
 import { createRequirementsView } from './requirements-view.mjs';
-import { mountDesignView, pushDesignFrame, pushDesignAskFrame, repaintDesignChat, designHello, designNavCount, paintDesignNav } from './design/view.mjs';
+import { mountDesignView, pushDesignFrame, designHello, designNavCount, paintDesignNav } from './design/view.mjs';
 import { createDesignChat } from './design/chat.mjs';
+import { registerDesignChatCards } from './design/chat-cards.mjs';
+import { createDesignStudio, createDesignStartPage } from './design/studio.mjs';
+import { createDesignKind } from './tool-design.mjs';
+import { createRunKind } from './tool-run.mjs';
 import { createDesignActivity } from './design/activity.mjs';
 import { createLevelController, levelAtLeast, currentLevel, tagLevel, keepVisible, minLevelFor, LEVEL_INFO, UI_LEVELS } from './ui-level.mjs';
 import { applyFlags, currentFlags, decorateFlagChips, flagOn, onFlagChange } from './flags.mjs';
@@ -338,21 +385,41 @@ import { pageTitle } from './topnav.mjs';
 import { activityCounts } from './activity-model.mjs';
 import { createChatHome, findFollowingThread } from './chat/home.mjs';
 import { installIntentAddon } from './chat/intent.mjs';
+import { installRolePicker } from './chat/role-picker.mjs';
+import { installGuideLine, refreshGuideLine } from './chat/guide-line.mjs';
 import { needsYouItems as chatNeedsYouItems } from './runs-list.mjs';
 import { createActivityMenu } from './activity-menu.mjs';
 import { createAwayScreensaver } from './away-screensaver.mjs';
 import { registerAskRenderer, askRendererFor, askKindOf } from './ask/registry.mjs';
-import { activeAgents } from './ask-run-card.mjs';
+import { activeAgents, snapshotFromState } from './ask-run-card.mjs';
+import { mountRunAgents } from './shape/run-agents.mjs';
+import { mountRunFacts } from './shape/run-facts.mjs';
+import { runAgentRows, memberShortWord } from '../../src/shared/shape/run-agents.mjs';
+import { memberStatusOf, resumeAfterOf, resumeLabel, resumeNote } from '../../src/shared/shape/run-status.mjs';
 import { registerChatRunCard } from './chat/run-card.mjs';
 import { registerDirectionAddon } from './chat/direction.mjs';
+import { mountNewRunAttach, newRunScope, jsonFetcher as attachFetcher } from './requirements-attach/entries.mjs';
+import { createAttachStore } from './requirements-attach/store.mjs';
+import { renderAttachedCards } from './requirements-attach/cards.mjs';
+import { guardScopeChange } from './requirements-attach/scope-guard.mjs';
+import { createProjectChange } from './requirements-attach/target-change.mjs';
+import { suggestTitle } from './requirements-attach/title.mjs';
+import { attachHashSearch } from './requirements-attach/hash-search.mjs';
+import { revalidate as revalidateAttached } from './requirements-attach/revalidate.mjs';
 import { renderPlanBody } from './shape/plan-body.mjs';
 import { renderOutlineBody } from './shape/outline-body.mjs';
-import { renderFeature, featureModelOf } from './shape/feature-view.mjs';
+import { renderFeature, featureModelOf, renderFeatureRequirements, paintFeatureDecisions, markOpen } from './shape/feature-view.mjs';
+import { shipWaitText, featureStateLine, paintFeatureLog } from './shape/feature-card.mjs';
+import { featureCostModel } from './shape/feature-cost.mjs';
+import { stopLinesOf } from './shape/stop-list.mjs';
 import { renderReleaseRow } from './shape/release-row.mjs';
-import { featureFocusOf, focusFeatureControl, featureMenuItems } from './shape/feature-actions.mjs';
+import { featureFocusOf, focusFeatureControl, featureMenuItems, paintResumeMenuTurn } from './shape/feature-actions.mjs';
 import { decorateShapingQuestions } from './shape/questions.mjs';
 import { isShapingRun, shaperWait } from './shape/plan-text.mjs';
-import { stepChip, stepTitle, isStepCard, renderGateCard, renderRecoveryCard, questionFocusTarget, answerFieldOpen } from './shape/step-card.mjs';
+import { stepChip, stepTitle, isStepCard, renderGateCard, renderRecoveryCard, questionFocusTarget, answerFieldOpen, smallRunsAsk } from './shape/step-card.mjs';
+import { renderCareStart } from './shape/proposal.mjs';
+import { renderPrototypeBody } from './shape/prototype-body.mjs';
+import { pushPrototypeFrame, onPrototypeFrame } from './shape/prototype-build.mjs';
 import { installInputMode } from './input-mode.mjs';
 import { noteAnswer, forgetAnswer } from './shape/step-receipt.mjs';
 import { renderChecklistGroups } from './shape/checklist-view.mjs';
@@ -365,6 +432,9 @@ import { labelStates, applyLabelChange, normaliseLabel } from '../../src/shared/
 import { renderLabelsSection, runCount } from './labels-settings.mjs';
 import { makeSwitch } from './switch.mjs';
 import { createWorcaLevelWiring } from './worca-level/app-wiring.mjs';
+import { ownFinishedRun } from './worca-level/notices.mjs';
+import { fetchWorcaLevel } from './worca-level/model.mjs';
+import { paintModeSuggestion, ackModeSuggestion } from './worca-level/mode-suggestion.mjs';
 
 // With site data blocked, Chrome throws SecurityError on merely reading `localStorage`. Every bare `localStorage` in
 // this module resolves here: the browser's storage, else an in-memory stand-in, so the page boots and forgets on reload.
@@ -477,25 +547,60 @@ const SHAPE_FEATURE_HOSTS = new Map();
  *  schedules-changed frames (a slice's next state and PRs change there). */
 const SLICE_INFO = new Map();
 const SLICE_INFO_WAITERS = new Map();      // pipelineId → Set<onLoad>
-function sliceInfoFor(pipelineId, onLoad) {
-  if (!pipelineId) return null;
-  const known = SLICE_INFO.get(pipelineId);
-  if (known) return known;
-  if (typeof onLoad === 'function') {
-    if (!SLICE_INFO_WAITERS.has(pipelineId)) SLICE_INFO_WAITERS.set(pipelineId, new Set());
-    SLICE_INFO_WAITERS.get(pipelineId).add(onLoad);
-  }
-  if (SLICE_INFO.has(pipelineId)) return null;   // pending, or not a slice
+const STOP_HOME_WAITERS = new Map();       // the same, for stopHomeFor
+const STOP_HOMES = new Map();              // pipelineId → the last known home: those frames never take it away
+const SLICE_INFO_PENDING = new Set();      // pipeline ids with a fetch in flight
+const STOP_HOME_RETRIED = new Set();       // pipeline and question ids whose cached miss was asked again
+const isSliceInfo = (info) => !!info && Number.isInteger(info.index);
+function waitForSliceInfo(map, pipelineId, onLoad) {
+  if (typeof onLoad !== 'function') return;
+  if (!map.has(pipelineId)) map.set(pipelineId, new Set());
+  map.get(pipelineId).add(onLoad);
+}
+function loadSliceInfo(pipelineId) {
+  if (SLICE_INFO.has(pipelineId)) return;        // pending, or not a slice
   SLICE_INFO.set(pipelineId, null);
+  SLICE_INFO_PENDING.add(pipelineId);
   fetch(`/api/shape/pipelines/${encodeURIComponent(pipelineId)}/slice`)
     .then((r) => (r && r.ok ? r.json() : null)).catch(() => null)
     .then((info) => {
-      const waiters = [...(SLICE_INFO_WAITERS.get(pipelineId) || [])]; SLICE_INFO_WAITERS.delete(pipelineId);
+      SLICE_INFO_PENDING.delete(pipelineId);
+      const take = (map) => { const fns = [...(map.get(pipelineId) || [])]; map.delete(pipelineId); return fns; };
+      const slices = take(SLICE_INFO_WAITERS);
+      const homes = take(STOP_HOME_WAITERS);
       if (!info || !info.featureId) return;
       SLICE_INFO.set(pipelineId, info);
-      for (const fn of waiters) { try { fn(info); } catch { /* a repaint hint only */ } }
+      const was = STOP_HOMES.get(pipelineId);
+      const home = { featureId: info.featureId, threadId: info.threadId || null };
+      STOP_HOMES.set(pipelineId, home);
+      const moved = !was || was.featureId !== home.featureId || was.threadId !== home.threadId;
+      for (const fn of [...(isSliceInfo(info) ? slices : []), ...(moved ? homes : [])]) { try { fn(info); } catch { /* a repaint hint only */ } }
     });
+}
+/** A slice's info; never a Verifier run's answer (it has no slice fields). */
+function sliceInfoFor(pipelineId, onLoad) {
+  if (!pipelineId) return null;
+  const known = SLICE_INFO.get(pipelineId);
+  if (known) return isSliceInfo(known) ? known : null;
+  waitForSliceInfo(SLICE_INFO_WAITERS, pipelineId, onLoad);
+  loadSliceInfo(pipelineId);
   return null;
+}
+/** Where a run's stop is answered, a slice's or a Verifier run's: `{featureId, threadId}`, or null until it is known. A
+ *  known home stays while the cleared slice info is read again, so the question on the feature page is never torn down.
+ *  A cached miss is asked again once per question `askId` (a Verifier's ticket may not have had its pipeline yet). */
+function stopHomeFor(pipelineId, onLoad, askId = '') {
+  if (!pipelineId) return null;
+  const last = STOP_HOMES.get(pipelineId) || null;
+  if (SLICE_INFO.get(pipelineId)) return last;
+  waitForSliceInfo(STOP_HOME_WAITERS, pipelineId, onLoad);
+  const key = `${pipelineId} ${askId}`;
+  if (SLICE_INFO.has(pipelineId) && !SLICE_INFO_PENDING.has(pipelineId) && !STOP_HOME_RETRIED.has(key)) {
+    STOP_HOME_RETRIED.add(key);
+    SLICE_INFO.delete(pipelineId);
+  }
+  loadSliceInfo(pipelineId);
+  return last;
 }
 /** F33: Chat's own run panel (chatDeps.openRunPanel is openChatRunPanel once Chat is installed): it stays in Chat.
  *  The full ref: a run id alone can be a superseded paused copy, or one a restarted server no longer knows. */
@@ -519,12 +624,18 @@ async function paintShapeFeature(host) {
   if (!id) return;
   const seq = (host.__shapeSeq = (host.__shapeSeq || 0) + 1);       // the last paint wins (act + WS frames race)
   const opts = host.__shapeOpts || {};
+  // Feature page slice 6 (D3a): the group host's first paint after a mount reads the page's stored view of the same
+  // feature (a marked feature, flag on), with no fetch and no loading line. Later paints fetch as before.
+  const fromPage = !!host.__shapeFromPage && opts.inGroup && GROUP_PAGE.requirements && GROUP_PAGE.featureId === id
+    && GROUP_PAGE.featureApplied > 0 && !!GROUP_PAGE.feature;
+  host.__shapeFromPage = false;
   // The page's first paint of this feature: say so while it loads, not a blank page (a busy server takes seconds).
-  if (opts.loading && host.dataset.painted !== id) {
+  if (!fromPage && opts.loading && host.dataset.painted !== id) {
     host.replaceChildren(Object.assign(document.createElement('p'), { className: 'feature-page-loading', textContent: 'Loading feature…' }));
   }
-  const r = await fetch(`/api/shape/features/${encodeURIComponent(id)}`).catch(() => null);
-  const f = r && r.ok ? await r.json().catch(() => null) : null;
+  const ticket = fromPage ? 0 : groupFeatureTicket();
+  const r = fromPage ? null : await fetch(`/api/shape/features/${encodeURIComponent(id)}`).catch(() => null);
+  const f = fromPage ? GROUP_PAGE.feature : r && r.ok ? await r.json().catch(() => null) : null;
   if (seq !== host.__shapeSeq || SHAPE_FEATURE_HOSTS.get(host) !== id) return;
   if (!f) {
     // An unknown feature (404) empties the host. Any other failure keeps the last view and its error line.
@@ -540,7 +651,7 @@ async function paintShapeFeature(host) {
   // F47: the route follows replaced_by, so f.id can be a newer feature than the host's id. Frames name f.id, and the
   // actions must reach it.
   host.__shapeShown = f.id;
-  noteGroupFeatureLock(f);                                   // Shaper requirements s3: the page header's Create PR lock
+  if (!fromPage) noteGroupFeatureLock(f, ticket);            // Shaper requirements s3: the page header's Create PR lock
   // A rebuild drops the focus (rule: app-js-repaint-drops-focus): give it back to the same control. An action names
   // its control itself (F39: in Chromium the disabled button has already lost the focus); a WS repaint reads it.
   const act = host.__shapeFocus || featureFocusOf(document, host);
@@ -566,21 +677,24 @@ async function paintShapeFeature(host) {
       return res && res.ok ? { ok: true } : { ok: false, error: host.__shapeErr };
     },
     runsOpen: !!opts.runsOpen,
+    ...(opts.shipFirst ? { shipFirst: true } : {}),           // slice 6 (D4): the feature page's Requirements tab
     ...(opts.ask ? { mountAsk: (slot, step) => featureMountAsk(host, slot, step) } : {}),
     ...(host.__shapeFallback ? { focusFallback: host.__shapeFallback } : {}),
   }));
   host.dataset.painted = id;
   focusFeatureControl(host, act, host.__shapeFallback ? host.__shapeFallback() : null);
+  if (opts.inGroup) revealShipCard();                        // slice 6 (D14): Mark and ship waits for the card
 }
 /** Mount (or re-point) a host. F41: the run card calls it on every repaint (once a second), so it fetches only when
  *  the host is pointed at a new id. A pending or failed fetch is not retried from here: `shape-feature`,
  *  `schedules-changed` and `hello` repaint every host. */
 function mountShapeFeature(host, id, opts = {}) {
-  const o = { ask: !!opts.ask, runsOpen: !!opts.runsOpen, loading: !!opts.loading, inGroup: !!opts.inGroup };
+  const o = { ask: !!opts.ask, runsOpen: !!opts.runsOpen, loading: !!opts.loading, inGroup: !!opts.inGroup, shipFirst: !!opts.shipFirst };
   const was = host.__shapeOpts;
   if (host.__shapeWant === id && was && was.ask === o.ask && was.runsOpen === o.runsOpen && was.loading === o.loading
-    && was.inGroup === o.inGroup) return;
+    && was.inGroup === o.inGroup && !!was.shipFirst === o.shipFirst) return;
   host.__shapeWant = id; host.__shapeOpts = o;
+  host.__shapeFromPage = o.inGroup;                          // slice 6 (D3a): see paintShapeFeature
   // Where the focus goes when the control it was on and the view's ⋯ are both gone (the group page's header ⋯).
   host.__shapeFallback = typeof opts.focusFallback === 'function' ? opts.focusFallback : null;
   SHAPE_FEATURE_HOSTS.set(host, id);
@@ -667,8 +781,27 @@ async function featureThreadFor(ref) {
     return (info && typeof info.threadId === 'string' && info.threadId) || null;
   } catch { return null; }
 }
+/** Shaper slice 7 (D11): where a run is answered, from ONE slice read: the chat that started its feature, else the
+ *  chat that follows the run; `featureId` only for a marked feature with the flag on (its slice info carries `owns`,
+ *  or, for its Verifier's run, `verifier: true`), so Chat home's Answer opens that feature's page when no chat follows
+ *  it. → {threadId, featureId} */
+async function featureHomeFor(ref) {
+  const pid = ref && ref.pipelineId;
+  let info = null;
+  if (pid) {
+    try {
+      const r = await fetch(`/api/shape/pipelines/${encodeURIComponent(pid)}/slice`);
+      info = r && r.ok ? await r.json() : null;
+    } catch { info = null; }
+  }
+  const own = (info && typeof info.threadId === 'string' && info.threadId) || null;
+  const threadId = own || (await findFollowingThread((...args) => fetch(...args), ref || {}).catch(() => null)) || null;
+  const featureId = info && (Array.isArray(info.owns) || info.verifier === true) && typeof info.featureId === 'string'
+    ? info.featureId : null;
+  return { threadId, featureId };
+}
 if (typeof window !== 'undefined') window.__shapeFeature = { mount: mountShapeFeature, refresh: refreshShapeFeatures, paintAsk: (ref, host) => chatPaintQuestion(ref, host),
-  shaperCard: shaperCardFor, threadForRun: featureThreadFor };   // test seam
+  shaperCard: shaperCardFor, threadForRun: featureThreadFor, homeForRun: featureHomeFor };   // test seam
 let activityMenu = null;       // the top bar's Activity (activity-menu.mjs) — assigned beside New run; updateNavCounts uses activityMenu?.
 // The open Design builds Activity lists (design/activity.mjs), from hello's list and the design-build frames. A build
 // first met in a frame reads "Design" until its title loads (asked once; a 404 or a bad body keeps "Design").
@@ -677,21 +810,42 @@ const designActivity = createDesignActivity({
   onChange: () => updateNavCounts(),
 });
 let awayScreensaver = null;    // the away screensaver easter egg (away-screensaver.mjs) — assigned beside Activity; timerTick uses awayScreensaver?.
+let terminalTool = null;   // the Terminal tool (issues 573, 1064) — assigned by the boot mount; seams use terminalTool?.
+let toolPanel = null;      // the tool panel (issue 1064) — assigned by the boot mount; seams use toolPanel?.
+// "Open chat links in the panel" (issue 1064 §4): read at boot and on every settings paint. null = not read yet, and it
+// counts as on (chatLinksOn): only an explicit false turns the setting off. The file links' resolve POST still waits for
+// the read (chatDeps.linksRead), so someone with the setting off never sends one.
+let chatLinksPref = null;
+// The preview port rule as the page knows it (D16, mirrors preview-proxy.mjs portRefusal): range mode (a hosted Worca, or
+// Settings › Actions "Preview ports: range") allows the Actions range and the running Actions' ports only.
+let previewPortGate = { range: false, low: null, high: null };
+function setChatLinksPref(on) {
+  const next = on !== false;   // from null (not read yet) to either value always repaints
+  if (next === chatLinksPref) return;
+  chatLinksPref = next;
+  askPanel?.refreshAnswers?.();
+}
+/** The one reading of the setting: on unless it is explicitly off (null, not read yet, counts as on), and only with the
+ *  Tool panel flag (Settings › Labs) on. */
+function chatLinksOn() { return chatLinksPref !== false && flagOn('toolPanel'); }
+let toolMirror = null;      // the tool panel's server mirror (issue 1064 slice 3) — assigned by the boot mount
 let screensaverPref = { enabled: false, idleMinutes: 5 };   // Settings › Appearance › Screensaver, as the server last said (getState reads it)
-let terminalPane = null;       // terminal pane (#573) — assigned by the boot mount; every seam uses terminalPane?.
 let newPipelinePrefill = null; // one-shot card → New Pipeline handoff (§10.2 seam 7, consumed by Task 11)
 // Engine readiness (GET /api/engines): which engines a usage-limit pause offers. Fetched on demand, refreshed after
 // 60 s. null until an answer with an `engines` array arrives — then usageLimitSwitches offers every other engine.
 // Every caller's onLoad runs when the answer lands (banner, history bar). A failed or engines-less answer is cached
 // for the same 60 s, so a repaint loop never turns into a request loop. Up here, above every painter: painters can
-// run before a later `let` line is reached (TDZ).
+// run before a later `let` line is reached (TDZ). Its second reader is the model pickers (models/model-columns.mjs):
+// their status words and broker locks read the raw rows through readyEngineRows, kept from the same answer.
 let engineReady = null; let engineReadyAt = 0; let engineReadyLoading = null; const engineReadyWaiters = new Set();
+let engineReadyRows = null;   // the raw GET /api/engines rows: null until an answer with an `engines` array
 function readyEngines(onLoad) {
   if (Date.now() - engineReadyAt < 60_000) return engineReady;
   if (typeof onLoad === 'function') engineReadyWaiters.add(onLoad);
   if (!engineReadyLoading) {
     engineReadyLoading = fetch('/api/engines').then((r) => (r.ok ? r.json() : null)).catch(() => null).then((d) => {
       engineReady = Array.isArray(d?.engines) ? d.engines.filter((e) => e.ready).map((e) => e.name) : null;   // null: offer all
+      engineReadyRows = Array.isArray(d?.engines) ? d.engines : null;
       engineReadyAt = Date.now();
       setEngineLocks(d?.engines); applyEngineLocks();
       const waiters = [...engineReadyWaiters]; engineReadyWaiters.clear();
@@ -699,6 +853,18 @@ function readyEngines(onLoad) {
     }).finally(() => { engineReadyLoading = null; });
   }
   return engineReady;
+}
+/** The readiness rows ({ name, label, ready, reason, broker? }) for the model pickers, in readyEngines' style: rows or
+ *  null, and onLoad runs when a fetch it started lands. */
+function readyEngineRows(onLoad) {
+  readyEngines(onLoad);
+  return engineReadyRows;
+}
+/** The Models view with Add model on `engine`'s sign-in. OpenCode lists its own models, so it opens at that list;
+ *  every other sign-in opens at step 1 with the harness picked. */
+function addModelOn(engine) {
+  mvState.openEditorOnLoad = engine === 'opencode' ? { step: 2, where: 'signin', engine } : { where: 'signin', engine };
+  showView('models');
 }
 /** Readiness only matters to a usage-limit pause an engine hit: any other run never asks. */
 const readyFor = (pause, onLoad) => (pause?.reason === 'usage_limit' && pause?.limitEngine ? readyEngines(onLoad) : null);
@@ -748,6 +914,7 @@ const el = {
   presetSummary: $('#preset-summary'),
   presetUpdate: $('#preset-update'),
   presetBroken: $('#preset-broken'),
+  rerunNotes: $('#rerun-notes'),
   sameAsSourceHint: $('#sameAsSourceHint'),
   sourceRadios: $$('input[name="source"]'),
   promptPane: $('#prompt-pane'),
@@ -793,9 +960,12 @@ const el = {
   memoryScopeRow: $('#memory-scope-row'),
   memoryScopeSeg: $('#memory-scope-seg'),
   engineSelect: $('#engineSelect'),
+  execEnvSelect: $('#execEnvSelect'),
+  execEnvStatus: $('#exec-env-status'),
   engineHint: $('#engine-hint'),
   engineDefaultHint: $('#engine-default-hint'),
   engineMcpjsonHint: $('#engine-mcpjson-hint'),
+  execEnvHint: $('#exec-env-hint'),
   engineRefusal: $('#engineRefusal'),
   engineRefusalText: $('#engineRefusalText'),
   engineAllowRow: $('#engineAllowRow'),
@@ -1130,7 +1300,7 @@ function connectWS() {
   ws.addEventListener('close', (e) => {
     state.wsReady = false;
     conn.lost();
-    if (terminalPane) terminalPane.onConnection(false);   // its keys are not sent until the next hello
+    if (terminalTool) terminalTool.onConnection(false);
     // 4001: the server closed it because the sign-in token it opened with expired (W7). Reconnect
     // straight away: the gate in front checks the session again on the new upgrade.
     if (e?.code === 4001) { scheduleReconnect(50); return; }
@@ -1746,7 +1916,7 @@ const acctMenu = document.getElementById('acct-menu');
 // focusChecked: false — a keyboard open lands on the first item (the level card, else the spend card), not on the
 // checked theme icon.
 // The team setup notice repaints each time the menu opens (paintTeamNotice is a hoisted function declaration below).
-const acctFly = createFlyout({ trigger: acctBtn, menu: acctMenu, mode: 'up', focusChecked: false, onOpen: () => { void paintTeamNotice(); } });
+const acctFly = createFlyout({ trigger: acctBtn, menu: acctMenu, mode: 'up', focusChecked: false, onOpen: () => { void paintTeamNotice(); }, onClose: () => worca.maybeDialog() });
 paintAppearanceIcon(document.querySelector('#acct-menu .theme-sect > .mi-ic'));
 // Interface mode's side menu hangs off the menu (side-flyout closes it with the menu, and Escape
 // closes it first); ui-level.mjs fills it, and a pick there is a choose like a dialog card.
@@ -1800,12 +1970,32 @@ function paintUsage() {
   usageFly.reposition();
 }
 // The worca level (worca-level/app-wiring.mjs): the last served view feeds the corner avatar, the shelf and the menu row.
-const worca = createWorcaLevelWiring({ trigger: acctBtn, menu: acctMenu, repaint: () => { paintAccount(); paintShelf(); }, isSettled: () => gs.settled, setupOpen: () => !!setupDialog });
+// The menu's level card opens with the menu (a click or Enter); nothing opens on hover or focus. A person with no level yet
+// gets the initials and a way into setup: 'rerun' at the access step for the sign-in ('fix' would pre-tick Copilot).
+const worca = createWorcaLevelWiring({
+  // repaint: the corner, then the shelf, the pill and the settings row (paintOnboarding), then the mode banner
+  menu: acctMenu, repaint: () => { paintAccount(); if (gs.status) paintOnboarding(); paintModeBanner(); }, isSettled: () => gs.settled, setupOpen: () => !!setupDialog,
+  hashNow: () => location.hash, runStatus: (runId) => runs.get(runId)?.status,   // the route gate: a result route is on screen, a live run is not
+  initials: () => acctState.account.initials || '',
+  onFinishSetup: () => { acctFly.close(); openSetup({ entry: 'first' }); },
+  onSignIn: () => { acctFly.close(); openSetup({ entry: 'rerun', step: 'access' }); },
+});
+/** The interface-mode suggestion: the mode changes only on the accept click (levelCtl.choose), never on its own. */
+function paintModeBanner() {
+  const answer = (mode, what) => ackModeSuggestion(mode, what).then((view) => worca.adoptView(view)).catch((e) => console.warn(`worca level: could not acknowledge the mode suggestion: ${e.message}`));
+  paintModeSuggestion(document, worca.state.view, {
+    currentMode: currentLevel(),
+    onAccept: (mode) => { void levelCtl.choose(mode).then((saved) => (saved ? answer(mode, 'accepted') : undefined)); },   // a refused save records nothing (R-po-15, I-10)
+    onDismiss: (mode) => { void answer(mode, 'dismissed'); },
+  });
+}
 function paintAccount() {
-  const level = worca.state.view && worca.state.view.level;
+  const view = worca.state.view;
+  const level = view && view.level;
   paintAccountCorner(acctBtn, acctState.account, {
     budget: budgetState.budget, away: acctState.away?.state === 'away',
     avatar: level ? { src: level.avatar, alt: level.name } : null,
+    noLevel: !!view && view.level === null,   // no level yet: initials and a dot; an unknown view (null) shows no dot (I-7)
     usageParts: ringParts(currentUsageModel()),
   });
 }
@@ -1848,11 +2038,13 @@ function handleServerMessage(msg) {
   if (!msg || !msg.type) return;
 
   if (msg.type === 'hello') {
+    worca.onServerMessage('hello');   // a reconnect refetches the level (also after a failed load)
     conn.back();
     onHello(msg);
     refreshRunningActions();
     void refreshUsage();
-    if (terminalPane) terminalPane.onHello(msg);
+    if (terminalTool) terminalTool.onHello(msg);
+    if (toolPanel) toolPanel.onContextChange();   // a boot on a live run page: the run (and its pipeline id) arrives with this hello
     if (Array.isArray(msg.extensionPairs)) msg.extensionPairs.forEach((r) => void promptExtensionPair(r));
     return;
   }
@@ -1864,6 +2056,19 @@ function handleServerMessage(msg) {
   }
   if (msg.type === 'git') { applyGit(msg.git); return; }
   if (msg.type === 'setup-apply') { setupDialog?.onFrame(msg); return; }
+  // open_tab (issue 1064 slice 3): the assistant opened a tab in a chat; the panel takes it in when that chat is on screen.
+  if (msg.type === 'ask-tool-tabs') {
+    const v = toolPanel?.view();
+    const onScreen = v?.side?.type === 'chat' && v.side.id === msg.threadId;
+    const inColumn = !onScreen && !!askSide?.shown?.() && askPanel?.threadId?.() === msg.threadId;
+    // Brought forward (open_tab on an open tab): every page holding that tab takes the new line, so its next mirror PUT
+    // keeps it (review minor 5); only a page showing the chat brings the tab forward.
+    if (typeof msg.focus === 'string') { void toolPanel?.focusTab(msg.focus, stateOfTarget(msg.target), { show: onScreen || inColumn }); return; }
+    if (!onScreen && !inColumn) return;
+    if (onScreen) void toolPanel?.pullMirror();
+    else void toolPanel?.pullChat(msg.threadId);   // the panel may not be built yet (null until boot)
+    return;
+  }
 
   if (msg.type === 'channel-status') {
     onChannelStatus(msg);
@@ -1879,7 +2084,8 @@ function handleServerMessage(msg) {
 
   // Design frames are tagged by designId + buildId (no runId) and reach every socket: the Design view keeps the
   // nav count and the open stage. Handle them BEFORE the !msg.runId early-return below.
-  if (typeof msg.type === 'string' && msg.type.startsWith('design-')) { pushDesignFrame(msg); if (msg.type === 'design-build' && designActivity.frame(msg)) updateNavCounts(); return; }
+  if (msg.type === 'design-attached') { askPanel?.setDesign(msg.threadId, msg.designId); return; }   // start_design: the design opens beside its chat
+  if (typeof msg.type === 'string' && msg.type.startsWith('design-')) { pushDesignFrame(msg); designStudio?.studio.pushFrame(msg); pushPrototypeFrame(msg); if (msg.type === 'design-build' && designActivity.frame(msg)) updateNavCounts(); return; }
 
   // Ask Worca frames are tagged by threadId (job frames also carry messageId +
   // seq) and ride the same broadcast socket. Handle them BEFORE the
@@ -1889,7 +2095,7 @@ function handleServerMessage(msg) {
     awayScreensaver?.onAskFrame(msg);   // chat turns and proposals it counts
     askPanel?.pushServerFrame(msg);
     wfvChat?.pushFrame(msg);          // the Workflows chat keeps only its own composer thread's frames
-    pushDesignAskFrame(msg);          // the open design's chat keeps only its own thread's frames
+    designStudio?.studio.pushAskFrame(msg);   // the open design chat's dock keeps only its own thread's frames
     // D12: a settled chat turn moves the combined spend — repaint the sidebar
     // indicator and, when open, the Statistics view. ask-error included: an
     // error turn that saw a result frame carries recorded spend. refreshBudget
@@ -1979,6 +2185,11 @@ function handleServerMessage(msg) {
     if (currentView() === 'requirements') void requirementsView.changed(msg.seq, msg.brief);
     return;
   }
+  // Workflow tests (D33): it carries testRunId, never runId, so it must not reach the run upsert below.
+  if (msg.type === 'workflow-tests-changed') {
+    wfvTests.changed(msg);
+    return;
+  }
   // Scheduled runs: a ticket or a repeating schedule changed (here, in another tab, from the
   // CLI, or because the scheduler tick started/missed/skipped something).
   if (msg.type === 'schedules-changed') {
@@ -1995,10 +2206,20 @@ function handleServerMessage(msg) {
     return;
   }
   // Shape it first: a feature's slices changed (an action, a slice's run, the scheduler tick). L11.
+  // Shaper small runs C1: the Prototype step moved; its planning run's card re-reads its saved state.
+  if (msg.type === 'shape-prototype') { refreshShaperCardsOf(msg.pipelineId); return; }
   if (msg.type === 'shape-feature') {
+    // Small runs C3 (D13): an open stop of this feature re-reads its slice, so an answer held in any tab draws its
+    // answered line. Read the held state before the cache clears: only a stop whose held state changed repaints.
+    const heldBefore = openStopsHeld(msg.id);
+    const resumeRepaint = openResumesOf(msg.id);   // slice 8 (d8-9): read before the clear, as openStopsHeld
     SLICE_INFO.clear();
+    repaintHeldStops(msg.id, heldBefore);
+    resumeRepaint();
     refreshShapeFeatures(msg.id);
     void refreshGroupFeatureLock(msg.id);
+    // Small runs: a member's short word (a stop opened, held or answered) comes with its group.
+    if (flagOn('shaperSmallRuns') && (state.runGroups || []).some((g) => g.smallRuns && (!msg.id || g.id === msg.id))) void loadRunGroups();
     refreshShaperCards();
     chatHome?.refreshPlans();
     return;
@@ -2139,7 +2360,7 @@ function handleServerMessage(msg) {
   }
   // Terminal frames are tagged by sessionId (#573); the pane keeps its own.
   if (typeof msg.type === 'string' && msg.type.startsWith('term-')) {
-    if (terminalPane) terminalPane.onFrame(msg);
+    terminalTool?.onFrame(msg);
     return;
   }
   // Action frames are tagged by instanceId (not runId); each controller keeps its own run's.
@@ -2369,7 +2590,17 @@ function onHello(msg) {
       pauseDetail: r0.pauseDetail || null,
       limitEngine: r0.limitEngine || null,
       limitResetAt: r0.limitResetAt || null,
+      // #1450: the model a confirmation pause waits on, a usage limit's scope and model (reset when absent).
+      modelConfirm: r0.modelConfirm || null,
+      limitScope: r0.limitScope || null,
+      limitModel: r0.limitModel || null,
       runEngine: r0.runEngine || undefined,
+      runEngines: Array.isArray(r0.runEngines) ? r0.runEngines : undefined,
+      execEnv: r0.execEnv || undefined,
+      execEnvWaiting: !!r0.execEnvWaiting,
+      execEnvPreparing: r0.execEnvPreparing || undefined,
+      execEnvWaitUntil: r0.execEnvWaitUntil || undefined,
+      execEnvReview: Array.isArray(r0.execEnvReview) ? r0.execEnvReview : undefined,
       startedBy: r0.startedBy || undefined,
       lastAction: r0.lastAction || undefined,
       workspaceId: r0.workspaceId || undefined,
@@ -2430,6 +2661,7 @@ function onHello(msg) {
   askPanel?.onHello(msg.ask);
   wfvChat?.onHello();
   designHello(msg.design ?? [], { rebooted });   // the live builds (an older server's hello has none)
+  designStudio?.studio.onHello({ rebooted });    // the open design chat: its stage re-mints, its dock and pictures reload
   designActivity.hello(msg.design);              // Activity's builds, paused ones too (refreshAllCounts below repaints)
 
   // diff-comments-changed is a plain global broadcast with no per-socket buffer
@@ -2533,7 +2765,8 @@ function nowHMS() {
 function makeRun({
   runId, title, projectDir, status = 'running', startedAt, local = false,
   pendingQuestion = null, kind = 'run', pipelineId = null, pauseReason = null,
-  pauseDetail = null, limitEngine = null, limitResetAt = null, runEngine = undefined, startedBy = null, lastAction = null,
+  pauseDetail = null, limitEngine = null, limitResetAt = null, modelConfirm = null, limitScope = null, limitModel = null, runEngine = undefined, runEngines = undefined,
+  execEnv = undefined, execEnvWaiting = false, execEnvPreparing = undefined, execEnvWaitUntil = undefined, execEnvReview = undefined, startedBy = null, lastAction = null,
   workspaceId = undefined, workspaceName = undefined, projectNames = null, night = undefined, tags = [], labels = [],
   shaping = null, networkWait = null, workMode = undefined,
 }) {
@@ -2552,7 +2785,16 @@ function makeRun({
     pauseDetail,          // the human-readable cause behind an 'error' pause, or null
     limitEngine,          // 'usage_limit': the engine whose own limit it is, or null (engine-switch.mjs)
     limitResetAt,         // 'usage_limit': ISO when the limit resets, or null
+    modelConfirm,         // 'model_confirm' (#1450): { model, at, … } the run waits to confirm, or null
+    limitScope,           // 'usage_limit': 'model' (a Fable limit) | 'connection', or null
+    limitModel,           // 'usage_limit': the model the limit was spent on, or null
     runEngine,            // the engine the run runs on (state frames carry it too); undefined = not known yet
+    runEngines,           // every harness its steps use, only on a run that uses more than one
+    execEnv,              // the backend name ('e2b') when its agents run in a remote sandbox (docs/e2b.md); undefined = local
+    execEnvWaiting,       // remote: still queued for a sandbox slot
+    execEnvPreparing,     // remote: 'image-build' while the backend builds its sandbox image on first use
+    execEnvWaitUntil,     // remote: ISO when the parked sandbox is released if the open question stays unanswered
+    execEnvReview,        // remote: [{path, why}] files from the sandbox only a person runs later (review before running)
     startedBy,            // who started it (identity.mjs), or null; 'local' is never shown
     lastAction,           // who last stopped / paused / resumed it: { kind, by, at } or null
     workspaceId,
@@ -2576,6 +2818,8 @@ function makeRun({
     phaseStatus: '',
     costByNode: {},       // { nodeId|uiPhase: usd } for the live stepper
     totalCostUsd: 0,   // pipeline total for the card meta line
+    elapsedMs: null,   // the engine's run clock, folded (from 'state'); null => no figure, the summed step time stands in
+    elapsedSince: null, // epoch ms the run clock has been running since; null while parked
     steps: [],         // raw steps[] from the latest state snapshot (for live timers)
     pendingQuestion,
     logLines: [],
@@ -3128,6 +3372,7 @@ function onState(r, msg) {
   // hello snapshot, i.e. after a page reload — and /api/resume keys on it.
   // Guard: id-less pre-createPipeline snapshots must not clobber a captured id.
   if (typeof msg.id === 'string' && msg.id) r.pipelineId = msg.id;
+  if (msg.rerunOf && typeof msg.rerunOf === 'object') r._rerunOf = msg.rerunOf;   // Rerun: the harness mirrors the source onto its state
   dropSupersededPaused(r);
   if (msg && msg.branch && typeof msg.branch === 'object') {
     // Keep the WHOLE branch record, not just .feature: the detail header's
@@ -3148,6 +3393,15 @@ function onState(r, msg) {
   if (typeof msg.prompt === 'string' && msg.prompt) r.prompt = msg.prompt;
   // The run's engine (§4.2): the step pills show only what that engine ran.
   if (typeof msg.runEngine === 'string' && msg.runEngine) r.runEngine = msg.runEngine;
+  // Every harness its steps use (a mixed run only): a frame without it drops the copy (a resume that moved every step).
+  if (Array.isArray(msg.runEngines) && msg.runEngines.every((e) => typeof e === 'string')) r.runEngines = msg.runEngines;
+  else delete r.runEngines;
+  // Where it executes (e2b only) and whether it still waits for a sandbox slot.
+  if (typeof msg.execEnv === 'string') r.execEnv = msg.execEnv;
+  r.execEnvWaiting = !!msg.execEnvWaiting;
+  r.execEnvPreparing = typeof msg.execEnvPreparing === 'string' ? msg.execEnvPreparing : undefined;
+  r.execEnvWaitUntil = typeof msg.execEnvWaitUntil === 'string' ? msg.execEnvWaitUntil : undefined;
+  if (Array.isArray(msg.execEnvReview)) r.execEnvReview = msg.execEnvReview;
   // Swap the manifest when it FIRST arrives OR when its node-id signature changes
   // (a decomposed run rewrites the implementer node into per-phase/per-task nodes
   // mid-run). Rebuild the stepper DOM so subsequent paints address the right nodes.
@@ -3163,6 +3417,11 @@ function onState(r, msg) {
     r.stepGraphify = stepGraphifyFromSteps(msg.steps);
   }
   if (typeof msg.totalCostUsd === 'number') r.totalCostUsd = msg.totalCostUsd;
+  // The run clock: folded ms + the anchor it runs from (null while the run is parked).
+  if (typeof msg.elapsedMs === 'number') {
+    r.elapsedMs = msg.elapsedMs;
+    r.elapsedSince = typeof msg.elapsedSince === 'number' ? msg.elapsedSince : null;
+  }
   // What the open preflight is doing (the glance's status line); null once it ends.
   if (msg.setupStage !== undefined) r.setupStage = msg.setupStage;
   // Night mode switches + counters (run-harness _nightSnapshot): the run-view switch paints from them.
@@ -3338,7 +3597,8 @@ async function loadConfig(projectDir) {
   // then populate the dropdown + render the chosen workflow's accordion. The
   // Default workflow goes through the SAME renderer as a saved one; only its
   // storage differs (legacy per-role steps, resolved in buildNodeConfigRows).
-  if (state.config.activeWorkflowId) state.workflowId = state.config.activeWorkflowId;
+  if (state.pinWorkflowId) state.workflowId = state.pinWorkflowId;   // U-T4: Run it once keeps its workflow when a project is picked
+  else if (state.config.activeWorkflowId) state.workflowId = state.config.activeWorkflowId;
   await loadWorkflowsInto(state.workflowId);
   if (stale()) return;                     // the newer chain repaints guardrails itself
   await loadGuardrailsInto(state.guardrailsId);
@@ -3432,7 +3692,14 @@ const gvApi = {
     const d = await safeJson(res);
     return Array.isArray(d) ? d : (d && d.agents) || [];
   },
-  config: async () => { const res = await fetch('/api/config'); const d = await safeJson(res); return { models: d.models || [], efforts: d.efforts || [], subagentModels: d.subagentModels || [] }; },
+  // defaultEngine: the harness a run starts on when nothing else names one (GET /api/run-defaults, no project), where
+  // the Workflows picker's inherit and soft picks run.
+  config: async () => {
+    const [res, def] = await Promise.all([fetch('/api/config'), fetch('/api/run-defaults').then((r) => (r.ok ? safeJson(r) : null)).catch(() => null)]);
+    const d = await safeJson(res);
+    const defaultEngine = (def && def.engine && typeof def.engine.value === 'string' && def.engine.value) || 'claude';
+    return { models: d.models || [], efforts: d.efforts || [], subagentModels: d.subagentModels || [], defaultEngine };
+  },
   listWorkflows: async () => listWorkflows(),
   listArchived: async () => {
     try {
@@ -3458,8 +3725,10 @@ const gvApi = {
     const d = await safeJson(res);
     // 422 = the shared validator's issues, rendered verbatim by the dialog.
     if (!res.ok) return { ok: false, status: res.status, issues: d && (d.issues || d.errors), error: d && d.error, id: d && d.id };
+    setTimeout(() => void wfvVersions.refresh(), 0);
     return { ok: true, workflow: (d && d.workflow) || d };
   },
+  ...workflowVersionsApi({ fetch: (...a) => fetch(...a), safeJson }),   // versionsRead, versions, saveVersion, useVersion, restoreRevision
   // {ok, error} — the refusal string comes from the JSON body, because every
   // delete this API can refuse (the built-in, a 404, a 409) says WHY there and
   // the user has to read it (MAJ-17).
@@ -3497,6 +3766,7 @@ function wfvEls() {
   return {
     root: g('wfv'), stage: g('wfv-stage'), canvas: g('wfv-canvas'), chip: g('wfv-chip'), back: g('wfv-back'),
     wfMenu: g('wfv-wf-menu'), name: g('wfv-name'), docState: g('wfv-doc'), errors: g('wfv-errors'), importFile: g('wfv-import-file'),
+    status: g('wfv-status'), statusMore: g('wfv-status-more'),
     libToggle: g('wfv-lib-toggle'), saveWrap: g('wfv-savewrap'), save: g('wfv-save'), saveReason: g('wfv-save-reason'), add: g('wfv-add'),
     autolayout: g('wfv-autolayout'), zoom: g('wfv-zoom'), zoomLabel: g('wfv-zoom-label'), overlay: g('wfv-overlay'),
     library: g('wfv-library'), sheet: g('wfv-sheet'), sheetTitle: g('wfv-sheet-title'), sheetClose: g('wfv-sheet-close'),
@@ -3580,6 +3850,7 @@ async function initWorkflows() {
   });
   wfvLibrary = createLibrary({ doc: document, host: els.library, actions: wfvLibraryActions() });
   wfvShell = createWorkflowsShell({ doc: document, els: { ...els, inspector: insBody }, composer: gvComposer, actions: wfvShellActions() });
+  wfvVersions.mount();   // the Canvas · Versions · Tests switch, Save version, the version line (versions-app.mjs)
   wfvChat = createChatDock({
     doc: document, host: els.chat, composer: gvComposer, sessionId: WFV_SESSION,
     fetch: (...a) => fetch(...a),
@@ -3593,7 +3864,7 @@ async function initWorkflows() {
     },
     actions: wfvChatActions(),
     canvas: () => wfvChatCanvas(),
-    stage: els.stage, cluster: document.getElementById('wfv-br'), plus: els.add,   // fit the stage; lift the bars clear
+    stage: els.stage, cluster: document.getElementById('wfv-br'), beside: [els.add, els.autolayout?.parentElement],   // fit the stage; lift the bars clear
     confirm: (o) => confirmModal(o),                    // New chat asks before it leaves unsaved drafts behind
     // Each rejects when its list could not be read: the dock drops a pinned project or workspace only on a list that loaded.
     projects: async () => {
@@ -3639,8 +3910,18 @@ function wfvSetLibraryOpen(open) {
   wfvShell?.paintLibToggle(open);
 }
 
+// Workflow versions and tests (plans/workflow-tests-plan.md, part2): the Versions and Tests pages' controllers.
+const wfvVersions = createWorkflowVersions({ doc: document, win: window, composer: () => gvComposer, api: gvApi,
+  confirmModal, tests: () => wfvTests });
+const wfvTests = createWorkflowTests({ doc: document, win: window, fetch: (...a) => fetch(...a), safeJson, composer: () => gvComposer,
+  api: gvApi, versions: () => wfvVersions, currentView, confirmModal, openNewPipeline, hdMarkdown,
+  mock: () => serverMock.on, runPageShows: (pid) => !!histDetailState && histDetailState.id === pid });
+
 function wfvShellActions() {
   return {
+    // The model picker's readiness (status words, broker locks) and its Add model on a harness.
+    engines: (onLoad) => readyEngineRows(onLoad),
+    addModel: (engine) => addModelOn(engine),
     pinState: () => { const t = gvComposer.template(); return t && t.id ? { id: t.id, pinned: homePinned(t.id) } : null; },
     togglePin: () => { const t = gvComposer.template(); if (t && t.id) void toggleHomePin(t); },
     back: () => { location.hash = wfvReturn || 'chat'; },
@@ -3657,7 +3938,7 @@ function wfvShellActions() {
     // first and the export follows; a blank canvas has nothing to export — open the saved list instead.
     exportCurrent: () => {
       const t = gvComposer.template();
-      const exportRow = (wf) => openExportModal({ id: wf.id, name: wf.name || wf.id });
+      const exportRow = (wf) => openExportModal({ id: wf.id, name: wf.name || wf.id, versionable: workflowCanHaveVersions(wf) });
       if (t.id && !gvComposer.isDirty()) { exportRow(t); return; }
       if (gvComposer.isPristine()) {
         wfvSetLibraryOpen(true); wfvLibrary?.open('workflows');
@@ -3809,6 +4090,7 @@ async function routeWorkflows(param = '') {
   }
   const opened = await wfvOpenSaved(head);
   if (reveal && opened !== null) await wfvRevealWorkflow(head);   // also when the discard prompt kept the canvas (D2)
+  wfvTests.route(head, sub, opened);   // #workflows/<id>/tests[/<example>|/run/<test>] (tests-app.mjs)
 }
 
 async function enterWorkflowsView(param = '', prevView = '') {
@@ -3819,6 +4101,7 @@ async function enterWorkflowsView(param = '', prevView = '') {
   const first = await initWorkflows();
   if (!first) gvComposer.fit();
   await routeWorkflows(param);
+  void wfvTests.refresh();   // frames skip a Tests page hidden behind another view: a shown one catches up on re-entry
 }
 
 // Where focus goes back when the sheet closes: the opener's id, or a Library control's focus key.
@@ -3975,6 +4258,7 @@ function wfvLibraryActions() {
     // #1127: a row of the user's opens to Edit (Save changes it); Use as template opens any row as a new unsaved copy.
     editWorkflow: (id) => wfvOpenSaved(id),
     useAsTemplate: (id) => wfvOpenSaved(id, { copy: true }),
+    ...wfvVersions.libraryActions(wfvOpenSaved),   // openVersions, versionsEnabled
     deleteWorkflow: async (wf) => {
       const schedNote = await scheduleDependentsNote(`workflowId=${encodeURIComponent(wf.id)}`, 'They will fail to start until you point them at another pipeline.');
       const ok = await confirmModal({ title: 'Delete pipeline', danger: true, confirmLabel: 'Delete',
@@ -3994,7 +4278,7 @@ function wfvLibraryActions() {
       if (!r.ok) { notify({ tone: 'err', title: 'Not deleted', detail: r.error }); return; }
       await wfvRefreshWorkflows();
     },
-    exportWorkflow: (wf) => openExportModal({ id: wf.id, name: wf.name || wf.id }),
+    exportWorkflow: (wf) => openExportModal({ id: wf.id, name: wf.name || wf.id, versionable: workflowCanHaveVersions(wf) }),
     newAgent: () => { location.hash = 'workflows/agents/new'; },
     newScript: () => { location.hash = 'workflows/scripts/new'; },
     viewAgent: (key) => { location.hash = `workflows/agents/${key}`; },
@@ -4077,12 +4361,33 @@ function buildNodeConfigRows(workflow, registry, runConfig, opts = {}) {
 // nothing deviates from the CLI/registry baseline; otherwise model · effort and
 // any active flag. Mirrors nodeModelLine's vocabulary so the New-Pipeline row and
 // the run-graph node read the same.
+/** #1450: what a step with no model of its own runs, from GET /api/run-defaults effectiveRoles for the run's engine:
+ *  { kind: 'worca-default'|'role'|'cli-decides'|'tool-decides', role, label } — null while the payload is not there. */
+function emptyStepRole(row) {
+  const engine = state.engine || 'claude';
+  const role = roleOf(`steps.${row.key || ''}`, { name: row.label || '' });
+  const eff = state.runDefaults?.effectiveRoles?.[engine]?.[role];
+  if (!eff || !role) return null;
+  const m = eff.model ? modelById(eff.model) : null;
+  return { kind: eff.source, role: ROLE_LABELS[role], label: m ? m.label : (eff.model || ''), tool: engine === 'codex' ? 'Codex' : engineLabel(engine) };
+}
+/** The sentence a model-less step reads as on the run card (#1450): never the silent "CLI default". */
+function emptyStepText(row) {
+  const e = emptyStepRole(row);
+  if (!e) return null;
+  if (e.kind === 'worca-default') return `No model set: runs on ${e.label} (Worca’s default for ${e.role})`;
+  if (e.kind === 'role') return `No model set: runs on your ${e.role} role (${e.label})`;
+  if (e.kind === 'cli-decides') return `No model set: ${e.tool} decides (your ${e.role} role)`;
+  return toolDecidesText(e.tool === 'Codex' ? engineLabel('codex') : e.tool);
+}
 function agentSummaryText(row) {
   const parts = [];
   if (row.model) {
     const m = modelById(row.model);
     parts.push(m ? m.label : row.model, row.effort || 'default effort');
   }
+  // A pick pinned to its harness says which: it runs there whatever the run's default harness.
+  if (row.engine) parts.push(`on ${engineLabel(row.engine)}`);
   if (row.fanOut) parts.push('fan-out');
   // A stored policy shows whether or not fan-out is currently on: the value
   // persists across a fan-out toggle, and hiding it while the modified dot
@@ -4092,8 +4397,11 @@ function agentSummaryText(row) {
     parts.push(`subs: ${subagentAliasLabel(row.subagentModel)}`);
   }
   if (row.askQuestions) parts.push('questions');
-  if (!parts.length) return 'default';
-  if (!row.model) parts.unshift('default');
+  // #1450: "default" names what it resolves to — the role's model, or who decides.
+  const e = row.model ? null : emptyStepRole(row);
+  const dflt = !e ? 'default' : e.kind === 'worca-default' || e.kind === 'role' ? `default: ${e.label}` : `default: ${e.tool} decides`;
+  if (!parts.length) return dflt;
+  if (!row.model) parts.unshift(dflt);
   return parts.join(' · ');
 }
 
@@ -4130,7 +4438,7 @@ if (typeof window !== 'undefined') {
     resolveNodeTunables,
     buildFeedbackRows,
     defaultEffortFor,
-    renderModelEffortPair,
+    renderEffortSelect,
     renderAgentRows,
     renderFeedbackRows,
     renderWorkflowConfig,
@@ -4259,51 +4567,26 @@ if (typeof window !== 'undefined') {
   });
 }
 
-// Paint one model+effort select pair (and its caption) from a saved selection
-// {model,effort}. Shared by the legacy default-stage rows and the dynamic
-// per-node rows so the dropdown contents + effort filtering live in one place.
-function renderModelEffortPair(modelSel, effortSel, caption, sel = {}) {
-  // Model dropdown: "(default model)", then the models grouped by connection (model-options.mjs, the grouping every
-  // picker shares) — then "+ Add model…". An option names who added it (team policy, a plugin), and the observed §4.6
-  // "cost not verified" flag still marks it.
-  modelSel.innerHTML = '';
-  modelSel.appendChild(option('', '(default model)'));
-  // D10: New pipeline offers the models the run's harness can run only (src/shared/connections.mjs) — any
-  // other would be skipped at run time. `sel.engine` names another engine for a caller that has one.
-  const engine = sel.engine || state.engine || 'claude';
-  const ofEngine = (m) => runsOn(m, engine);
-  // A bridged model whose provider is not usable (model-bridge-design.md §8.5)
-  // leaves the list — unless it is THIS selection, which is then labelled so.
-  const usable = (m) => ofEngine(m) && (!m.needsSignIn || m.id === sel.model);
-  // "Hide built-in models" (#422): a hidden built-in leaves the list — unless
-  // it is THIS selection, which still resolves and must stay visible.
-  appendModelGroups(modelSel, state.models.filter((m) => usable(m) && (m.custom || !m.hidden || m.id === sel.model)), {
-    engine, text: (m) => modelOptionText(m) + (m.costUnreliable ? ' ⚠cost' : '') + (m.needsSignIn ? ' (needs sign-in)' : '') + credentialSuffix(m.id) });
-  modelSel.appendChild(option('__add__', 'Add model…'));
-  modelSel.value = sel.model || '';
-
-  // Effort dropdown: filtered to the selected model's supported efforts. With no
-  // model there is no list to offer — which efforts are valid is a property of
-  // the model — so the control is disabled. It SAYS so rather than just greying
-  // out, because a dead dropdown next to a live one reads as a broken UI.
-  const model = modelById(modelSel.value);
+// Paint one Agents row's effort select from its pick {model, effort, engine}. The model itself is the row's columns
+// picker trigger (renderAgentRows); `engine` is the harness a pinned pick names, absent for a soft pick or inherit.
+function renderEffortSelect(effortSel, { model = '', effort = '', engine = '' } = {}) {
+  // Filtered to the model's supported efforts. With no model (or one the catalog lost) there is no list to offer —
+  // which efforts are valid is a property of the model — so the control is disabled. It SAYS so rather than just
+  // greying out, because a dead dropdown next to a live one reads as a broken UI. A model the catalog lost keeps its
+  // stored effort as the one option instead, so a save of another tunable sends the pick back unchanged (the server
+  // keeps that pick unchecked).
+  const m = modelById(model);
+  const lostEffort = !m && model && effort ? effort : '';
   effortSel.innerHTML = '';
-  effortSel.appendChild(option('', model ? '(default effort)' : '(pick a model first)'));
-  // A model on two harnesses keeps its own efforts; this run's harness offers them mapped (effortsOn).
-  const offeredEfforts = model ? effortsOn(model, engine) : [];
-  offeredEfforts.forEach((e) => effortSel.appendChild(option(e, e)));
-  effortSel.value = sel.effort && offeredEfforts.includes(sel.effort) ? sel.effort : '';
-
-  modelSel.disabled = false;
-  effortSel.disabled = !model;
-  effortSel.title = model ? '' : 'Pick a model first. The effort levels on offer are that model’s own.';
-
-  if (caption) {
-    const mLabel = model ? model.label : 'default model';
-    caption.textContent = `${mLabel} · ${effortSel.value || 'default effort'}`
-      + (model && model.needsSignIn ? ' (needs sign-in under Models › Providers)' : '');
-    caption.classList.toggle('err', !!(model && model.needsSignIn));
-  }
+  effortSel.appendChild(lostEffort ? option(lostEffort, lostEffort) : option('', m ? '(default effort)' : '(pick a model first)'));
+  // A model on two harnesses keeps its own efforts; a soft pick offers them mapped onto the run's harness (effortsOn).
+  // A pinned pick offers its own efforts and the ones its harness maps (pickEffortsOn), so a stored own-only effort
+  // still shows.
+  const offered = m ? (engine ? pickEffortsOn(m, engine) : effortsOn(m, state.engine || 'claude')) : [];
+  offered.forEach((e) => effortSel.appendChild(option(e, e)));
+  effortSel.value = lostEffort || (effort && offered.includes(effort) ? effort : '');
+  effortSel.disabled = !m;
+  effortSel.title = m ? '' : 'Pick a model first. The effort levels on offer are that model’s own.';
 }
 
 // The built-in Default workflow, client-side. Two jobs: (1) it is the topology
@@ -4369,8 +4652,9 @@ async function listWorkflowsApi() {
 async function getWorkflowApi(id) {
   if (state.workflowCache[id]) return state.workflowCache[id];
   try {
-    const q = id === MEMORY_DEFRAG_WORKFLOW_ID ? `?engine=${state.engine}${state.projectDir ? `&projectDir=${encodeURIComponent(state.projectDir)}` : ''}` : '';
-    const res = await fetch(`/api/workflows/${encodeURIComponent(id)}${q}`);
+    // use=live (workflow tests D2): the version a run uses once it has versions, never the draft; flag off: the row, as before.
+    const q = id === MEMORY_DEFRAG_WORKFLOW_ID ? `&engine=${state.engine}${state.projectDir ? `&projectDir=${encodeURIComponent(state.projectDir)}` : ''}` : '';
+    const res = await fetch(`/api/workflows/${encodeURIComponent(id)}?use=live${q}`);
     const data = await safeJson(res);
     // Shape gate, both engines: a v2 graph carries `nodes`, a v1 template
     // `steps`. Demanding `steps` (the pre-P8 guard) rejected every stored row
@@ -4458,6 +4742,7 @@ async function loadWorkflowsInto(selectId) {
   // Fall back to Default if the wanted id is gone (a deleted workflow). Memory defragment holds one
   // project scope, so a workspace target SHOWS Default in its place but never persists it.
   const known = list.some((wf) => wf.id === want);
+  if (!known) state.pinWorkflowId = null;   // U-T9: a pinned workflow that is gone leaves no stale pin
   state.workflowId = !known || (isWorkspace && want === MEMORY_DEFRAG_WORKFLOW_ID) ? 'wf_default' : want;
   sel.value = state.workflowId;
   paintNeedsRepoNote();
@@ -4527,7 +4812,7 @@ async function loadGuardrailsInto(selectId) {
   // Fall back to the install default if the wanted id is gone (deleted set) —
   // and SAY so via the form's message line: a vanished selection must never
   // silently revert while the user believes it is still selected.
-  if (state.preset && !list.some((g) => g.id === want)) {
+  if (activeSetup() && !list.some((g) => g.id === want)) {
     // Preset mode (#712): no silent fallback to Permissive — the gone set stays selected, and the broken card names it.
     state.guardrailsId = want;
     const o = option(want, '');
@@ -4609,7 +4894,8 @@ async function renderWorkflowConfig(workflowId) {
     return;
   }
   // Preset mode (#712): the preset's picks merge over the project's config per node and per wire.
-  const cfg = state.preset ? configWithPreset(state.config, workflowId, state.preset.setup) : state.config;
+  const held = activeSetup();
+  const cfg = held ? configWithPreset(state.config, workflowId, held.setup) : state.config;
   const runConfig = (cfg.workflows && cfg.workflows[workflowId]) || { nodes: {}, feedbacks: {} };
   // wf_default stores its overrides per ROLE (the legacy `steps` blob the CLI and
   // every older install write); saved workflows store them per node id.
@@ -4629,7 +4915,7 @@ async function renderWorkflowConfig(workflowId) {
   if (el.wfFeedbackConfig) el.wfFeedbackConfig.dataset.graph = wf.version === 2 ? '1' : '';
   setAgentsHeader(rows, wf.name || workflowId);
   setAgentRowsEnabled(agentsEditable());
-  if (state.preset && el.wfFeedbackConfig && el.wfFeedbackConfig.dataset.graph !== '1') {
+  if (activeSetup() && el.wfFeedbackConfig && el.wfFeedbackConfig.dataset.graph !== '1') {
     for (const i of el.wfFeedbackConfig.querySelectorAll('input[data-fb-id]')) {
       i.disabled = true;
       i.title = 'Loop budgets of this workflow cannot be held in a preset';
@@ -4678,7 +4964,7 @@ function setAgentsHeader(rows, workflowName) {
   }
   // Preset mode (#712): the rows show the preset's picks for this run; Reset and Save as workflow defaults would
   // write the project's or the workflow's config, so neither is offered.
-  const anyModified = editable && !state.preset && !!rows && rows.some((r) => r.modified);
+  const anyModified = editable && !activeSetup() && !!rows && rows.some((r) => r.modified);
   if (el.agentsReset) el.agentsReset.hidden = !anyModified;
   if (el.agentsPromote) {
     // A graph BUILT-IN is frozen and never persisted, so it has no row to carry defaults
@@ -4704,7 +4990,7 @@ function paintHiddenSettings() {
   if (!levelAtLeast('advanced')) {
     const gr = (state.guardrailSets || []).find((g) => g.id === state.guardrailsId);
     if (state.guardrailsId && state.guardrailsId !== state.guardrailsDefault) items.push(`${(gr && gr.name) || state.guardrailsId} guardrails`);
-    if (state.preset) items.push(...presetHiddenItems(state.preset.setup));   // the preset's picks, counted once (#712)
+    if (activeSetup()) items.push(...presetHiddenItems(activeSetup().setup));   // the preset's (or the rerun's) picks, counted once (#712)
     else {
       const n = Object.values(agentRowsById || {}).filter((r) => r && r.modified).length;
       if (n) items.push(n === 1 ? '1 agent override' : `${n} agent overrides`);
@@ -4726,8 +5012,11 @@ function paintHiddenSettings() {
 // Build the agents accordion into #agents-rows: one collapsed .agent-row per node
 // (accent + name + effective-config caption + modified dot), whose body holds the
 // same model/effort/fan-out/questions controls the old always-open .stage-cfg card
-// did — same classes and data-node-id, so the delegated change handler and
-// renderModelEffortPair are unchanged (newpipeline-ux-design.md §4.2).
+// did — same classes and data-node-id, so the one delegated change handler serves
+// them (newpipeline-ux-design.md §4.2). The model is the columns picker's trigger
+// (models/model-columns.mjs), a button the handler reads in its own branch: it offers
+// every harness, opens on the run's default harness, and a pick names the harness it
+// was picked on.
 function renderAgentRows(rows) {
   const host = el.agentRows;
   if (!host) return;
@@ -4801,14 +5090,16 @@ function renderAgentRows(rows) {
 
     const picks = document.createElement('div');
     picks.className = 'picks';
+    // The model: the columns picker's trigger, with a <select>'s contract (`value`, `disabled`, one bubbling
+    // `change` per pick) and `data-engine`, the harness a pick names ('' = soft or inherit).
     const mWrap = document.createElement('div');
-    mWrap.className = 'select-wrap';
-    const modelSel = document.createElement('select');
-    modelSel.className = 'step-model select';
-    modelSel.dataset.nodeId = row.nodeId;
-    if (row.role) modelSel.dataset.role = row.role;
-    modelSel.setAttribute('aria-label', `${row.label} model`);
-    mWrap.appendChild(modelSel);
+    mWrap.className = 'agent-model';
+    const trigger = modelTrigger({ doc: document, win: window, value: columnsValue({ model: row.model, engine: row.engine }),
+      catalog: state.models, label: `Model for ${row.label}`, cls: 'step-model', defaultEngine: state.engine || 'claude',
+      engines: readyEngineRows, inheritHint: 'workflow default', onAddModel: addModelOn, refocus: () => agentTriggerOf(row.nodeId) });
+    trigger.dataset.nodeId = row.nodeId;
+    if (row.role) trigger.dataset.role = row.role;
+    mWrap.appendChild(trigger);
     const eWrap = document.createElement('div');
     eWrap.className = 'select-wrap';
     const effortSel = document.createElement('select');
@@ -4839,9 +5130,10 @@ function renderAgentRows(rows) {
     const rowDef = row.def || {};
     keepVisible(tagLevel(fanWrap, 'expert'), !!row.fanOut !== !!rowDef.fanOut);
     keepVisible(tagLevel(sWrap, 'expert'), (row.subagentModel || '') !== (rowDef.subagentModel || ''));
-    // Only a Claude run has a sub-agent model to pick: Codex has its own spawn_agent, Copilot's sub-agents run on the
+    // Only a step on Claude Code has a sub-agent model to pick: Codex has its own spawn_agent, Copilot's sub-agents run on the
     // node's own model, OpenCode's investigator runs on the node's model, and Cursor, Gemini CLI, Goose and Qwen Code have none.
-    if (state.engine !== 'claude') sWrap.hidden = true;
+    // A row pinned to a harness runs there whatever the run's; a pick made here hides or shows it with the save's re-render.
+    if ((row.engine || state.engine) !== 'claude') sWrap.hidden = true;
     if (row.askQuestions !== null && row.askQuestions !== undefined) {
       const lockWhy = row.questionsLocked ? (row.askQuestions ? 'Always on for this agent' : 'Always off for this agent') : null;
       const q = makeSwitch(document, { label: 'Questions', ariaLabel: `${row.label} questions`, checked: !!row.askQuestions,
@@ -4875,10 +5167,9 @@ function renderAgentRows(rows) {
 
     card.appendChild(body);
     // The collapsed head IS this row's caption (`sum` above), so the controls get
-    // no second one — renderModelEffortPair's caption slot stays empty and
-    // paintRowSummary keeps the head in step with the live selects.
-    renderModelEffortPair(modelSel, effortSel, null, { model: row.model, effort: row.effort });
-    if (row.pinned) lockPinnedPair(modelSel, effortSel);
+    // no second one — paintRowSummary keeps the head in step with the live controls.
+    renderEffortSelect(effortSel, { model: row.model, effort: row.effort, engine: row.engine });
+    if (row.pinned) lockPinnedPair(trigger, effortSel);
     host.appendChild(card);
   });
   applyFreeDailyToNewView();   // a :free model among the rows may need the allowance warning
@@ -4905,11 +5196,18 @@ function paintRowSummary(row, body) {
   head.textContent = agentSummaryText({ ...row, ...liveRowValues(row, body) });
 }
 
-// Settings › Memory owns a Memory defragment run's model + effort (node-tunables.mjs `pinned`):
-// shown, never edited here. `data-locked` keeps setAgentRowsEnabled from re-enabling them.
+/** The model trigger (button.mdl-pick.step-model) of the Agents row for `nodeId`, looked up again after a repaint. */
+function agentTriggerOf(nodeId) {
+  if (!el.agentRows) return null;
+  return [...el.agentRows.querySelectorAll('.step-model')].find((b) => b.dataset.nodeId === nodeId) || null;
+}
+
+// Settings › Memory owns a Memory defragment run's model + effort (node-tunables.mjs `pinned`): shown, never edited
+// here, and the trigger opens nothing. A row pinned to another harness is not locked: its trigger picks a model on
+// any harness. `data-locked` keeps setAgentRowsEnabled from re-enabling them and liveRowValues from reading them back.
 const PINNED_PAIR_TEXT = 'Set in Settings › Memory. Every Memory defragment run uses this model, whatever this project picked.';
-function lockPinnedPair(modelSel, effortSel) {
-  for (const s of [modelSel, effortSel]) {
+function lockPinnedPair(trigger, effortSel) {
+  for (const s of [trigger, effortSel]) {
     s.disabled = true;
     s.dataset.locked = '1';
     s.title = 'Set in Settings › Memory';
@@ -4919,10 +5217,11 @@ function lockPinnedPair(modelSel, effortSel) {
 // One line naming what this row falls back to once its override is gone — the
 // answer to "what does 'default' actually mean here", without opening a doc.
 function defaultOriginText(row) {
-  if (!row.def.model) return 'No model set for this workflow. It falls back to the CLI’s own default.';
+  if (!row.def.model) { const t = emptyStepText(row); return t ? `${t}.` : 'No model set for this workflow. It falls back to the CLI’s own default.'; }
   const m = modelById(row.def.model);
   const label = m ? m.label : row.def.model;
-  return `This workflow’s default: ${label}${row.def.effort ? ` · ${row.def.effort}` : ''}.`;
+  const on = row.def.engine ? ` on ${engineLabel(row.def.engine)}` : '';   // the workflow's own pin names its harness
+  return `This workflow’s default: ${label}${row.def.effort ? ` · ${row.def.effort}` : ''}${on}.`;
 }
 
 // Build the feedback-loop cycle counts as the accordion's LAST row (§4.2, D4):
@@ -5002,6 +5301,7 @@ function renderFeedbackRows(rows) {
 if (el.workflowSelect) {
   el.workflowSelect.addEventListener('change', async () => {
     state.workflowId = el.workflowSelect.value || 'wf_default';
+    state.pinWorkflowId = null;
     paintNeedsRepoNote();
     saveActiveWorkflow(state.workflowId);
     await renderWorkflowConfig(state.workflowId);
@@ -5037,14 +5337,44 @@ function setRunEngine(engine) {
   keepVisible(document.getElementById('engine-row'), state.engine !== 'claude');   // Simple shows a non-Claude engine
   paintEngineHints();
   paintSessionNotes();
+  paintRunExecEnv();
   showEngineRefusal(null);
-  // D10: the agent rows offer the run engine's models only — repaint them for the new engine. The Sets
-  // picker too: another engine names set skills as its .agents/skills mount would.
+  // D10: the run's engine is the Agents rows' default harness: what their inherit and soft picks run on, where their
+  // pickers open, and what heals a soft pick it cannot run — repaint them for the new engine. The Sets picker too:
+  // another engine names set skills as its .agents/skills mount would.
   if (prev !== state.engine) {
     void renderWorkflowConfig(state.workflowId);
     if (currentView() === 'new') schedulePolicyLine();
   }
 }
+
+// The environment a run gets when nobody picks one: the saved default, except a saved remote default on a run
+// no remote backend can take (an engine no sandbox runs, a workspace run, a Folder project, a run without a project),
+// which the server runs locally (resolveRunExecEnv).
+function runExecEnvDefault() {
+  const saved = state.execEnvDefault || 'local';
+  if (saved === 'local') return 'local';
+  return remoteRefusesDefault({ engine: state.engine, workspace: state.runTarget === 'workspace', workMode: formWorkMode() || 'git' }) ? 'local' : saved;
+}
+
+// Execution environment (docs/e2b.md): per run, never remembered. Simple shows the row while it is not Local,
+// or while its hint says why a saved remote default runs locally.
+function setRunExecEnv(v) {
+  state.execEnv = execEnvKnown(v) ? v : 'local';
+  if (el.execEnvSelect) el.execEnvSelect.value = state.execEnv;
+  const saved = state.execEnvDefault || 'local';
+  const why = remoteRefusesDefault({ engine: state.engine, workspace: state.runTarget === 'workspace', workMode: formWorkMode() || 'git' });
+  const skipped = state.execEnv === 'local' && saved !== 'local' && !!why;
+  if (el.execEnvHint) {
+    el.execEnvHint.hidden = !skipped;
+    if (skipped) el.execEnvHint.textContent = `Runs locally: the saved ${execEnvTitle(saved)} default does not apply to ${why}.`;
+  }
+  keepVisible(document.getElementById('exec-env-row'), state.execEnv !== 'local' || skipped);
+  paintLocalRunNote(document.getElementById('exec-env-local-note'), { show: state.execEnv === 'local' && !skipped && worcaBox() === 'native' });
+  paintExecEnvStatus();
+}
+/** An untouched picker follows the run's default as the engine, the target or the saved default change. */
+function paintRunExecEnv() { setRunExecEnv(state.execEnvTouched ? state.execEnv : runExecEnvDefault()); }
 
 // Boot: learn which engines this instance never starts (GET /api/engine-locks runs no preflight), so every picker
 // greys them out before anyone presses Start, and New pipeline moves off one.
@@ -5052,6 +5382,43 @@ fetch('/api/engine-locks').then((r) => (r.ok ? r.json() : null)).catch(() => nul
   if (!Array.isArray(d?.engines)) return;
   setEngineLocks(d.engines); applyEngineLocks();
   if (engineLock(state.engine) !== null) setRunEngine('claude');
+});
+// The remote backends' live status (GET /api/exec-envs/status, docs/e2b.md): the chip beside New run's "Runs in" reads
+// the chosen backend (none on Local, none for a backend without a status), the one on Settings › Runs reads E2B with
+// its server. No buttons: the watch polls on its own while either chip is on screen.
+// state.execEnvStatus: the last answer, unset until the first (in `state`: setRunExecEnv may paint before this line).
+function execEnvStatusOf(name) { return state.execEnvStatus?.find((e) => e.name === name) || null; }
+function paintExecEnvStatus() {
+  const known = Array.isArray(state.execEnvStatus);
+  const run = state.execEnv === 'local' ? null : execEnvStatusOf(state.execEnv);
+  paintExecEnvStatusChip(el.execEnvStatus, run, { hide: state.execEnv === 'local' || (known && !run) });
+  // Settings › Runs › Execution environment: the backend its select shows (none on Local).
+  const picked = document.getElementById('e2b-exec-env')?.value || 'local';
+  const card = picked === 'local' ? null : execEnvStatusOf(picked);
+  paintExecEnvStatusChip(document.getElementById('e2b-status-chip'), card, { hide: picked === 'local' || (known && !card) });
+  const server = document.getElementById('e2b-status-server');
+  if (server) { server.hidden = !card?.servers?.[0]; server.textContent = card?.servers?.[0] ? `Server: ${card.servers[0].label}` : ''; }
+}
+const execEnvStatusWatch = watchExecEnvStatus({ onStatus: (list) => { state.execEnvStatus = list; paintExecEnvStatus(); } });
+// On screen = the chip has a box in the viewport: hidden (Local), another view or Settings tab, scrolled away, or a
+// hidden browser tab all stop the poll. No IntersectionObserver (jsdom): no poll.
+if (typeof IntersectionObserver === 'function') {
+  const shown = new Set();
+  const apply = () => execEnvStatusWatch.setActive(shown.size > 0 && document.visibilityState === 'visible');
+  const io = new IntersectionObserver((entries) => {
+    for (const e of entries) { if (e.isIntersecting) shown.add(e.target); else shown.delete(e.target); }
+    apply();
+  });
+  for (const chip of [el.execEnvStatus, document.getElementById('e2b-status-chip')]) if (chip) io.observe(chip);
+  document.addEventListener('visibilitychange', apply);
+}
+
+// Boot: the registered execution environments (GET /api/exec-envs) fill every "Runs in" picker.
+loadExecEnvs().then(() => {
+  fillExecEnvSelect(el.execEnvSelect);
+  fillExecEnvSelect(document.getElementById('e2b-exec-env'));
+  paintRunExecEnv();
+  paintExecEnvCardSelection();
 });
 
 function runSlotDefaults() { return state.runDefaults?.steps?.[state.engine] || null; }
@@ -5073,15 +5440,19 @@ function paintSessionNotes(next) {
 onFlagChange('sessionGroups', () => paintSessionNotes());
 function paintEngineHints() {
   if (el.engineHint) {
-    el.engineHint.hidden = state.engine === 'claude';
+    // #1450: an engine whose every role is "the tool decides" (another harness, Claude Code signed out) warns here.
+    const eff = state.runDefaults?.effectiveRoles?.[state.engine];
+    const toolDecides = !!eff && Object.values(eff).length > 0 && Object.values(eff).every((r) => r?.source === 'tool-decides');
+    const decidesLine = toolDecides ? ` Steps with no model: ${toolDecidesText(engineLabel(state.engine))}.` : '';
+    el.engineHint.hidden = state.engine === 'claude' && !toolDecides;
     const project = Object.values(state.runDefaults?.steps?.[state.engine] || {}).some((s) => s?.source === 'project');
-    el.engineHint.textContent = state.engine === 'copilot'
+    el.engineHint.textContent = (state.engine === 'claude' ? 'Claude Code isn’t signed in.' : state.engine === 'copilot'
       ? `GitHub Copilot CLI runs this pipeline, including titles and summaries (on its default model). Step models: ${project ? 'project Settings' : 'Models › Jobs'}. Sign in once with copilot login.`
       : state.engine === 'cursor'
       ? `Cursor runs this pipeline. Helper jobs (titles, summaries) run on Claude. Step models: ${project ? 'project Settings' : 'Models › Jobs'}.`
       : SIGN_IN_ENGINE_NAMES.includes(state.engine)
       ? `${engineLabel(state.engine)} runs this pipeline. Helper jobs (titles, summaries) run on Claude. Step models: ${project ? 'project Settings' : 'Models › Jobs'}.`
-      : `Codex runs this pipeline, including titles and summaries. Its models: ${project ? 'project Settings' : 'Models › Jobs'}`;
+      : `Codex runs this pipeline, including titles and summaries. Its models: ${project ? 'project Settings' : 'Models › Jobs'}`) + decidesLine;
   }
   if (el.engineDefaultHint) {
     const source = state.runDefaults?.engine?.value === state.engine ? state.runDefaults.engine.source : null;
@@ -5198,6 +5569,10 @@ async function loadRunDefaults(projectDir) {
   const prevSteps = JSON.stringify(state.runDefaults?.steps ?? null);
   state.runDefaults = data?.engine && ENGINE_NAMES.includes(data.engine.value) ? data : null;
   if (state.runDefaults && !state.engineTouched) setRunEngine(data.engine.value); else paintEngineHints();
+  // Kept apart from state.runDefaults, which is null whenever the engine part is invalid.
+  // Kept raw: a registered backend the picker list has not named yet is re-applied when the list arrives.
+  state.execEnvDefault = typeof data?.execEnv?.value === 'string' ? data.execEnv.value : 'local';
+  paintRunExecEnv();
   // The rows show the slot defaults: repaint them only when those changed (setRunEngine repaints
   // on an engine change itself). An idle repaint re-arms the policy/MCP preview debounce.
   if (JSON.stringify(state.runDefaults?.steps ?? null) !== prevSteps) void renderWorkflowConfig(state.workflowId);
@@ -5223,6 +5598,7 @@ if (el.engineSelect) {
     notePresetChange();
   });
 }
+el.execEnvSelect?.addEventListener('change', (e) => { state.execEnvTouched = true; setRunExecEnv(e.target.value); });
 
 // Guardrails change: remember the run's set and refresh the summary hint.
 if (el.guardrailsSelect) {
@@ -5236,14 +5612,14 @@ if (el.guardrailsSelect) {
   });
 }
 
-async function saveStep(role, model, effort, fanOut, askQuestions, subagentModel) {
+async function saveStep(role, model, effort, fanOut, askQuestions, subagentModel, engine) {
   const projectDir = selectedProjectPath();
   if (!projectDir) return;
   try {
     const res = await fetch('/api/config', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ projectDir, step: role, model, effort, fanOut, askQuestions, subagentModel }),
+      body: JSON.stringify({ projectDir, step: role, model, effort, fanOut, askQuestions, subagentModel, engine }),
     });
     const data = await safeJson(res);
     if (!res.ok) {
@@ -5260,7 +5636,9 @@ async function saveStep(role, model, effort, fanOut, askQuestions, subagentModel
 // What a row's controls CURRENTLY show. The visible state is the truth: reading
 // it back (rather than the last-rendered row data, or state.config, which lags an
 // in-flight save) is what keeps a toggle from reverting a model picked a moment
-// earlier. A disabled questions box is the agent's locked value, never the user's.
+// earlier. A disabled questions box is the agent's locked value, never the user's, and a locked model + effort pair
+// (data-locked) is left out, so a save of another tunable re-sends the row's own pick. The model trigger's harness
+// (data-engine) rides with its model, so a save of another tunable never drops or changes it.
 function liveRowValues(row, body) {
   const host = body || (el.agentRows
     && el.agentRows.querySelector(`.agent-row[data-node-id="${row.nodeId}"] .agent-row-body`));
@@ -5271,8 +5649,11 @@ function liveRowValues(row, body) {
   const f = host.querySelector('.step-fanout');
   const q = host.querySelector('.step-questions');
   const sa = host.querySelector('.step-subagent');
-  if (m) out.model = m.value === '__add__' ? row.model : m.value;
-  if (e) out.effort = e.value;
+  if (m && !m.dataset.locked) {
+    out.model = m.value;
+    out.engine = m.dataset.engine || '';
+  }
+  if (e && !e.dataset.locked) out.effort = e.value;
   if (f) out.fanOut = f.checked;
   if (q && !q.disabled) out.askQuestions = q.checked;
   if (sa) out.subagentModel = sa.value;
@@ -5287,10 +5668,11 @@ function liveRowValues(row, body) {
 // controls currently show.
 // Preset mode (#712): a change edits the applied preset's setup for THIS run; the project config is untouched.
 function holdInPreset(edit) {
-  if (!state.preset) return false;
-  edit(state.preset.setup);
-  if (!state.preset.applying) {
-    state.preset.modified = true;
+  const held = activeSetup();
+  if (!held) return false;
+  edit(held.setup);
+  if (!held.applying) {
+    held.modified = true;
     paintPresetChip();
     schedulePresetCheck();
   }
@@ -5303,7 +5685,7 @@ async function saveAgentRow(row, next, body) {
     const patch = pruneNodeSelection(row, { ...liveRowValues(row, body), ...next });
     s.overlay = s.overlay || {};
     s.overlay.nodes = { ...(s.overlay.nodes || {}), [row.nodeId]: presetNodePick(patch, row.def) };
-  })) { renderWorkflowConfig(state.workflowId); return; }
+  })) { await renderWorkflowConfig(state.workflowId); return; }
   // Defence in depth: the controls are disabled without a project, but if one
   // is ever reached anyway, say so rather than letting the save no-op and the
   // re-render quietly undo the edit. Same wording as the submit guard.
@@ -5314,24 +5696,24 @@ async function saveAgentRow(row, next, body) {
   }
   const patch = pruneNodeSelection(row, { ...liveRowValues(row, body), ...next });
   if (row.role) {
-    await saveStep(row.role, patch.model, patch.effort, patch.fanOut, patch.askQuestions, patch.subagentModel);
+    await saveStep(row.role, patch.model, patch.effort, patch.fanOut, patch.askQuestions, patch.subagentModel, patch.engine);
   } else {
     await saveNode(state.workflowId, row.nodeId, patch.model, patch.effort, patch.fanOut, patch.askQuestions,
-      patch.subagentModel);
+      patch.subagentModel, patch.engine);
   }
   await renderWorkflowConfig(state.workflowId); // repaint captions, dots + header
 }
 
 // Persist one node's model/effort to the per-project run-config for the active
 // workflow (CONV-2): PATCH /api/config { projectDir, workflowId, nodes:{ [nodeId]:{model,effort} } }.
-async function saveNode(workflowId, nodeId, model, effort, fanOut, askQuestions, subagentModel) {
+async function saveNode(workflowId, nodeId, model, effort, fanOut, askQuestions, subagentModel, engine) {
   const projectDir = selectedProjectPath();
   if (!projectDir) return;
   try {
     const res = await fetch('/api/config', {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ projectDir, workflowId, nodes: { [nodeId]: { model, effort, fanOut, askQuestions, subagentModel } } }),
+      body: JSON.stringify({ projectDir, workflowId, nodes: { [nodeId]: { model, effort, fanOut, askQuestions, subagentModel, engine } } }),
     });
     const data = await safeJson(res);
     if (!res.ok) {
@@ -5347,7 +5729,7 @@ async function saveNode(workflowId, nodeId, model, effort, fanOut, askQuestions,
 // Persist one feedback loop's cycle count (CONV-2): PATCH /api/config
 // { projectDir, workflowId, feedbacks:{ [fbId]:{maxCycles} } }.
 async function saveFeedback(workflowId, fbId, maxCycles) {
-  if (state.preset) return;   // a v1 workflow's loop budgets cannot be held in a preset (its inputs are disabled)
+  if (activeSetup()) return;   // a v1 workflow's loop budgets cannot be held in a preset (its inputs are disabled)
   const projectDir = selectedProjectPath();
   if (!projectDir) return;
   try {
@@ -5426,19 +5808,6 @@ async function saveHumanInLoop(on) {
 }
 if (el.humanInLoop) el.humanInLoop.addEventListener('change', () => saveHumanInLoop(el.humanInLoop.checked));
 
-// "+ Add model…" in any model dropdown: restore the selection and jump to the
-// global Models view with Add model open (models are added GLOBALLY —
-// configurable-models-design.md §4.9; the old per-project window.prompt flow
-// is gone).
-function goAddModel(restore) {
-  if (typeof restore === 'function') restore();
-  mvState.editing = null;
-  mvState.prefill = null;
-  // Step 1 opens on a sign-in with the run's harness picked (D10): a Codex run adds a Codex model.
-  mvState.openEditorOnLoad = { where: 'signin', engine: state.engine };   // survives the view switch: readModelsView opens it
-  showView('models');
-}
-
 // Delegated change handler for every config control inside #pipeline-config.
 // Each control carries the node id of its accordion row; agentRowsById supplies
 // that row's resolved defaults, so saveAgentRow can prune a redundant selection
@@ -5469,19 +5838,28 @@ el.pipelineConfig.addEventListener('change', (e) => {
       : { askQuestions: !!t.checked }, body);
   }
 
-  if (!(t instanceof HTMLSelectElement)) return;
-
-  if (t.classList.contains('step-model')) {
-    if (t.value === '__add__') return goAddModel(() => renderWorkflowConfig(state.workflowId));
-    // A new model invalidates the old effort (the dropdown is filtered by it), so
-    // the effort resets and the row's options are repainted immediately — the
-    // save's own re-render lands a moment later.
-    saveAgentRow(row, { model: t.value, effort: '' }, body);
+  // The model trigger (a button, models/model-columns.mjs): a pick sets its value and the harness it names
+  // (data-engine, '' = soft or inherit). A new model invalidates the old effort (the effort select is filtered by
+  // it), so the effort resets and its options are repainted immediately — the save's own re-render lands a moment
+  // later and replaces the trigger, so the focus goes to the row's new one unless it has moved elsewhere meanwhile.
+  if (t.classList && t.classList.contains('step-model')) {
+    const engine = t.dataset.engine || '';
+    const saved = saveAgentRow(row, { model: t.value, effort: '', engine }, body);
     const effortSel = body && body.querySelector('.step-effort');
-    if (effortSel) renderModelEffortPair(t, effortSel, null, { model: t.value, effort: '' });
+    if (effortSel) renderEffortSelect(effortSel, { model: t.value, effort: '', engine });
     paintRowSummary(row, body);
     schedulePolicyLine();                      // an off-list model is a team-policy note (board 8)
-  } else if (t.classList.contains('step-effort')) {
+    void saved.then(() => {
+      if (document.activeElement !== document.body) return;
+      const next = agentTriggerOf(row.nodeId);
+      if (next) next.focus();
+    });
+    return;
+  }
+
+  if (!(t instanceof HTMLSelectElement)) return;
+
+  if (t.classList.contains('step-effort')) {
     saveAgentRow(row, { effort: t.value }, body);
     paintRowSummary(row, body);
   } else if (t.classList.contains('step-subagent')) {
@@ -5556,9 +5934,11 @@ if (el.agentsPromote) {
         appendLog({ source: 'ui', level: 'error', text: `workflow defaults: ${data.error || res.status}`, ts: Date.now() });
         return;
       }
+      const versionInUse = hasVersionInUse(state.workflowCache[workflowId]);   // the defaults went into the draft (versions-app.mjs)
       // The cached template still carries the OLD defaults; drop it so the
       // reset below repaints against what was just persisted.
       delete state.workflowCache[workflowId];
+      if (versionInUse) { await keepPicksForVersionInUse(() => renderWorkflowConfig(workflowId)); return; }
       el.agentsReset.click(); // clearing the now-redundant overrides is the second half
     } catch (err) {
       appendLog({ source: 'ui', level: 'error', text: `workflow defaults error: ${err.message}`, ts: Date.now() });
@@ -5568,12 +5948,13 @@ if (el.agentsPromote) {
 
 // One row's effective settings as a workflow-defaults block: only what deviates
 // from the agent registry is worth storing, and a locked/absent questions toggle
-// is never the user's to promote.
+// is never the user's to promote. A row's harness (`engine`) goes beside its model.
 function effectiveDefaultsOf(row) {
   const out = {};
   if (row.model) {
     out.model = row.model;
     if (row.effort) out.effort = row.effort;
+    if (row.engine) out.engine = row.engine;
   }
   out.fanOut = !!row.fanOut;
   if (row.askQuestions !== null && !row.questionsLocked) out.askQuestions = !!row.askQuestions;
@@ -6262,6 +6643,25 @@ function renderQpanel(r, root) {
   renderer.render(panel, pq, ctx);
 
   panel.classList.remove('hidden');
+  paintQpanelDeadline(r, root);
+}
+
+/** E2B (docs/e2b.md): while a question waits, the parked sandbox is kept only until "Max wait for an answer".
+ *  Say when, and what happens then. Repainted on every state frame: the deadline arrives once the sandbox parks. */
+function paintQpanelDeadline(r, root) {
+  const panel = root && root.querySelector('.qpanel');
+  if (!panel) return;
+  let line = panel.querySelector('.qpanel-deadline');
+  const at = r.pendingQuestion && r.execEnv && r.execEnv !== 'local' && r.execEnvWaitUntil ? new Date(r.execEnvWaitUntil) : null;
+  if (!at || Number.isNaN(at.getTime())) { if (line) line.remove(); return; }
+  if (!line) {
+    line = document.createElement('p');
+    line.className = 'qpanel-deadline';
+    const head = panel.querySelector('.qpanel-head');
+    if (head) head.after(line); else panel.prepend(line);
+  }
+  const hhmm = at.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  line.textContent = `Answer by ${hhmm}. After that worca releases the ${execEnvTitle(r.execEnv)} sandbox and pauses the run; Resume continues in a fresh sandbox.`;
 }
 
 /** The `ctx` every registered renderer receives (index §P3). `mode` tells a body
@@ -6818,8 +7218,10 @@ registerAskRenderer('clarify', {
 // Gate and recovery are step cards for every run (shaper-cards D3): their buttons post through stepPost themselves.
 registerAskRenderer('gate', {
   title: () => 'Cycle gate',
-  render: (panel, pq, ctx) => renderGateCard(panel, pq, { ...stepDeps(ctx, pq),
+  render: (panel, pq, ctx) => renderGateCard(panel, pq, { ...stepDeps(ctx, pq), ...stopDeps(ctx, pq, panel),
     wireCopy: gateWireCopy(ctx.run, pq.wireId), tagLevel, submit: (p) => stepPost(ctx.run, p) }),
+  // Slice 8: a Verifier gap answer's 422 names the gap it refuses (shape/gap-question.mjs).
+  setErrors: (panel, errors) => { if (panel && panel.__gaps) panel.__gaps.setErrors(errors); },
 });
 registerAskRenderer('recovery', {
   title: (pq) => `${(((pq.recovery || {}).cls) || 'recoverable').replace('_', ' ')} error: action needed`,
@@ -6830,12 +7232,45 @@ registerAskRenderer('workflow', {
   count: () => 'workflow',
   render: (panel, pq, ctx) => renderWorkflowBody(ctx.run, panel, pq),
 });
+// Shaper small runs B2: the Start step (the Care ask) of a marked planning run; a 422 paints under the dial.
+registerAskRenderer('care', {
+  title: () => 'Your turn: how much care?',
+  render: (panel, pq, ctx) => {
+    const body = renderCareStart(ctx.doc || document, pq, { ...stepDeps(ctx, pq), submit: (p) => stepPost(ctx.run, p) });
+    panel.__care = body;
+    body.render(panel);
+  },
+  collect: (panel) => (panel && panel.__care ? panel.__care.collect() : null),
+  setErrors: (panel, errors) => { if (panel && panel.__care) panel.__care.setErrors(errors); },
+});
+// Shaper small runs C1: the Prototype step; its build follows the design frames this socket hears.
+registerAskRenderer('prototype', {
+  render: (panel, pq, ctx) => {
+    // The Chat run side panel shows the step but none of its buttons: it is answered on the feature card.
+    const readOnly = !!(panel.closest && panel.closest('[data-presentation="panel"]'));
+    // Shaper slice 7 (D12): a marked feature (flag on: its slice info carries `owns`) with no chat is answered on its page.
+    const r = ctx.run;
+    const repaint = () => { if (panel.isConnected && r.pendingQuestion === pq) renderQpanel(r, panel.parentElement); };
+    const home = readOnly && r && r.pipelineId ? stopHomeFor(r.pipelineId, repaint, pq.id) : null;
+    const marked = home && Array.isArray(SLICE_INFO.get(r.pipelineId)?.owns);
+    const answerHref = marked && home.featureId && !home.threadId ? groupHrefOf({ groupKind: 'feature', groupId: home.featureId }) : null;
+    panel.__proto = renderPrototypeBody(panel, pq, { ...stepDeps(ctx, pq), readOnly, ...(answerHref ? { answerHref } : {}), confirm: confirmModal, submit: (p) => stepPost(ctx.run, p),
+      reduced: () => !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches),
+      subscribe: (msg, fn) => { if (state.ws && state.wsReady) state.ws.send(JSON.stringify(msg)); return onPrototypeFrame(fn); } });
+    // A repaint (disposeQpanel) ends the live build's frame subscription and its animation.
+    panel.__dispose = () => { if (panel.__proto) panel.__proto.destroy(); panel.__proto = null; };
+  },
+  setErrors: (panel, errors) => { if (panel && panel.__proto) panel.__proto.setErrors(errors); },
+});
 // Shape it first (S4): registered ungated: the only way to answer a run still held when the gate goes off.
 // title/count fill the hidden .qpanel-head (F28); askHeading is what people read. Kept for completeness.
 registerAskRenderer('plan', {
   title: (pq) => (pq.plan && pq.plan.outline ? `Slices ready for your approval · v${pq.plan.round || 1}` : `Plan ready for your approval · v${(pq.plan && pq.plan.round) || 1}`),
   count: (pq) => { const c = pq.plan && pq.plan.check; return c && Number.isFinite(c.total) ? `${pq.plan.outline ? 'Outline' : 'Shape'} ${c.passed}/${c.total}` : null; },
-  render: (panel, pq, ctx) => (pq.plan && pq.plan.outline
+  // Small runs C3 (D11): a marked run's stop on a plan ask is drawn by the gate card, as one question.
+  render: (panel, pq, ctx) => (pq.stop
+    ? renderGateCard(panel, pq, { ...stepDeps(ctx, pq), ...stopDeps(ctx, pq, panel), tagLevel, submit: (p) => stepPost(ctx.run, p) })
+    : pq.plan && pq.plan.outline
     ? renderOutlineBody(panel, pq, outlineBodyDeps(ctx))
     : renderPlanBody(panel, pq, planBodyDeps(ctx))),
   setErrors: (panel, errors) => { if (panel && panel.__plan) panel.__plan.setErrors(errors); },
@@ -6851,6 +7286,82 @@ function stepDeps(ctx, pq) {
   const r = ctx.run;
   const who = pq.nodeId ? nodeLabel(r.stepper, pq.nodeId) : '';
   return { doc: ctx.doc || document, run: r, title: stepTitle(pq, who), chip: stepChip(pq, r) };
+}
+
+/** Small runs C3 (D12, D13): a stop's extra deps. A stop is answered on every surface: the feature card, the feature
+ *  page, the run page and the run side panel (`runPage` there: the head's one-column marker); with the flag off, the run
+ *  page and panel (`readOnly`) draw its findings only; with it on, every surface lists them (`findings`). An answer held for another run's turn (the feature view's
+ *  `stop.held`, read through the slice info) draws the one answered line. */
+function stopDeps(ctx, pq, panel) {
+  if (!pq || !pq.stop) return {};
+  const r = ctx.run;
+  const small = flagOn('shaperSmallRuns');
+  const runScreen = !!(panel.closest && panel.closest('[data-presentation="panel"], #run-detail'));
+  const repaint = () => { if (panel.isConnected && r.pendingQuestion === pq) renderQpanel(r, panel.parentElement); };
+  const info = r && r.pipelineId ? sliceInfoFor(r.pipelineId, repaint) : null;
+  const held = info && info.stop && info.stop.held ? { value: info.stop.value } : null;
+  const pick = typeof panel.__stopPick === 'string' ? panel.__stopPick : null;   // the person's pick across a repaint
+  return { readOnly: !small && runScreen, ...(small && runScreen ? { runPage: true } : {}), ...(small ? { findings: true } : {}), ...(held ? { held } : {}), ...(pick ? { pick } : {}),
+    ...(small && info?.stop?.refused ? { refused: info.stop.refused } : {}) };   // slice 3 (D11): why a held answer was not sent
+}
+
+/** A stop's held state as read from its slice info (and, slice 3, a refused held answer's reason): '' when neither. */
+const heldSigOf = (info) => (info && info.stop && info.stop.held ? `held:${info.stop.value}`
+  : info && info.stop && info.stop.refused ? `refused:${info.stop.refused}` : '');
+
+/** The open stops of feature `featureId` (or whose slice is not known yet), each with its held state now. */
+function openStopsHeld(featureId) {
+  const out = [];
+  for (const r of runs.values()) {
+    const pq = r && r.pendingQuestion;
+    if (!pq || !pq.stop || !r.pipelineId) continue;
+    const info = SLICE_INFO.get(r.pipelineId);
+    if (info && info.featureId !== featureId) continue;
+    out.push({ r, pq, sig: heldSigOf(info) });
+  }
+  return out;
+}
+
+/** Slice 8 (d8-9): the open run page's (live, or saved detail) Resume repaint when its pipeline is a slice of feature
+ *  `featureId`, read from the cached slice info before a shape-feature frame clears it. → a function that repaints. */
+function openResumesOf(featureId) {
+  const out = [];
+  const ofFeature = (pid) => !!pid && SLICE_INFO.get(pid)?.featureId === featureId;
+  const screen = runDetailState.screen;
+  const live = screen ? runs.get(runDetailState.runId) : null;
+  if (live && ofFeature(live.pipelineId)) {
+    out.push(() => { const cur = runDetailState.screen === screen ? runs.get(runDetailState.runId) : null; if (cur) paintRdHeader(screen, cur); });
+  }
+  const h = histDetailState;
+  if (h && h.screen && h.screen.isConnected && h.record && h.data && ofFeature(h.record.id)) {
+    out.push(() => { if (histDetailState === h) paintHdLive(h.screen, h.record, h.data); });
+  }
+  return () => { for (const fn of out) { try { fn(); } catch { /* a relabel only */ } } };
+}
+
+/** Re-read each stop's slice and repaint its panels only when the held state changed (fit: a repaint must not drop
+ *  the person's pick or focus). */
+function repaintHeldStops(featureId, before) {
+  for (const { r, pq, sig } of before) {
+    sliceInfoFor(r.pipelineId, (info) => {
+      if (info.featureId !== featureId || heldSigOf(info) === sig || r.pendingQuestion !== pq) return;
+      for (const panel of qpanelsFor(r)) repaintStopPanel(r, panel);
+    });
+  }
+}
+
+/** Rebuild a stop's panel, carrying the person's pick (as the preset) and the focused tile or primary across it. */
+function repaintStopPanel(r, panel) {
+  const sel = panel.querySelector('.qopt.sel');
+  const a = document.activeElement;
+  const had = a && a !== document.body && panel.contains(a)
+    ? (a.matches?.('.qopt') ? { tile: a.dataset.value } : a.matches?.('[data-qpanel-submit]') ? { go: true } : null) : null;
+  panel.__stopPick = sel && !sel.dataset.preset ? sel.dataset.value : null;
+  try { renderQpanel(r, panel.parentElement); } finally { delete panel.__stopPick; }
+  const cur = document.activeElement;
+  if (!had || (cur && cur !== document.body && cur.isConnected)) return;
+  const target = had.tile ? [...panel.querySelectorAll('.qopt')].find((t) => t.dataset.value === had.tile) : panel.querySelector('[data-qpanel-submit]');
+  (target || panel.querySelector('[data-qpanel-submit]'))?.focus();
 }
 
 /** The outline body's deps: the plan body's posting rule (the gate read at post time, S4) and its confirm dialog. */
@@ -7048,10 +7559,12 @@ function clearQpanel(r) {
 // fields (logLines/el) while keeping the model in the map so a duplicate
 // hello/event won't recreate it fresh.
 // ---------------------------------------------------------------------------
-function finishRun(r, status) {
+function finishRun(r, status, frame) {
   if (r._finished) return;
   r._finished = true;
   r._finishedAs = status;   // onDone re-arms a run that finished as paused (it is stopped later)
+  const finishedRun = ownFinishedRun(r, status, frame, viewer);   // the run-finished message (worca-level/notices.mjs)
+  if (finishedRun) worca.queueRunFinished(finishedRun);
   scheduleOnboardingRefresh();
   r._decorSeq = (r._decorSeq || 0) + 1;   // isLive(r) reads _finished/status/pendingQuestion
   applyServerStatus(r, status);
@@ -7110,6 +7623,9 @@ function onDone(r, msg) {
   r.pauseDetail = msg.detail || null;
   r.limitEngine = msg.limitEngine || null;
   r.limitResetAt = msg.limitResetAt || null;
+  r.modelConfirm = msg.modelConfirm || null;
+  r.limitScope = msg.limitScope || null;
+  r.limitModel = msg.limitModel || null;
   // A paused run already finished once, as paused. Its stop (or a settle from elsewhere) sends a
   // terminal done on the same runId: finish it again, for real. Never on an `error` frame: onError
   // stays guarded, so a stray error after the pause cannot turn the parked run red.
@@ -7117,7 +7633,7 @@ function onDone(r, msg) {
     r._finished = false;
     alerts.onResolved(alertRun(r));   // the pause no longer waits on anyone
   }
-  finishRun(r, msg.status || 'done');
+  finishRun(r, msg.status || 'done', msg);
   // After finishRun: the alert's body is the run's list-row status line (§5a.5), which reads the paused status.
   if (msg.status === 'paused') alerts.onPaused(alertRun(r), r.pauseReason);
   // Nothing else picks up the FINAL spend delta: a non-cost `done` broadcasts no
@@ -7740,11 +8256,40 @@ function refreshMentionPopup(ta) {
   renderMentionPopup();
 }
 
+// Requirements features attached to the New run prompt (not sent until Start). Seqs only go on the wire.
+const newRunAttachStore = createAttachStore({ storage: (() => { try { return window.sessionStorage; } catch { return null; } })(), key: 'worca-cc.attach.newrun' });
+const newRunHash = new Map();   // textarea -> its `#` search
+const attachAllowed = () => flagOn('requirements') && !state.activePluginSource;
+/** The page's run target, in the shape the attach entry reads. */
+function newRunTarget() {
+  const workspaceId = (el.workspaceSelect && el.workspaceSelect.value) || '';
+  return { runTarget: state.runTarget, projectKey: selectedProjectKey(), projectPath: selectedProjectPath(), workspaceId,
+    workspacePaths: ((state.workspaces || []).find((w) => w && w.id === workspaceId) || {}).projectPaths || [] };
+}
+/** A person-initiated target change: asks before it would remove attached features. `changed` false applies at once. */
+function guardNewRunScope(apply, revert, changed = true) {
+  if (!changed) return Promise.resolve(apply());
+  return guardScopeChange({ store: newRunAttachStore, apply, revert, ask: askNewRunRemoveFeatures });
+}
+async function askNewRunRemoveFeatures() {
+  return (await confirmModal({
+    title: 'Remove attached features?', confirmLabel: 'Remove features and change', cancelLabel: 'Cancel', danger: true,
+    message: 'The attached features belong to the current project or workspace. Changing the target removes them.',
+  })) ? 'remove' : 'cancel';
+}
+function newRunHashInput(ta) {
+  const hash = newRunHash.get(ta);
+  if (!hash) return;
+  if (attachAllowed()) hash.onInput(); else hash.close();
+}
+
 function attachMentionAutocomplete(ta) {
-  ta.addEventListener('input', () => refreshMentionPopup(ta));
+  ta.addEventListener('input', () => { refreshMentionPopup(ta); newRunHashInput(ta); });
   ta.addEventListener('click', () => refreshMentionPopup(ta));
-  ta.addEventListener('blur', () => { if (mention.ta === ta) closeMentionPopup(); });
+  ta.addEventListener('blur', () => { if (mention.ta === ta) closeMentionPopup(); newRunHash.get(ta)?.close(); });
   ta.addEventListener('keydown', (e) => {
+    if (e.isComposing) return;   // an IME's Enter confirms its text; it must not attach
+    if (newRunHash.get(ta)?.handleKey(e)) return;   // an open `#` search claims Enter, Tab, arrows and Esc first
     if (mentionPopup.hidden || mention.ta !== ta) return;
     if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
       e.preventDefault();
@@ -8137,6 +8682,7 @@ async function loadProjects(selectName, { quiet = false } = {}) {
   paintNoProjectWorkDir();
   renderProjectOptions(selectName, { quiet });
   askPanel?.pageChanged?.();   // Ask worca beside the page: a project page's chip and scope name the project now
+  toolPanel?.onContextChange();   // the tool panel too: a project page has its context only once this list knows the project
   if (state.presets.length) paintPresetMenu();   // pinned presets' group labels name the projects
   // P3-D7: the automatic No project default (no stored choice, no project at boot) gives way to the first project.
   if (state.runTargetAuto && state.runTarget === 'none' && state.projects.length) setRunTarget('project', { persist: false });
@@ -8183,10 +8729,12 @@ function renderProjectOptions(selectName, { quiet = false } = {}) {
 }
 
 function onProjectChanged() {
+  projectPrev = el.projectSelect.value;
   const path = selectedProjectPath();
   paintFormWorkMode();
   showEngineRefusal(null); // the refusal and any consent were for the OLD project's context
   state.engineTouched = false;
+  state.execEnvTouched = false;
   // #527: a new project starts with no sync answer; the row stays hidden until branches-fresh.
   state.sync = freshSyncState(state.sync.gen + 1);
   syncHasRemote = null;
@@ -8746,13 +9294,26 @@ function resetSyncChoice() {
   paintBranches();
 }
 
+// The project the page last APPLIED (onProjectChanged records it). A Cancel restores this, never a value captured by
+// a focus event: code sets the select too (load, presets, add project, the `#` Tab cycle, the attach picker).
+let projectPrev = el.projectSelect.value;
+for (const ev of ['focus', 'pointerdown']) el.projectSelect.addEventListener(ev, () => { projectPrev = el.projectSelect.value; });
+/** A person's project choice: asks before it removes attached features, lifts the run target to Project inside the answer. */
+const applyNewRunProject = createProjectChange({
+  store: newRunAttachStore, getRunTarget: () => state.runTarget, setRunTarget: (t) => setRunTarget(t), getApplied: () => projectPrev,
+  setSelect: (path) => { el.projectSelect.value = path; hideAddProject(); },
+  reapply: () => reapplyPresetAfter(onProjectChanged()),
+  ask: () => askNewRunRemoveFeatures(),
+});
 el.projectSelect.addEventListener('change', () => {
   if (el.projectSelect.value === '__add__') {
     openAddProject();
     return;
   }
   hideAddProject();
-  void reapplyPresetAfter(onProjectChanged());
+  const prev = projectPrev;
+  const path = el.projectSelect.value;
+  void guardNewRunScope(() => reapplyPresetAfter(onProjectChanged()), () => { el.projectSelect.value = prev; }, path !== prev);
 });
 
 function openAddProject() {
@@ -9035,6 +9596,7 @@ function setRunTarget(target, { persist = true } = {}) {
   paintFormWorkMode();
   showEngineRefusal(null); // the refusal and any consent were for the OLD target's context
   state.engineTouched = false;
+  state.execEnvTouched = false;
   if (persist) localStorage.setItem(LAST_TARGET_KEY, t);
   // A workspace run has no project layer: its default engine is the user's (review I3).
   void loadRunDefaults(t === 'workspace' || t === 'none' ? '' : (state.projectDir || ''));
@@ -9281,11 +9843,15 @@ async function ensureWorkspaceOptions({ keepMembers = false } = {}) {
 
 if (el.targetSeg) {
   $$('#target-seg button[data-target]').forEach((btn) => {
-    btn.addEventListener('click', () => void reapplyPresetAfter(setRunTarget(btn.dataset.target)));
+    // A person's click asks before it removes attached features; Cancel leaves the segment where it was.
+    btn.addEventListener('click', () => { const prev = state.runTarget; void guardNewRunScope(() => reapplyPresetAfter(setRunTarget(btn.dataset.target)), () => {}, btn.dataset.target !== prev); });
   });
 }
 if (el.workspaceSelect) {
-  el.workspaceSelect.addEventListener('change', () => {
+  let workspacePrev = el.workspaceSelect.value;
+  for (const ev of ['focus', 'pointerdown']) el.workspaceSelect.addEventListener(ev, () => { workspacePrev = el.workspaceSelect.value; });
+  const onWorkspaceChanged = () => {
+    workspacePrev = el.workspaceSelect.value;   // the last APPLIED workspace: what a Cancel restores
     state.selectedWorkspaceId = el.workspaceSelect.value || '';
     void runPrFields().refresh();
     if (state.selectedWorkspaceId) localStorage.setItem(LAST_WORKSPACE_KEY, state.selectedWorkspaceId);
@@ -9293,7 +9859,7 @@ if (el.workspaceSelect) {
     // listener does not re-run renderWorkflowConfig, so repaint the switch here.
     state.wsHumanInLoop = true;
     if (state.runTarget === 'workspace' && state.workflowId === AUTO_WORKFLOW_ID && el.humanInLoop) el.humanInLoop.checked = presetHumanInLoop() ?? true;
-    if (state.preset && !state.preset.applying) schedulePresetCheck();   // the check answers for this target
+    if (checkedHold() && !checkedHold().applying) schedulePresetCheck();   // the check answers for this target
     renderWorkspaceMembers();
     renderWorkspaceSourceBranches();
     schedulePolicyLine();                   // team policy notes for the new target (design board 8)
@@ -9303,6 +9869,10 @@ if (el.workspaceSelect) {
     if (state.activePluginSource && state.activePluginSource.multiProfile) {
       mountPluginSourcePane(state.activePluginSource);
     }
+  };
+  el.workspaceSelect.addEventListener('change', () => {
+    const prev = workspacePrev;
+    void guardNewRunScope(() => { onWorkspaceChanged(); }, () => { el.workspaceSelect.value = prev; }, el.workspaceSelect.value !== prev);
   });
 }
 
@@ -10636,7 +11206,11 @@ async function deleteWorkspaceFromPage(id) {
     state.workspaces = state.workspaces.filter((x) => !(x && x.id === w.id));
     // FEAT-7: the server clears workspaceGuideSeen when the last workspace goes (R-po-13);
     // mirror it now, so a Create pressed before the onboarding refetch lands already sees it.
-    if (!state.workspaces.length && gs.status) gs.status = { ...gs.status, workspaceGuideSeen: false };
+    // The explainer map keeps Workspaces seen (the server's rule): only the legacy flag is cleared.
+    if (!state.workspaces.length && gs.status) {
+      const wasSeen = gs.status.workspaceGuideSeen === true || gs.status.guidesSeen?.workspaces === true;
+      gs.status = { ...gs.status, workspaceGuideSeen: false, ...(wasSeen ? { guidesSeen: { ...gs.status.guidesSeen, workspaces: true } } : {}) };
+    }
     if (state.selectedWorkspaceId === w.id) state.selectedWorkspaceId = '';
     if (localStorage.getItem(LAST_WORKSPACE_KEY) === w.id) localStorage.removeItem(LAST_WORKSPACE_KEY);
     const warnings = Array.isArray(data.warnings) ? data.warnings : [];
@@ -10667,21 +11241,15 @@ async function readWorkspaceGuideSeen() {
   if (knownWorkspaceGuideSeen() === null) await loadOnboarding();
   return knownWorkspaceGuideSeen();
 }
-async function markWorkspaceGuideSeen() {
-  if (gs.status) gs.status = { ...gs.status, workspaceGuideSeen: true };   // this tab knows at once
-  try {
-    const res = await fetch('/api/onboarding', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ workspaceGuideSeen: true }) });
-    const data = await safeJson(res);
-    if (res.ok && data && data.steps) { gs.status = data; paintOnboarding(); }
-  } catch { /* offline: this tab's copy says seen; the server is asked again on the next load */ }
-}
 function openWsGuide(mode) {
   if (wsGuide.handle) return;
-  wsGuide.handle = openWorkspaceGuide({ doc: document, mode, onClose: (how) => {
+  wsGuide.handle = openWorkspaceGuide({ doc: document, mode, tour: { label: 'Show me in the product' }, onClose: (how) => {
     wsGuide.handle = null;
+    if (how === 'tour') { startGuide('workspace').catch((err) => console.error('how-it-works: could not start the workspace guide', err)); return; }
     if (mode === 'create' && (how === 'finish' || how === 'skip') && currentView() === 'workspaces') location.hash = 'workspace-create';
   } });
-  void markWorkspaceGuideSeen();
+  void howItWorks.markSeen('workspaces');
+  howItWorks.paintMarks();
 }
 async function onCreateWorkspace() {
   if (wsGuide.handle || wsGuide.checking) return;         // a double click opens one walkthrough
@@ -11325,7 +11893,7 @@ function showClaudeSignedOut(hint, restore) {
   const link = document.createElement('a');
   link.href = '#';
   link.textContent = 'Sign in…';
-  link.addEventListener('click', (e) => { e.preventDefault(); openClaudeSetup(); });
+  link.addEventListener('click', (e) => { e.preventDefault(); openEngineSetup('claude'); });
   hint.classList.add('err');
   hint.replaceChildren("Claude Code isn't signed in. ", link);
   claudeSignedOutHints.set(hint, restore);
@@ -13481,16 +14049,17 @@ function buildReadinessMenu(key, report) {
   if (m.notJudged.length) body.append(el('div', 'rp-notjudged', `Not judged: ${m.notJudged.join(', ')}.`));
 
   body.append(sec('Repository', 'Applies to every tool'));
+  // The shared severity chip (.issue-sev), its tone from the row's .sev-* class.
   const GROUP = { blocker: 'Must fix', warn: 'Should fix', info: 'Advice' };
+  const SEV = { blocker: 'sev-critical', warn: 'sev-minor', info: 'sev-suggestion' };
   for (const sev of ['blocker', 'warn', 'info']) {
     for (const c of m.failing[sev]) {
-      const row = el('div', 'rp-chk');
-      const dot = el('span', `rp-sevdot ${sev}`);
-      dot.setAttribute('aria-label', GROUP[sev]);
+      const row = el('div', `rp-chk ${SEV[sev]}`);
+      const chip = el('span', 'issue-sev', GROUP[sev]);
       const ign = el('button', 'btn btn-sm btn-quiet rp-ign', 'Ignore');
       ign.type = 'button';
       ign.addEventListener('click', async () => { if (await setReadinessIgnore(key, c.id, true)) await refreshReadiness(key, { refresh: true }); });
-      row.append(dot, el('span', 'rp-chk-t', c.title), ign);
+      row.append(chip, el('span', 'rp-chk-t', c.title), ign);
       if (c.detail) row.append(el('span', 'rp-chk-d', c.detail));
       row.append(el('span', 'rp-chk-f', c.fix));
       body.append(row);
@@ -13498,20 +14067,20 @@ function buildReadinessMenu(key, report) {
   }
 
   const box = (lead, text) => {
-    const d = el('details', 'rp-more');
+    const d = el('details', 'rp-more disclosure');
     const s = el('summary');
-    s.append(el('span', lead), el('span', '', text), el('span', 'rp-chev'));
+    s.append(icon(document, lead, 14, `ic rp-lead is-${lead}`), el('span', '', text));
     d.append(s);
     return d;
   };
-  const passedBox = box('rp-tick', `${m.passed.length} checks pass`);
+  const passedBox = box('check', `${m.passed.length} checks pass`);
   const list = el('ul');
   for (const it of m.passed) { const li = el('li'); li.append(el('b', '', it.title), el('span', '', it.detail)); list.append(li); }
   passedBox.append(list);
   body.append(passedBox);
 
   if (m.ignored.length) {
-    const ignBox = box('rp-gdot', `${m.ignored.length} ignored for this project`);
+    const ignBox = box('none', `${m.ignored.length} ignored for this project`);
     const ul = el('ul');
     for (const it of m.ignored) {
       const li = el('li');
@@ -13888,7 +14457,7 @@ function openProjDetail(p, parsed, { instant = false } = {}) {
     if (action) openProjectGitModal(p.key, action, () => projDetail && projDetail.screen.querySelector('.pd-git'));
   });
   paintProjHeader(screen, p);
-  terminalPane?.syncOpeners();             // the cloned header's terminal button says whether the pane is open
+  toolPanel?.syncIcons();   // the cloned header's terminal opener says whether the panel is open
   initPdTabs(screen, p);
   activateProjTab(parsed.tab, parsed.sub);
 
@@ -14314,7 +14883,7 @@ function buildPdSettings(sec, key) {
   const p = projectByKey(key);
   if (!p) return;
   const host = document.createElement('div'); host.className = 'pd-settings'; sec.appendChild(host);
-  mountProjectSettings(host, { projectKey: p.key, projectDir: p.path, onTest: testModelRow });
+  mountProjectSettings(host, { projectKey: p.key, projectDir: p.path, onTest: testModelRow, confirm: (o) => confirmModal({ ...o, danger: true }) });
   const brief = document.createElement('div'); brief.className = 'pd-house-brief'; sec.appendChild(brief);
   mountHouseBrief(brief, { projectKey: p.key });
   sec.appendChild(buildPdNightCard(p));
@@ -14869,6 +15438,8 @@ let projAddAutoName = '';   // the Name the Folder path proposed: a name typed o
 let projAddAction = null;   // #693: the Folder pane's Add <root> / Open <name> action, or null
 
 function setProjAddMode(mode) {
+  mode = projectAddModeForBox(mode);         // the hardened box adds by clone only (worca-box.mjs)
+  paintProjectAddForBox(el.projectAddModal);
   const prev = projAddMode;
   // A clone already running keeps its tab (its progress line) even when git went missing meanwhile.
   projAddMode = mode === 'clone' && el.projAddClonePane && (gitOn() || cloneFollow) ? 'clone' : mode === 'folder' ? 'folder' : 'new';
@@ -15810,12 +16381,18 @@ function buildRunBody() {
     // to be Claude (a failed or stale defaults read must not let the server pick a Codex default).
     engine: state.engine !== 'claude' ? state.engine : (state.runDefaults?.engine?.value === 'claude' ? undefined : 'claude'),
     pr: runPrFields().body(),   // only a value the person changed from the setting
-    allowUnguardedEngine: state.engine !== 'claude' && el.engineAllowUnguarded && el.engineAllowUnguarded.checked ? true : undefined,
+    // Whatever the run's own engine: a step may be pinned to a harness that needs the consent (the box shows only beside
+    // an overridable refusal and is cleared per attempt).
+    allowUnguardedEngine: el.engineAllowUnguarded && el.engineAllowUnguarded.checked ? true : undefined,
     // Run tags (#718): omitted when empty, so a legacy body stays byte-identical. A slot wins its key.
     tags: (() => {
       const all = normaliseTags([...runTagInput.get(), ...runTagDims.get()]).tags;
       return all.length ? all : undefined;
     })(),
+    // Execution environment: sent only when it differs from the default this run gets (none known = local),
+    // so a default run's body stays byte-identical. A saved E2B default the run cannot take goes unsent:
+    // the server runs it locally and says why in the run log.
+    ...(state.execEnv !== runExecEnvDefault() ? { execEnv: state.execEnv } : {}),
   };
   // Run on the source branch: a flag on the wire, never a feature name (the run auto-names its hidden branch).
   if (el.sameAsSource && el.sameAsSource.checked) { body.sameAsSource = true; delete body.featureBranch; }
@@ -15894,6 +16471,8 @@ el.form.addEventListener('submit', async (e) => {
   const body = buildRunBody();
 
   const psrc = state.activePluginSource;
+  // Attached Requirements features stand in for the typed task; only their seqs go to the server.
+  const attachedItems = flagOn('requirements') && !psrc ? newRunAttachStore.get().items : [];
   if (isDefragRun) {
     // A defragment run needs no task text: synthesise the same brief and title the API wrapper
     // sends, whatever the shared source switch says (the markdown / plugin panes are skipped).
@@ -15913,11 +16492,15 @@ el.form.addEventListener('submit', async (e) => {
       profile: state.activePluginProfile || undefined,
     };
   } else if (source === 'markdown') {
-    if (!mdText) return fieldError(el.promptMarkdown, 'Provide markdown text or load a .md file.');
-    body.promptMarkdown = mdText;
+    if (!mdText && !attachedItems.length) return fieldError(el.promptMarkdown, 'Provide markdown text or load a .md file.');
+    if (mdText) body.promptMarkdown = mdText;
   } else {
-    if (!promptText) return fieldError(el.prompt, 'Provide a prompt describing the task.');
-    body.prompt = promptText;
+    if (!promptText && !attachedItems.length) return fieldError(el.prompt, 'Provide a prompt describing the task.');
+    if (promptText) body.prompt = promptText;
+  }
+  if (attachedItems.length) {
+    body.requirements = attachedItems.map((i) => ({ seq: i.seq }));
+    if (!title) body.title = suggestTitle(attachedItems);
   }
 
   // A time picked earlier (Schedule… in the split menu, Schedules › Schedule a run, Change…)
@@ -15943,7 +16526,15 @@ el.form.addEventListener('submit', async (e) => {
     body.presetId = state.preset.id;
     if (s.overlay && state.workflowId !== AUTO_WORKFLOW_ID) body.overlay = structuredClone(s.overlay);
     if (typeof s.humanInLoop === 'boolean') body.humanInLoop = s.humanInLoop;
+  } else if (state.rerun) {
+    // Rerun: the same run-only lane, with no presetId. The overlay names the earlier run's nodes, so it rides only
+    // while the form still runs that workflow (a changed workflow drops it, as a preset's does).
+    const s = state.rerun.setup;
+    if (s.overlay && state.workflowId !== AUTO_WORKFLOW_ID && (!s.workflowId || s.workflowId === state.workflowId)) body.overlay = structuredClone(s.overlay);
+    if (typeof s.humanInLoop === 'boolean') body.humanInLoop = s.humanInLoop;
   }
+  const rerunHeld = state.rerun;   // the form this Start came from: a reply may land after another Rerun opened
+  if (rerunHeld && rerunHeld.runId) body.rerunOf = rerunHeld.runId;
 
   // #555: withButton owns #start-btn from here, and reads undefined as success, so every exit
   // returns an explicit { ok }. A failed or cancelled start never shows "Started".
@@ -15991,6 +16582,28 @@ el.form.addEventListener('submit', async (e) => {
           data = await safeJson(res);
         }
       }
+      // A feature already running: ask once, resend with the person's answer.
+      if (res.status === 409 && data && data.code === 'RUN_IN_PROGRESS') {
+        const again = await confirmModal({
+          title: 'A feature is already running', confirmLabel: 'Run again', cancelLabel: 'Cancel',
+          message: data.error || 'An attached feature already has a run in progress. Start another run anyway?',
+        });
+        if (!again) {
+          startSubmitInFlight = false;
+          if (el.startMore) el.startMore.disabled = false;
+          notify({ tone: 'warn', title: 'Start cancelled' });
+          return { ok: false, cancelled: true };
+        }
+        lastSentBody = { ...lastSentBody, confirmAttachedRunning: true };
+        res = await fetch('/api/run', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(lastSentBody) });
+        data = await safeJson(res);
+      }
+      // An attached feature was archived, removed or moved out of scope: the server says which.
+      if (res.status === 409 && data && data.code === 'REQUIREMENTS_UNAVAILABLE') {
+        startSubmitInFlight = false;
+        if (el.startMore) el.startMore.disabled = false;
+        return notStarted(data.error || 'An attached feature is no longer available.');
+      }
       // #527: the base diverged (or could not be fetched) — ask once, resend with the choice.
       if (!res.ok && data && (data.code === 'sync-diverged' || data.code === 'sync-fetch-failed')) {
         const choice = await chooseSyncRefusal(data);
@@ -16010,12 +16623,12 @@ el.form.addEventListener('submit', async (e) => {
       if (!res.ok && data && data.code === 'engine-refused') {
         startSubmitInFlight = false;
         showEngineRefusal(data);
-        return notStarted(data.overridable ? 'Tick Allow unguarded to run anyway, or pick Claude.' : (data.error || 'The engine cannot run this.'));
+        return notStarted(data.overridable ? (state.engine !== 'claude' ? 'Tick Allow unguarded to run anyway, or pick Claude.' : 'Tick Allow unguarded to run anyway.') : (data.error || 'The engine cannot run this.'));
       }
       // Signed out with nothing else to run on: the sign-in steps, not a paused run.
       if (res.status === 409 && data && data.code === 'claude-signed-out') {
         startSubmitInFlight = false;
-        openClaudeSetup();
+        openEngineSetup('claude');
         return notStarted(data.error);
       }
       // A preset whose references are gone (#712): the broken card names each one, Start waits for them.
@@ -16036,7 +16649,12 @@ el.form.addEventListener('submit', async (e) => {
       if (!res.ok || !data.runId) {
         startSubmitInFlight = false;
         // The alert title already says "Run not started" / "Not scheduled".
-        return notStarted(data.error || `The server answered ${res.status}.`);
+        if (data.error === 'rerun-source-not-found' && rerunHeld && state.rerun === rerunHeld) {
+          // The earlier run is gone: keep everything the form holds, drop only the link, so the next Start is a plain new run.
+          rerunHeld.runId = null;
+          return notStarted('The run this was copied from is gone. Press Start again to start it as a new run.');
+        }
+        return notStarted(((data.error === 'rerun-source-not-found' || data.error === 'run-not-ended') && data.message) || data.error || `The server answered ${res.status}.`);
       }
       // 202: nothing is running — the request is a ticket now. Show it where it lives.
       if (data.status === 'scheduled') {
@@ -16047,6 +16665,8 @@ el.form.addEventListener('submit', async (e) => {
         resetSyncChoice();
         showEngineRefusal(null);
         clearTask(submittedTask);
+        clearRerun();
+        if (attachedItems.length) newRunAttachStore.clear();   // the server accepted the run: the features it took are spent
         applyPresetSwitches();   // clearTask unchecks Run on the source branch (#688); a preset keeps its own
         // Keep the warn tone when the server attached a budget warning. The Schedules page already
         // shows the ticket, so the toast needs no Open action.
@@ -16065,6 +16685,8 @@ el.form.addEventListener('submit', async (e) => {
       resetSyncChoice();
       showEngineRefusal(null);
       clearTask(submittedTask);
+      clearRerun();
+      if (attachedItems.length) newRunAttachStore.clear();   // the server accepted the run: the features it took are spent
       applyPresetSwitches();
       // D6: the user is on the run's page now, so the result is a toast, not a #form-msg line.
       // The run's page is the confirmation (audit F-24): no toast when it is already open.
@@ -16483,6 +17105,9 @@ async function loadSettings() {
     paintScreensaver(data.screensaver);
     levelCtl.confirm(data.uiLevel);
     paintAbout(data.app);
+    setWorcaBox(data.box);
+    void loadSecurityStatus(document.getElementById('securityStatusBody'));   // Settings › General › Security
+    void loadSecretVaultCard(document, { confirm: confirmModal });   // Settings › General › Secret vault
     if (el.aboutUpdateCheck) el.aboutUpdateCheck.checked = data.updateCheck !== false;
     void refreshVersionStatus();
     paintBudgetSettings(data);
@@ -16491,14 +17116,17 @@ async function loadSettings() {
     paintTagDimsSettings(data);
     paintNightSettings(data);
     paintSyncSettings(data);
+    paintChatRunsSettings(data);
     paintNetworkWaitSettings(data);
     paintRunLimitsSettings(data);
     paintSmartNamingSettings(data);
     paintMemoryModelLink(data);
     paintActionsSettings(data);
+    paintE2bSettings(data);
     paintDebugSpawnSettings(data);
     paintKeepAwakeRow(data.keepAwake !== false);
     paintPrSettings(data);
+    paintChatLinksSettings(data);
     syncRunEngine(data);
     await paintWorkspaceScanModelsSettings(data);
     paintBudgetReadout();
@@ -17393,6 +18021,32 @@ document.getElementById('syncDefaultsReset')?.addEventListener('click', (e) => p
   { sync: null }, { button: e.currentTarget, gate: false, busy: 'Resetting…', done: 'Reset' }));
 settingsCardDirty('syncDefaultsSave');
 
+// Settings › Runs › Chat runs: source branch — which branch a chat run card starts from when the chat names none.
+// The card's words all come from the shared module (the HTML shell is empty), so the card, the chat and the server agree.
+function paintChatRunsSettings(data) {
+  const card = document.getElementById('chat-runs-settings-card');
+  const sel = document.getElementById('chatRunsSourceBranch');
+  if (!card || !sel) return;
+  card.querySelector('h2').textContent = CHAT_SOURCE_BRANCH_SETTING;
+  card.querySelector(`label[for="chatRunsSourceBranch"]`).textContent = CHAT_SOURCE_BRANCH_ROW;
+  const tip = document.getElementById('chatRunsInfo');
+  tip.setAttribute('aria-label', `About ${CHAT_SOURCE_BRANCH_SETTING}`);
+  tip.querySelector('.tip-content').textContent = CHAT_SOURCE_BRANCH_INFO;
+  if (sel.options.length !== CHAT_SOURCE_BRANCH_MODES.length) {
+    sel.replaceChildren(...CHAT_SOURCE_BRANCH_MODES.map((m) => {
+      const opt = document.createElement('option');
+      opt.value = m; opt.textContent = CHAT_SOURCE_BRANCH_LABELS[m];
+      return opt;
+    }));
+  }
+  sel.value = normalizeChatSourceBranch(data && data.chat && data.chat.sourceBranch);
+  settingsCardPainted('chatRunsSave');
+}
+document.getElementById('chatRunsSave')?.addEventListener('click', (e) => postSettingsCard(
+  { chat: { sourceBranch: document.getElementById('chatRunsSourceBranch').value } },
+  { card: document.getElementById('chat-runs-settings-card'), paint: paintChatRunsSettings, dirty: settingsCardDirty('chatRunsSave'), button: e.currentTarget }));
+settingsCardDirty('chatRunsSave');
+
 // Settings › Runs › Wait for the network (network-wait.mjs).
 function paintNetworkWaitSettings(data) {
   const d = data && data.networkWait;
@@ -17795,6 +18449,27 @@ document.getElementById('prSettingsSave')?.addEventListener('click', (e) => post
   { autoGeneratePrDescription: !!document.getElementById('prAutoDescribe')?.checked },
   { card: document.getElementById('pr-settings-card'), paint: paintPrSettings, dirty: settingsCardDirty('prSettingsSave'), button: e.currentTarget }));
 settingsCardDirty('prSettingsSave');
+// A Switch (button.switch, role switch): on or off at once, so the card has no Save. A refused save repaints the
+// stored value.
+function paintChatLinksSettings(data) {
+  setChatLinksPref(!(data && data.chatLinksInPanel === false));
+  const host = document.getElementById('chatLinksInPanelHost');
+  if (!host) return;
+  // The stored choice, not chatLinksOn(): the card shows only while the Tool panel flag is on.
+  const { row, input } = makeSwitch(document, { ariaLabel: 'Open chat links in the panel', checked: chatLinksPref !== false,
+    data: { setting: 'chatLinksInPanel' } });
+  input.id = 'chatLinksInPanel';
+  input.setAttribute('aria-labelledby', 'chatLinksInPanelLabel');
+  host.replaceChildren(row);
+}
+document.getElementById('chatLinksInPanelHost')?.addEventListener('change', async (e) => {
+  const sw = e.target.closest?.('#chatLinksInPanel');
+  if (!sw || sw.disabled) return;
+  sw.disabled = true;
+  const r = await postSettingsCard({ chatLinksInPanel: sw.checked }, { card: document.getElementById('chat-links-card'), paint: paintChatLinksSettings });
+  if (!r || !r.ok) paintChatLinksSettings({ chatLinksInPanel: chatLinksPref !== false });
+  else sw.disabled = false;
+});
 
 // ---- Model pickers outside the Models page: the project-less catalog every model picker reads, the Claude-only
 // list builder the workspace scan picker uses, and a row's Test (Settings › Chat, Project settings, Models › Jobs).
@@ -18617,7 +19292,8 @@ function createMemoryController({ host, msgEl, scopeKey, hostProject = null, nav
     if (name) {
       const f = await memoryApi('GET', `${base}/files/${encodeURIComponent(name)}`);
       if (my !== seq) return;
-      if (f.ok) { st.selected = name; st.editor = { name, text: f.data.text, loaded: f.data.text }; }
+      // `held`: a sandbox run wrote it (memory-store isHeldSource); Save approves it.
+      if (f.ok) { st.selected = name; st.editor = { name, text: f.data.text, loaded: f.data.text, held: !!st.report.files?.find((x) => x.name === name)?.held }; }
       else say(f.data.error || `memory file "${name}" not found`, 'err-inline');
     }
     paint();
@@ -18641,9 +19317,9 @@ function createMemoryController({ host, msgEl, scopeKey, hostProject = null, nav
     });
     if (r.skipped) return;
     if (!r.ok) { cardAlert(ed, { title: 'Not saved', detail: r.error }); return; }
-    st.flash = [`Memory saved: ${name}.md`, 'ok'];
+    st.flash = [`Memory ${st.editor?.held ? 'approved' : 'saved'}: ${name}.md`, 'ok'];
     st.selected = name; st.isNew = false;
-    st.editor = { ...st.editor, name, text, loaded: text, msg: '', msgErr: false };
+    st.editor = { ...st.editor, name, text, loaded: text, msg: '', msgErr: false, held: false };
     // Route only when the hash would actually change: an unchanged hash fires no hashchange, so the
     // repaint would never happen.
     if (navigate && location.hash.slice(1) !== memoryRoute(scopeKey, name)) route(name);
@@ -19074,6 +19750,36 @@ async function refreshActionsModel(runId, scopeQuery) {
   return r;
 }
 /**
+ * The Diff tab's open controls read the run's Actions model (diff-open-editor.mjs). From the cache, else one read; a
+ * cached live model is read again once the page says the run finished. A failed read is null: no control shows.
+ */
+async function diffEditorModel(runId, scopeQuery, { finishedNow = false } = {}) {
+  const cached = actionsModelCache.get(runId);
+  if (cached && !(cached.finished === false && finishedNow)) return cached;
+  const r = await actionsCall('GET', actionsRunUrl(runId, '/actions', scopeQuery));
+  if (!r.ok) return null;
+  actionsModelCache.set(runId, r.data);
+  return r.data;
+}
+/**
+ * Open the run (or one file at a line) in the Editor built-in. A finished run that is not checked out is checked
+ * out first (mode 'checkout'), or linked to the folder that holds its branch (mode 'use-folder'). → { ok, error? }
+ */
+async function openInEditor(runId, scopeQuery, { member, workspace = false, file, line, mode }) {
+  const failed = (r) => ({ ok: false, error: r.data?.error || `Request failed (${r.status})` });
+  if (mode === 'checkout' || mode === 'use-folder') {
+    const co = await actionsCall('POST', actionsRunUrl(runId, '/checkout', scopeQuery),
+      mode === 'use-folder' ? { members: [member], useExisting: true } : { members: [member] });
+    if (!co.ok) return failed(co);
+    await refreshActionsModel(runId, scopeQuery);
+  }
+  const body = {};
+  if (workspace && member) body.member = member;            // a single-project run needs none
+  if (file) { body.file = file; if (line) body.line = line; }
+  const r = await actionsCall('POST', actionsRunUrl(runId, '/open-in-editor', scopeQuery), body);
+  return r.ok ? { ok: true } : failed(r);
+}
+/**
  * actions-changed: a stop from the sidebar or the pill, or a crash, changes runs whose tab may never have
  * opened. Refetch every mounted strip's model; a run with a live controller repaints through its onModel.
  * Cached models of unmounted runs are dropped, so a revisit fetches instead of painting a stale state.
@@ -19160,10 +19866,13 @@ function destroyActionsIn(root) {
 }
 
 // ---- running actions: sidebar card, header pill, tab dots, History badges ----
+/** Called after every refresh of state.actionsRunning: the tool panel's Browser tabs and its + page (issue 1064). */
+const runningActionsListeners = new Set();
 async function refreshRunningActions() {
   const r = await actionsCall('GET', '/api/actions/running');
   if (r.ok && Array.isArray(r.data)) state.actionsRunning = r.data;
   paintRunningActions();
+  for (const fn of runningActionsListeners) { try { fn(); } catch (e) { console.warn('running actions listener:', e); } }
 }
 const runningServicesOf = (runId) => (state.actionsRunning || []).filter((s) => s.runId === runId && s.kind === 'service');
 async function stopActionInstance(s) {
@@ -19180,7 +19889,8 @@ function paintRunningActions() {
   if (side) {
     const services = running.filter((s) => s.kind === 'service');
     const opts = { doc: document, titleOf: (s) => s.runTitle || s.runId, onStop: stopActionInstance,
-      onOpen: (s) => { sideActionsFlyout?.close(); openActionRun(s); } };
+      onOpen: (s) => { sideActionsFlyout?.close(); openActionRun(s); },
+      onBrowse: (s) => { sideActionsFlyout?.close(); openServiceInBrowser(s); } };
     // The column's rows and the rail flyout's copy (its buttons are menu items). A repaint under a
     // focused row (a Stop just pressed, in the column or in the open flyout) keeps focus in that list:
     // the same control of the same row while its service still runs, else the same control of the
@@ -19190,7 +19900,8 @@ function paintRunningActions() {
     const focusHost = [colHost, flyHost].find((host) => host && host.contains(document.activeElement)) || null;
     const focused = focusHost ? document.activeElement : null;
     const focusedId = focused?.closest('.act-srow')?.dataset.instanceId;
-    const focusedPart = focused?.classList.contains('act-stop') ? '.act-stop' : '.act-srow-name';
+    const focusedPart = focused?.classList.contains('act-stop') ? '.act-stop'
+      : focused?.classList.contains('act-srow-open') ? '.act-srow-open' : '.act-srow-name';
     const tileFocused = !!sideActionsTile && document.activeElement === sideActionsTile;   // the rail tile goes with the last row
     const rows = renderRunningActionRows(services, opts);
     const flyRows = renderRunningActionRows(services, { ...opts, menu: true });
@@ -19209,14 +19920,14 @@ function paintRunningActions() {
     if ((focused && !focused.isConnected) || (tileFocused && !rows)) {
       const host = rows && (focusHost === colHost || sideActionsFlyout?.isOpen()) ? focusHost : null;
       const row = host && [...host.querySelectorAll('.act-srow')].find((r) => r.dataset.instanceId === focusedId);
-      // The same control of the same row, else that row's other button (its name is plain text once its
-      // run loses its saved row), else the same control of the first row.
-      const next = host && (row?.querySelector(`button${focusedPart}`) || row?.querySelector('button')
+      // The same control of the same row, else that row's Stop (its name is plain text once its run loses its
+      // saved row; never its globe, issue 1064), else the same control of the first row.
+      const next = host && (row?.querySelector(`button${focusedPart}`) || row?.querySelector('button.act-stop')
         || host.querySelector(`button${focusedPart}`) || host.querySelector('button'));
       // Else the open page's row, or the first control that takes focus here: a control that is
-      // not shown ignores focus() (the collapse toggle on a tablet or a phone), and New run in the
-      // top bar shows at every level and every width.
-      for (const el of [next, $('.nav > button.active'), $('#side-toggle'), $('#topnav-new')]) {
+      // not shown ignores focus() (the collapse toggle on a tablet or a phone); Activity in the top bar shows at every
+      // level and every width.
+      for (const el of [next, $('.nav > button.active'), $('#side-toggle'), $('#topnav-activity')]) {
         el?.focus();
         if (el && document.activeElement === el) break;
       }
@@ -19389,6 +20100,7 @@ async function buildWdActions(sec, id) {
 
 // ---- Settings › Runs › Actions ----
 function paintActionsSettings(data) {
+  setPreviewPortGate(data);
   const a = (data && data.actions) || {};
   const set = (id, v) => { const n = document.getElementById(id); if (n) n.value = v ?? ''; };
   set('act-keep', a.keep || 'never');
@@ -19397,6 +20109,15 @@ function paintActionsSettings(data) {
   set('act-editor', a.editor);
   set('act-terminal', a.terminal);
   set('act-max', a.maxCheckouts);
+  // Preview ports (Browser tab): the effective mode comes from actionsGate — a hosted Worca locks it to the range.
+  const gate = (data && data.actionsGate) || {};
+  const pp = document.getElementById('act-preview-ports');
+  if (pp) {
+    pp.value = gate.previewPortsLocked ? 'range' : (a.previewPorts === 'range' ? 'range' : 'all');
+    pp.disabled = !!gate.previewPortsLocked;
+  }
+  const ppNote = document.getElementById('act-preview-ports-note');
+  if (ppNote) ppNote.textContent = gate.previewPortsLocked ? 'This hosted Worca previews only the Actions range and running Actions.' : '';
   actionsDetected = (data && data.actionsDetected) || {};
   // A save answers with actionsWarnings (a program Worca cannot find): amber on that field until it changes.
   for (const key of ['editor', 'terminal']) {
@@ -19543,6 +20264,8 @@ function readActionsSettingsForm() {
   const num = (id) => (val(id) === '' ? null : Number(val(id)));   // blank -> null clears the key
   const form = { keep: val('act-keep') || 'never', portLow: num('act-port-low'), portHigh: num('act-port-high'),
     editor: val('act-editor'), terminal: val('act-terminal'), maxCheckouts: num('act-max') };
+  const pp = document.getElementById('act-preview-ports');
+  if (pp && !pp.disabled) form.previewPorts = pp.value === 'range' ? 'range' : 'all';
   if (form.portLow != null && form.portHigh != null && form.portLow > form.portHigh) {
     fieldError([document.getElementById('act-port-low'), document.getElementById('act-port-high')], 'The low port can’t be higher than the high port.');
     return null;
@@ -19555,9 +20278,30 @@ document.getElementById('act-save')?.addEventListener('click', (e) => {
   if (actions) saveActionsSettings(actions, { button: e.currentTarget });
 });
 document.getElementById('act-reset')?.addEventListener('click', (e) => saveActionsSettings(
-  { keep: null, portLow: null, portHigh: null, editor: null, terminal: null, maxCheckouts: null },
+  { keep: null, portLow: null, portHigh: null, editor: null, terminal: null, maxCheckouts: null, previewPorts: null },
   { button: e.currentTarget, gate: false, busy: 'Resetting…', done: 'Reset' }));
 settingsCardDirty('act-save');
+
+// Settings › Runs › Execution environment (exec-env-settings-card.mjs). No team layer: null clears each key.
+const execEnvCard = () => document.getElementById('e2b-settings-card');
+function paintE2bSettings(data) {
+  // Not .value: a saved backend missing from the static options would read as '' and be saved back as a clear.
+  setExecEnvSelectValue(document.getElementById('e2b-exec-env'), data?.execEnv);
+  paintExecEnvCardValues(execEnvCard(), data);
+  paintExecEnvCardSelection();
+  settingsCardPainted('e2b-settings-save');
+}
+function paintExecEnvCardSelection() {
+  const v = document.getElementById('e2b-exec-env')?.value || 'local';
+  paintExecEnvCardBackend(execEnvCard(), v, { label: execEnvLabel(v) });
+  paintExecEnvStatus();
+}
+document.getElementById('e2b-settings-save')?.addEventListener('click', (e) => {
+  postSettingsCard(readExecEnvCard(execEnvCard()),
+    { card: execEnvCard(), button: e.currentTarget, paint: paintE2bSettings, dirty: settingsCardDirty('e2b-settings-save') });
+});
+settingsCardDirty('e2b-settings-save');
+document.getElementById('e2b-exec-env')?.addEventListener('change', (e) => { e.target.dataset.want = e.target.value; paintExecEnvCardSelection(); });
 
 const scriptsApi = {
   async list() {
@@ -20221,7 +20965,7 @@ function jobsData() {
   }
   return {
     settings: j.settings || {}, steps: j.config?.steps || [], catalog: j.config?.catalog || [], engines: j.engines, locks: addEngineLocks(),
-    flags: { requirements: flagOn('requirements'), design: flagOn('design'), smartRunNaming: flagOn('smartRunNaming'), commandSummaries: flagOn('commandSummaries') },
+    flags: { requirements: flagOn('requirements'), design: flagOn('design'), smartRunNaming: flagOn('smartRunNaming'), commandSummaries: flagOn('commandSummaries'), shaperSmallRuns: flagOn('shaperSmallRuns') },
     testable,
   };
 }
@@ -20324,7 +21068,7 @@ function openJobPicker(anchor) {
   const row = jobsRow(vm, id);
   if (!row) return;
   openModelPicker({ doc: document, win: window, anchor, catalog: data.catalog, engine: vm.engine, value: row.value, clearLabel: row.clearLabel,
-    modelOnly: !!row.modelOnly, allowEffortOnly: !!row.allowEffortOnly,
+    decideLabel: row.decideLabel || '', modelOnly: !!row.modelOnly, allowEffortOnly: !!row.allowEffortOnly,
     onPick: (value) => { mvState.jobs.draft[id] = value; renderJobsTab(); } });
 }
 
@@ -20377,6 +21121,7 @@ async function saveJobs(btn) {
   syncRunEngine(j.settings);
   reportStatus(el.modelsJobsMsg, 'form-msg', 'Saved.', 'ok');
   renderJobsTab();
+  refreshGuideLine();   // the composer's Guide tooltip names the model just picked
 }
 
 /** The tab's clicks (one delegate on #jobs-root): the harness tiles, Default for new runs, the role tiles and row
@@ -20544,6 +21289,7 @@ function renderProvidersViewBody() {
   el.providersList.replaceChildren(renderProvidersTab(mvState.providers, { signIn: mvState.signIn, open: mvState.pvOpen, counts }));
   stampProviderFields(el.providersList);
   restoreProviderEdits(el.providersList, edits);
+  syncCopilotHostField(el.providersList);   // a restored Account choice shows or hides the GHE.com host
   providersDrawnKey = providersKey(counts);
   // OpenRouter's free-model allowance, read afresh each time the card is drawn.
   refreshFreeDaily({ force: true });
@@ -20615,7 +21361,7 @@ async function copilotSignInFlow() {
     const res = await fetch('/api/providers/copilot/login', { method: 'POST' });
     const flow = await safeJson(res);
     if (!res.ok) return setProviderMsg('copilot', flow.error || `HTTP ${res.status}`, true, 'Sign-in did not start');
-    mvState.signIn = { ...flow, status: 'Waiting for approval on github.com…' };
+    mvState.signIn = { ...flow, status: `Waiting for approval on ${flow.host || 'github.com'}…` };
     repaintProviders();
     const poll = async () => {
       if (!mvState.signIn || mvState.signIn.deviceCode !== flow.deviceCode) return;
@@ -20637,7 +21383,7 @@ async function copilotSignInFlow() {
           return;
         }
         const status = providerRoot()?.querySelector('.mv-cp-status');
-        if (status) status.textContent = 'Waiting for approval on github.com…';
+        if (status) status.textContent = `Waiting for approval on ${flow.host || 'github.com'}…`;
         copilotPollTimer = setTimeout(poll, Math.max(3, Number(j.interval) || flow.interval || 5) * 1000);
       } catch (e) {
         copilotPollTimer = setTimeout(poll, 8000);
@@ -20669,6 +21415,7 @@ async function copilotSignOutFlow() {
 // `onError(message)`, when given, shows a refused Save in the row's own place instead of the card's alert.
 async function patchProviderFlow(name, body, { btn = null, onError = null } = {}) {
   setProviderMsg(name, '');
+  const wasConnected = name === 'copilot' && !!(mvState.providers && mvState.providers.copilot && mvState.providers.copilot.connected);
   const r = await withButton(btn, async () => {
     const res = await fetch(`/api/providers/${encodeURIComponent(name)}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
     const data = await safeJson(res);
@@ -20683,11 +21430,15 @@ async function patchProviderFlow(name, body, { btn = null, onError = null } = {}
     await refreshModelsEverywhere();
     return { ok: true };
   }, { done: 'Saved' });
-  if (r.skipped) return;
+  if (r.skipped) return false;
   if (!r.ok) {
     if (onError) onError(r.error);
     else setProviderMsg(name, r.error, true, 'Not saved');
-    return;
+    return false;
+  }
+  // A change of the GitHub host signs the Copilot account out (a token belongs to one host): say so.
+  if (wasConnected && !(mvState.providers.copilot && mvState.providers.copilot.connected)) {
+    setProviderMsg('copilot', `Signed out: sign in again on ${copilotHostLabel(mvState.providers.copilot)}.`);
   }
   // The repaint replaced the clicked button: give its successor the "Saved" state.
   if (btn && !btn.isConnected) {
@@ -20695,6 +21446,43 @@ async function patchProviderFlow(name, body, { btn = null, onError = null } = {}
     const next = providerRoot()?.querySelector(`.mv-pv-row[data-provider="${name}"] .${cls}`);
     if (next) await withButton(next, () => undefined, { done: 'Saved' });
   }
+  return true;
+}
+
+const COPILOT_ACCOUNT_LABELS = { individual: 'Individual', business: 'Business', enterprise: 'Enterprise', 'ghe-com': 'GHE.com tenant' };
+
+/** Where the Copilot sign-in lives, for messages: githubHost is null for a GHE.com tenant setting without a usable host. */
+function copilotHostLabel(c) {
+  return (c && c.githubHost) || (c && c.accountType === 'ghe-com' ? 'your GHE.com tenant' : 'github.com');
+}
+
+/** Ask before a Copilot change that moves the GitHub host while signed in (the sign-in belongs to the old host). */
+function confirmCopilotHostSwitch(c, toLabel) {
+  return confirmModal({
+    title: `Switch to ${toLabel}?`,
+    message: `Switch to ${toLabel}? This signs you out of GitHub Copilot${c.login ? ` (@${c.login})` : ''}, because the sign-in belongs to ${copilotHostLabel(c)}.`,
+    confirmLabel: 'Switch and sign out', danger: true,
+  });
+}
+
+/** The Copilot row's Save: the account, the GHE.com host (with a GHE.com account) and the cap go together. A change that
+ *  moves the GitHub host while signed in asks first: the server signs the account out (a sign-in belongs to one host). */
+async function copilotSaveFlow(btn) {
+  const body = collectProviderRow(providerRoot(), 'copilot');
+  if (!body) return;
+  const c = (mvState.providers && mvState.providers.copilot) || {};
+  // The server's normalization (normalizeGheHost), so an unchanged host typed with https:// or a trailing / asks nothing.
+  const toHost = body.accountType === 'ghe-com'
+    ? String(body.enterpriseHost || '').toLowerCase().replace(/^https:\/\//, '').replace(/\/$/, '')
+    : 'github.com';
+  // Where the sign-in lives now: githubHost, else github.com for the non-GHE.com types. Null (a GHE.com setting
+  // without a usable host) never equals the new host: the save moves the sign-in.
+  const fromHost = c.githubHost || (c.accountType === 'ghe-com' ? null : 'github.com');
+  if (c.connected && toHost !== fromHost) {
+    const label = body.accountType === 'ghe-com' ? (toHost || 'the new host') : (COPILOT_ACCOUNT_LABELS[body.accountType] || body.accountType);
+    if (!(await confirmCopilotHostSwitch(c, label))) return;
+  }
+  await patchProviderFlow('copilot', body, { btn });
 }
 
 /** "Remove speech models": frees the built-in engines' downloads; the next mic use fetches them again. */
@@ -20884,7 +21672,10 @@ function openAddModelDialog({ step = 1, where = 'signin', provider = 'copilot', 
   if (!el.modelEditorModal || !el.modelEditorHost) return;
   mvState.editing = null;
   mvState.prefill = null;
-  const dlg = beginModelDialog({ where: step === 2 ? 'provider' : where, provider, engine: engine || 'claude' }, { baseUrl });
+  // An engine's own list (OpenCode) opens straight at step 2 keeping its sign-in; the provider-based lists stand on
+  // the provider card, whose select names them.
+  const w = step === 2 && engine !== 'opencode' ? 'provider' : where;
+  const dlg = beginModelDialog({ where: w, provider, engine: engine || 'claude' }, { baseUrl });
   void loadAddEngines(dlg);
   if (step === 2) showAddList();
   else showAddStep1();
@@ -20972,7 +21763,9 @@ function addStep1Next(card) {
   // ticks, filter and answers go.
   if (pick.provider !== dlg.list.provider) { dlg.list = freshAddList(pick.provider); dlg.seq = ++modelDlgSeq; }
   dlg.add = pick;
-  if (pick.where === 'provider') showAddList();
+  // An engine that lists its own models (OpenCode's sign-in) goes to that list like a provider does; a custom
+  // endpoint and every other sign-in take the form.
+  if (pick.where === 'provider' || (pick.where === 'signin' && pick.engine === 'opencode')) showAddList();
   else showAddForm({ where: pick.where, engine: pick.engine, from: 'step1' });
 }
 
@@ -21078,24 +21871,26 @@ function showAddList() {
   if (!dlg) return;
   dlg.screen = 'list';
   const provider = dlg.add.provider;
-  const card = renderAddStep2({ provider, baseUrl: dlg.list.baseUrl }, { doc: document, providers: mvState.providers });
+  const card = renderAddStep2({ provider, engine: dlg.add.engine, baseUrl: dlg.list.baseUrl }, { doc: document, providers: mvState.providers });
   const filter = card.querySelector('.mimp-filter');
   if (filter) filter.value = dlg.list.filter;
   const key = card.querySelector('.mimp-key');
   if (key) key.value = dlg.list.apiKey;
-  const plan = addStep2Plan(provider, mvState.providers, { baseUrl: dlg.list.baseUrl });
+  const plan = addStep2Plan(provider, mvState.providers, { baseUrl: dlg.list.baseUrl, engine: dlg.add.engine });
   if (plan.kind !== 'list') paintAddBlocked(card, plan);
   showModelScreen(card, { ...addScreenParts(card), focus: provider === 'openai' ? '.mimp-base' : '.mimp-filter' });
   if (plan.kind !== 'list') return;
   if (dlg.list.payload) mountAddSheet(card, dlg.list.payload);
-  else if (plan.source === 'copilot' || plan.auto) void listAddModels();
+  else if (plan.source === 'copilot' || plan.auto || plan.source === 'opencode') void listAddModels();
 }
 
 /** Draw a listed payload into step 2: the sheet without its own title, note, buttons and message (the screen has them),
  *  the kept ticks back on, the filter applied, the foot counted. */
-function mountAddSheet(card, { endpoint, data }) {
+function mountAddSheet(card, { endpoint, source, data }) {
   const dlg = mvState.dlg;
-  const sheet = endpoint ? renderEndpointSheet(data, { doc: document }) : renderImportSheet(data.models || [], { doc: document });
+  const sheet = endpoint ? renderEndpointSheet(data, { doc: document })
+    : source === 'opencode' ? renderOpencodeSheet(data.models || [], { doc: document })
+      : renderImportSheet(data.models || [], { doc: document });
   sheet.querySelector(':scope > h3.mv-editor-title')?.remove();
   sheet.querySelector(':scope > small.hint:not(.mvi-warn)')?.remove();
   sheet.querySelector(':scope > .mv-editor-btns')?.remove();
@@ -21119,9 +21914,11 @@ async function listAddModels() {
   // The screen's address and key are kept for a redraw; the pair this request asks with travels with its answer
   // (payload) and only that pair is ever imported with, so a key typed for another address never reaches this one.
   if (typed) keepAddList(card);
-  const plan = addStep2Plan(dlg.add.provider, mvState.providers, { baseUrl: dlg.list.baseUrl });
+  const plan = addStep2Plan(dlg.add.provider, mvState.providers, { baseUrl: dlg.list.baseUrl, engine: dlg.add.engine });
   if (plan.kind !== 'list') return;
-  const endpoint = plan.source === 'endpoint';
+  const source = plan.source;
+  const endpoint = source === 'endpoint';
+  const opencode = source === 'opencode';
   if (endpoint && !plan.baseUrl) {
     setAddListMsg(card, 'Give the endpoint a base URL, e.g. http://127.0.0.1:11434/v1', 'err');
     card.querySelector('.mimp-base')?.focus();
@@ -21134,15 +21931,16 @@ async function listAddModels() {
   if (listBtn) listBtn.disabled = true;
   const go = card.querySelector('.mimp-go');
   if (go) go.disabled = true;
-  setAddListMsg(card, endpoint ? 'Asking the endpoint what it serves…' : 'Loading Copilot models…');
+  setAddListMsg(card, endpoint ? 'Asking the endpoint what it serves…' : opencode ? 'Loading OpenCode models…' : 'Loading Copilot models…');
   try {
-    const url = endpoint ? `/api/providers/openai/models?baseUrl=${encodeURIComponent(plan.baseUrl)}` : '/api/providers/copilot/models';
+    const url = endpoint ? `/api/providers/openai/models?baseUrl=${encodeURIComponent(plan.baseUrl)}`
+      : opencode ? '/api/providers/opencode/models' : '/api/providers/copilot/models';
     // The endpoint's own key rides a header, never the URL (server logs, history).
     const res = await fetch(url, endpoint && apiKey ? { headers: { 'X-Worca-Endpoint-Key': apiKey } } : {});
     const data = await safeJson(res);
     if (!addLive(seq, 'list', card)) return;
     if (!res.ok) { setAddListMsg(card, data.error || `HTTP ${res.status}`, 'err'); return; }
-    dlg.list.payload = { endpoint, data, baseUrl: endpoint ? plan.baseUrl : '', apiKey };
+    dlg.list.payload = { endpoint, source, data, baseUrl: endpoint ? plan.baseUrl : '', apiKey };
     dlg.list.ticked = new Set();
     dlg.list.filter = '';
     const filter = card.querySelector('.mimp-filter');
@@ -21181,13 +21979,17 @@ function changeAddProvider(sel) {
   showAddList();
 }
 
-/** "Enter an id instead": the provider form with the list's provider; its Back returns to the list with its ticks. */
+/** "Enter an id instead": the provider form with the list's provider; its Back returns to the list with its ticks.
+ *  The OpenCode list's "Enter an id instead" keeps the engine: a sign-in's form, not a provider's. */
 function addManualForm() {
   const dlg = mvState.dlg;
   const card = addListCard();
   if (!dlg || !card) return;
   keepAddList(card);
-  showAddForm({ where: 'provider', provider: dlg.add.provider, from: 'list' });
+  const plan = addStep2Plan(dlg.add.provider, mvState.providers, { baseUrl: dlg.list.baseUrl, engine: dlg.add.engine });
+  showAddForm(plan.source === 'opencode'
+    ? { where: 'signin', engine: dlg.add.engine, from: 'list' }
+    : { where: 'provider', provider: dlg.add.provider, from: 'list' });
 }
 
 /** Back: from the form to where it was reached from (its typed work counts on the way out), from the list to step 1. */
@@ -21244,7 +22046,9 @@ async function importAddModelsFlow() {
   if (!dlg || !sheet) return;
   const ids = collectImportSheet(sheet);
   if (!ids.length) { setAddListMsg(card, 'Pick at least one model.', 'err'); return; }
-  const endpoint = sheet.dataset.source === 'endpoint';
+  const src = sheet.dataset.source || 'copilot';
+  const endpoint = src === 'endpoint';
+  const opencode = src === 'opencode';
   // The key the shown list was asked with (its payload), never what the key field holds now: a re-list that was
   // refused, or a key typed before Back, belongs to another address.
   const apiKey = endpoint ? dlg.list.payload?.apiKey || '' : '';
@@ -21253,7 +22057,9 @@ async function importAddModelsFlow() {
   try {
     const res = endpoint
       ? await fetch('/api/providers/openai/import-models', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ids, baseUrl: sheet.dataset.baseurl || '', ...(apiKey ? { apiKey } : {}) }) })
-      : await fetch('/api/providers/copilot/import-models', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ids }) });
+      : opencode
+        ? await fetch('/api/providers/opencode/import-models', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ids }) })
+        : await fetch('/api/providers/copilot/import-models', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ids }) });
     const data = await safeJson(res);
     // The answer belongs to the open that asked: a screen opened meanwhile (the page's Add model, by keyboard) is left as
     // it is, and a refusal that screen cannot show is a toast.
@@ -21276,10 +22082,12 @@ async function importAddModelsFlow() {
     // Land ON what was imported: the list filters to the new ids until the filter is cleared.
     const fresh = [...(data.created || []), ...(data.updated || [])];
     if (fresh.length) mvState.justImported = fresh;
-    mvState.cat.fold = { ...mvState.cat.fold, claude: false };
+    // Unfold the harness the import landed on (OpenCode's own group for an OpenCode import, Claude Code's for the
+    // provider-based lists) so what was added is in view.
+    mvState.cat.fold = { ...mvState.cat.fold, [opencode ? 'opencode' : 'claude']: false };
     if (currentModelsTab() !== 'catalogue') showView('models');
     await refreshModelsEverywhere();
-    setModelsMsg(`Imported from ${endpoint ? (data.serverLabel || 'the endpoint') : 'Copilot'}: ${parts.join(', ') || 'nothing changed'}.${why.length ? ` ${why.join('; ')}` : ''}`, 'ok');
+    setModelsMsg(`Imported from ${endpoint ? (data.serverLabel || 'the endpoint') : opencode ? 'OpenCode' : 'Copilot'}: ${parts.join(', ') || 'nothing changed'}.${why.length ? ` ${why.join('; ')}` : ''}`, 'ok');
   } catch (e) {
     if (mvState.dlg === dlg) setAddListMsg(card, e.message, 'err');
     else notify({ tone: 'err', title: 'Not imported', detail: e.message });
@@ -21527,7 +22335,8 @@ if (el.providersList) {
     else if (t.classList.contains('mv-pv-save') && t.dataset.provider === 'openrouter') {
       const body = collectOpenRouterRow(t.closest('.mv-or-row'));
       if (body) patchProviderFlow('openrouter', body, { btn: t });
-    } else if (t.classList.contains('mv-pv-save')) {
+    } else if (t.classList.contains('mv-pv-save') && t.dataset.provider === 'copilot') copilotSaveFlow(t);
+    else if (t.classList.contains('mv-pv-save')) {
       const body = collectProviderRow(providerRoot(), t.dataset.provider);
       if (body) patchProviderFlow(t.dataset.provider, body, { btn: t });
     } else if (t.classList.contains('mv-pv-test')) testProviderFlow(t);
@@ -21557,7 +22366,8 @@ if (el.providersList) {
   el.providersList.addEventListener('change', (ev) => {
     const t = ev.target;
     if (!t || !t.classList) return;
-    if (t.classList.contains('mv-im-service')) applyImagesPreset(providerRoot(), t.value);
+    if (t.classList.contains('mv-cp-account')) syncCopilotHostField(providerRoot());
+    else if (t.classList.contains('mv-im-service')) applyImagesPreset(providerRoot(), t.value);
   });
 }
 
@@ -22297,7 +23107,7 @@ async function confirmCostOverride(runId, btn) {
 }
 
 /** POST /api/resume's body: every option a resume carries, resent as-is after each question. */
-function resumeBody(pipelineId, { ignoreCostCap = false, pastTeamCap = false, policyReason = null, baseAck = false, engine = null, allowUnguardedEngine = false, model = null } = {}) {
+function resumeBody(pipelineId, { ignoreCostCap = false, pastTeamCap = false, policyReason = null, baseAck = false, engine = null, allowUnguardedEngine = false, model = null, confirmModel = null } = {}) {
   return {
     pipelineId, baseCheck: true,
     ...(baseAck ? { baseAck: true } : {}),
@@ -22306,6 +23116,7 @@ function resumeBody(pipelineId, { ignoreCostCap = false, pastTeamCap = false, po
     ...(engine ? { engine } : {}),
     ...(allowUnguardedEngine ? { allowUnguardedEngine: true } : {}),
     ...(model ? { model } : {}),
+    ...(confirmModel ? { confirmModel } : {}),   // #1450 "Continue on <model>"
   };
 }
 
@@ -22325,6 +23136,7 @@ async function resumeRunFromCard(runId, btn, opts = {}) {
   const prevLines = Array.isArray(r.logLines) ? r.logLines.slice() : [];
   const prevBtnHtml = btn ? btn.innerHTML : '';
   if (btn) { btn.disabled = true; btn.textContent = ' Resuming…'; }
+  const shaper = shaperPress(pipelineId);
   showResumePending(pipelineId, true);
   try {
     const res = await fetch('/api/resume', {
@@ -22376,7 +23188,22 @@ async function resumeRunFromCard(runId, btn, opts = {}) {
         settleFinishedParkedCopy(r, finishedAs, { navigate });
         return;
       }
-      throw new Error((data && data.error) || `HTTP ${res.status}`);
+      // Slice 16 (D5): a Shaper refusal says why in its own words.
+      const why = shaperResumeNote(shaper, data, res.status);
+      throw new Error(why ? why.detail : (data && data.error) || `HTTP ${res.status}`);
+    }
+    // Shaper small runs slice 7 (D16): the resume is held for its turn; nothing started, so the paused copy stays.
+    if (data && data.held === true) {
+      showResumePending(pipelineId, false);
+      if (btn) { btn.disabled = false; btn.innerHTML = prevBtnHtml; }
+      // Slice 8 (d8-14): once held, the row and the run head say `after run N`; the Resume reads plain Resume.
+      const heldLbl = btn && btn.querySelector('.rd-btn-label');
+      if (heldLbl) heldLbl.textContent = resumeLabel(null);
+      // Slice 16 (D5, D10): say that it goes on later, and why; its menu says so at once (the hold's frame cleared the info).
+      const note = shaperResumeNote(shaper, data, res.status);
+      if (note) notify({ tone: note.tone, title: note.title, detail: note.detail, key: `resume-${runId}` });
+      if (shaper && btn) paintResumeMenuTurn(btn.closest('.btn-split')?.querySelector('.btn-split-menu') || null, data.after);
+      return;
     }
     upsertRun({
       runId: data.runId,
@@ -23140,9 +23967,9 @@ async function paintMcpjsonHint() {
   const link = Object.assign(document.createElement('a'), { href: `#projects/${encodeURIComponent(key)}/mcp`, textContent: `Approve ${names.length === 1 ? 'it' : 'them'} on the project’s Sets tab` });
   el.engineMcpjsonHint.replaceChildren(`${names.length === 1 ? '1 server' : `${names.length} servers`} from the repository’s .mcp.json won’t start (${names.join(', ')}). `, link);
 }
-/** The models the run will pick: the Agents accordion's selects, else the legacy per-role config. */
+/** The models the run will pick: the Agents accordion's model triggers, else the legacy per-role config. */
 function selectedRunModels() {
-  const picked = [...document.querySelectorAll('#agents-rows select.step-model')].map((s) => s.value).filter((v) => v && v !== '__add__');
+  const picked = [...document.querySelectorAll('#agents-rows .step-model')].map((s) => s.value).filter(Boolean);
   const models = picked.length ? picked
     : Object.values((state.config && state.config.steps) || {}).map((s) => s && s.model).filter((m) => typeof m === 'string' && m);
   return [...new Set(models)];
@@ -23295,15 +24122,31 @@ function paintResumeEngineItems(menu, runEngine, pause) {
   if (!menu) return;
   const saved = runEngine || 'claude';
   const offers = usageLimitSwitches(pause || {});
-  const sig = `${saved}|${offers.join(',')}|${pause?.reason || ''}`;
+  const confirm = pause?.reason === 'model_confirm' && pause.modelConfirm?.model ? pause.modelConfirm.model : '';
+  // A run whose steps use several harnesses: Resume keeps each on its own; an offer moves every step.
+  const mixed = !!pause?.mixed;
+  const sig = `${saved}|${offers.join(',')}|${pause?.reason || ''}|${confirm}|${pause?.limitScope || ''}|${mixed ? 'mixed' : ''}`;
   if (menu.dataset.engineSig === sig) return;
   menu.dataset.engineSig = sig;
-  // Any usage limit — the sign-in's or a provider's: a model on another connection has its own allowance.
+  // Any usage limit — the sign-in's or a provider's: a model on another connection has its own allowance. A
+  // model_confirm pause (#1450) switches too: "Switch model and continue…".
   const withModel = menu.querySelector('.resume-with-model');
-  if (withModel) withModel.hidden = pause?.reason !== 'usage_limit';
+  if (withModel) withModel.hidden = pause?.reason !== 'usage_limit' && pause?.reason !== 'model_confirm';
+  // A model-scoped limit (a "Fable limit"): another model on the same sign-in still runs, so switching leads.
+  if (withModel && pause?.reason === 'usage_limit' && pause.limitScope === 'model' && menu.firstElementChild !== withModel) menu.prepend(withModel);
+  // "Continue on <model>": confirms the premium model the run paused on (POST /api/resume confirmModel).
+  const confirmItem = menu.querySelector('.resume-confirm-model');
+  if (confirmItem) {
+    confirmItem.hidden = !confirm;
+    if (confirm) { confirmItem.dataset.model = confirm; confirmItem.querySelector('b').textContent = `Continue on ${modelById(confirm)?.label || confirm}`; }
+    else delete confirmItem.dataset.model;
+  }
   menu.dataset.limitEngine = pause?.limitEngine || '';   // read by the item's click (pickResumeModel)
+  menu.dataset.pauseReason = pause?.reason || '';
+  menu.dataset.limitScope = pause?.limitScope || '';
+  menu.dataset.limitModel = pause?.limitModel || '';
   const savedItem = menu.querySelector('.resume-on-saved');
-  if (savedItem) savedItem.querySelector('b').textContent = `Resume on ${engineLabel(saved)}`;
+  if (savedItem) savedItem.querySelector('b').textContent = mixed ? 'Resume' : `Resume on ${engineLabel(saved)}`;
   const tpl = menu.querySelector('.resume-on-other[data-template]') || menu.querySelector('.resume-on-other');
   if (!tpl) return;
   tpl.dataset.template = '1'; tpl.hidden = true;
@@ -23312,27 +24155,45 @@ function paintResumeEngineItems(menu, runEngine, pause) {
     const item = tpl.cloneNode(true);
     delete item.dataset.template; item.hidden = false; item.dataset.engine = e;
     item.querySelector('b').textContent = `Resume on ${engineLabel(e)}`;
-    item.querySelector('small').textContent = engineSwitchNote(e);
+    item.querySelector('small').textContent = engineSwitchNote(e, { mixed });
     tpl.before(item);
   }
 }
 
-/** "Resume with another model…" (a usage limit): the model every remaining step runs on, picked from the ones the
- *  run's harness can run on another connection (src/shared/connections.mjs), grouped by provider. null = cancelled. */
+/** The model family a usage limit can be scoped to ("You've hit your Fable limit"), from an id; '' for none. */
+const modelFamilyOf = (id) => (/(fable|opus|sonnet|haiku)/i.exec(String(id || ''))?.[1] || '').toLowerCase();
+/** A Resume menu's pause, as its items read it at click time (paintResumeEngineItems wrote the dataset). */
+const menuPause = (menu) => ({ reason: menu.dataset.pauseReason || 'usage_limit', limitEngine: menu.dataset.limitEngine || null,
+  limitScope: menu.dataset.limitScope || null, limitModel: menu.dataset.limitModel || null });
+
+/** "Switch model and continue…" (a usage limit, or a model_confirm pause): the model every remaining step runs on.
+ *  A usage limit offers the models the run's harness can run on another connection (src/shared/connections.mjs),
+ *  grouped by provider — or, when the limit is one model family's (limitScope 'model'), the other families on the same
+ *  sign-in too, non-premium first. A model_confirm pause offers every runnable non-premium model. null = cancelled. */
 async function pickResumeModel(engine, pause) {
   let rows = [];
-  try { rows = (await safeJson(await fetch('/api/config'))).models || []; } catch { rows = []; }
+  let premium = new Set();
+  try { const data = await safeJson(await fetch('/api/config')); rows = data.models || []; premium = new Set(data.premiumModels || []); } catch { rows = []; }
   // A sign-in's limit is spent for every model on that sign-in; a provider's names itself in the pause detail.
   const spent = pause && pause.limitEngine ? `signin:${pause.limitEngine}` : null;
-  const offered = rows.filter((m) => m && runsOn(m, engine) && !m.needsSignIn && !m.hidden && m.custom !== 'project' && connectionKey(m) !== spent);
+  const runnable = (m) => m && runsOn(m, engine) && !m.needsSignIn && !m.hidden && m.custom !== 'project';
+  const family = pause?.limitScope === 'model' ? modelFamilyOf(pause.limitModel) : '';
+  let offered;
+  if (pause?.reason === 'model_confirm') offered = rows.filter((m) => runnable(m) && !premium.has(m.id));
+  else if (family) {
+    offered = rows.filter((m) => runnable(m) && modelFamilyOf(m.id) !== family);
+    offered = [...offered.filter((m) => !premium.has(m.id)), ...offered.filter((m) => premium.has(m.id))];
+  } else offered = rows.filter((m) => runnable(m) && connectionKey(m) !== spent);
   if (!offered.length) {
     await confirmModal({ title: 'No other model to resume with', message: `No model ${engineLabel(engine)} can run is set up on another connection. Add one on the Models page.`, confirmLabel: 'OK', cancelLabel: 'Close' });
     return null;
   }
   const options = modelGroups(offered, { engine }).flatMap((g) => g.models.map((m) => ({ value: m.id, text: modelOptionText(m), group: g.label })));
   const v = await promptModal({
-    title: 'Resume with another model',
-    message: 'Every remaining step of this run runs on the model you pick. A model on another provider has its own allowance.',
+    title: 'Switch model and continue',
+    message: pause?.reason === 'model_confirm' ? 'Every remaining step of this run runs on the model you pick.'
+      : family ? `Your ${family[0].toUpperCase()}${family.slice(1)} limit is spent; other models on the same sign-in still run. Every remaining step runs on the model you pick.`
+        : 'Every remaining step of this run runs on the model you pick. A model on another provider has its own allowance.',
     confirmLabel: 'Resume',
     fields: [{ id: 'model', label: 'Model', options, value: options[0].value, required: true }],
   });
@@ -23340,9 +24201,9 @@ async function pickResumeModel(engine, pause) {
 }
 
 /** Before a paused run moves to another engine: what that does. true = go. */
-async function confirmEngineSwitch(engine) {
+async function confirmEngineSwitch(engine, { mixed = false } = {}) {
   const name = engineLabel(engine);
-  return !!(await confirmModal({ title: `Resume on ${name}?`, message: engineSwitchNote(engine), confirmLabel: `Resume on ${name}`, cancelLabel: 'Cancel' }));
+  return !!(await confirmModal({ title: `Resume on ${name}?`, message: engineSwitchNote(engine, { mixed }), confirmLabel: `Resume on ${name}`, cancelLabel: 'Cancel' }));
 }
 
 /** A resume the engine gate refused (409 engine-refused). */
@@ -23350,7 +24211,8 @@ const isEngineRefusal = (data, status) => status === 409 && !!data && data.code 
 /** Show the gate's reason; when the consent lifts it, offer it. true = resend with allowUnguardedEngine. */
 async function engineRefusalRetry(data, status, engine) {
   if (!isEngineRefusal(data, status)) return false;
-  const name = engineLabel(data.engine || engine);
+  // The harness the refusal is about (a step pinned to another one included), else the run's.
+  const name = engineLabel(data.engines?.[0] || data.engine || engine);
   const res = await confirmModal({
     title: `Not resumed on ${name}`,
     message: data.error || 'The engine refused this run.',
@@ -23362,20 +24224,22 @@ async function engineRefusalRetry(data, status, engine) {
   return !!(data.overridable && res && res.ok && res.checked);
 }
 
-/** Resume a live paused run on `engine`: its own engine is the plain Resume, another asks first. */
-async function resumeRunOnEngine(runId, btn, engine) {
+/** Resume a live paused run on `engine`: its own engine is the plain Resume, another asks first. On a run whose steps
+ *  use several harnesses an offer (`offer`) of its own engine is a switch too: every step moves there. */
+async function resumeRunOnEngine(runId, btn, engine, { offer = false } = {}) {
   const r = runs.get(runId);
   if (!r || !engine) return;
-  if (engine === (r.runEngine || 'claude')) return resumeRunFromCard(runId, btn);
-  if (!(await confirmEngineSwitch(engine))) return;
+  const mixed = Array.isArray(r.runEngines);
+  if (engine === (r.runEngine || 'claude') && !(offer && mixed)) return resumeRunFromCard(runId, btn);
+  if (!(await confirmEngineSwitch(engine, { mixed }))) return;
   return resumeRunFromCard(runId, btn, { engine });
 }
 
 /** The saved run's resume on `engine` (History detail), as resumeRunOnEngine. */
-async function resumePipelineOnEngine(p, runEngine, btn, engine) {
+async function resumePipelineOnEngine(p, runEngine, btn, engine, { offer = false, mixed = false } = {}) {
   if (!engine) return;
-  if (engine === (runEngine || 'claude')) return resumePipeline(p, p.projectDir || null, btn);
-  if (!(await confirmEngineSwitch(engine))) return;
+  if (engine === (runEngine || 'claude') && !(offer && mixed)) return resumePipeline(p, p.projectDir || null, btn);
+  if (!(await confirmEngineSwitch(engine, { mixed }))) return;
   return resumePipeline(p, p.projectDir || null, btn, { engine });
 }
 
@@ -24838,12 +25702,30 @@ async function histCostOverride(projectDir, id, record, btn) {
 
 // Paint the post-PR mergeability pill. MERGEABLE -> green, CONFLICTING -> red,
 // UNKNOWN -> amber "checking…" (GitHub computes mergeability asynchronously).
-function setMergePill(el, mergeable) {
+// `owner` (mergePillOwner) names the run (and member) the value belongs to: a paint for anything else clears it.
+function setMergePill(el, mergeable, owner) {
   const m = String(mergeable || 'UNKNOWN').toUpperCase();
+  el.dataset.mergeFor = owner;
   el.hidden = false;
   if (m === 'MERGEABLE') { el.className = 'hist-merge ok'; el.textContent = 'can merge'; }
   else if (m === 'CONFLICTING') { el.className = 'hist-merge bad'; el.textContent = 'conflicts'; }
   else { el.className = 'hist-merge unknown'; el.textContent = 'merge: checking…'; }
+}
+
+const mergePillOwner = (record, memberKey = null) => `${record.projectKey}/${record.id}${memberKey ? `#${memberKey}` : ''}`;
+function clearMergePill(el) {
+  el.hidden = true;
+  el.className = 'hist-merge';
+  el.textContent = '';
+  delete el.dataset.mergeFor;
+}
+/** The header pill only ever shows what the open run's OPEN PR was told (a ship, its re-check). Every PR paint
+ *  clears it for another run's value and for a merged or closed PR, which is final: nothing is left to merge. */
+function paintHdMergePill(screen, record) {
+  const el = screen.querySelector('.hd-row1 .hist-merge');
+  if (!el) return;
+  if (el.dataset.mergeFor === mergePillOwner(record) && prStateOf(record.pr) === 'OPEN') return;
+  clearMergePill(el);
 }
 
 // GitHub computes PR mergeability asynchronously, so a freshly-opened PR comes back
@@ -24857,9 +25739,12 @@ function prMergeRecheckMs() {
   return Number.isFinite(o) && o >= 0 ? o : PR_MERGE_RECHECK_MS;
 }
 
-function scheduleMergeRecheck(mergeEl, body) {
+function scheduleMergeRecheck(mergeEl, body, owner) {
+  // A Refresh rebuilt the card, or the pill now belongs to another run / the PR was merged or closed (a paint
+  // cleared its owner): the stale answer is dropped.
+  const owned = () => !!mergeEl && mergeEl.isConnected && mergeEl.dataset.mergeFor === owner;
   const t = setTimeout(async () => {
-    if (!mergeEl || !mergeEl.isConnected) return;   // a Refresh rebuilt the card — stale timer no-ops
+    if (!owned()) return;
     let mergeable = 'UNKNOWN';
     try {
       const res = await fetch('/api/pr/mergeable', {
@@ -24868,10 +25753,10 @@ function scheduleMergeRecheck(mergeEl, body) {
       const data = await safeJson(res);               // safeJson -> {} on non-JSON, never null
       if (res.ok && data) mergeable = data.mergeable;
     } catch { /* network error -> treat as still unknown -> hide below */ }
-    if (!mergeEl.isConnected) return;                 // a Refresh during the await -> no-op
+    if (!owned()) return;                             // the detail moved on during the await -> no-op
     const m = String(mergeable || 'UNKNOWN').toUpperCase();
-    if (m === 'MERGEABLE' || m === 'CONFLICTING') setMergePill(mergeEl, m);
-    else mergeEl.hidden = true;                        // still checking -> drop the stuck pill
+    if (m === 'MERGEABLE' || m === 'CONFLICTING') setMergePill(mergeEl, m, owner);
+    else clearMergePill(mergeEl);                      // still checking -> drop the stuck pill
   }, prMergeRecheckMs());
   // Node test runner: the timer keeps the loop alive; unref it where supported.
   // Real browser setTimeout returns a number (no .unref) -> the guard makes this a no-op.
@@ -25233,13 +26118,13 @@ function hdGoDetails(tab = '') {
 // setRdMode, for the History screen). `tab` opens that tab when the level shows it.
 function setHdMode(screen, mode, tab = '', { focus = true } = {}) {
   if (!screen) return;
-  const details = mode === 'details';
-  const changed = screen.dataset.mode !== (details ? 'details' : 'glance');
-  screen.dataset.mode = details ? 'details' : 'glance';
-  screen.querySelector('.hd-glance').hidden = details;
-  screen.querySelector('.hd-details').hidden = !details;
-  screen.querySelector('.hd-back').hidden = details;
-  screen.querySelector('.hd-to-run').hidden = !details;
+  // One level, as on the live page: Details with the run card as its Overview tab.
+  if (mode !== 'details' && !tab) tab = 'overview';
+  const details = true;
+  const changed = screen.dataset.mode !== 'details';
+  screen.dataset.mode = 'details';
+  screen.querySelector('.hd-details').hidden = false;
+  screen.querySelector('.hd-back').hidden = false;
   if (details) {
     const tabs = detailTabsOf(screen);
     if (tabs && tab && tabs.cells.has(tab) && levelAtLeast(tabs.cells.get(tab).tab.level || 'simple') && (gitOn() || !tabs.cells.get(tab).tab.needsGit)) tabs.activate(tab);
@@ -25249,8 +26134,7 @@ function setHdMode(screen, mode, tab = '', { focus = true } = {}) {
   if (changed && focus) {
     // Side by side the glance's way back to the list is hidden (the list is in view), so
     // coming back from Details lands on the glance's title (tabindex="-1") instead.
-    const target = details ? screen.querySelector('.hd-to-run')
-      : runsLayout() === 'split' ? screen.querySelector('.hd-glance .rd-page-title') : screen.querySelector('.hd-back');
+    const target = runsLayout() === 'split' ? screen.querySelector('.hd-title') : screen.querySelector('.hd-back');
     if (target && !target.hidden) target.focus({ preventScroll: true });
   }
 }
@@ -25326,16 +26210,16 @@ function openHistDetail(parsed, { instant = false, host: where = 'page' } = {}) 
   host.appendChild(screen);
   histDetailState.screen = screen;
   // The panel has no glance, so there is no page title to watch.
-  if (panel) presentRunScreenInPanel(screen); else watchPageTitle(screen, 'hd');
+  if (panel) presentRunScreenInPanel(screen); else { barIntoHeader(screen); watchPageTitle(screen, 'hd'); }
+  toolPanel?.syncIcons();                   // the bar's tool icons (issue 1064)
 
   screen.querySelector('.hd-back').addEventListener('click', () => backToRunsList());   // slice 2: the list itself, never the D6 restore
   // Glance <-> Details are routes, so the browser's back and forward walk them.
   const toDetails = (tab = '') => { hdGoDetails(tab); };
-  const toRun = () => { if (histDetailState && histDetailState.host !== 'panel') location.hash = hdHash(histDetailState); };
-  screen.querySelector('.hd-to-run').addEventListener('click', toRun);
   // Run 3 (D13): the saved bar is the primary action, Run after, Stop and ⋯; ⋯ drives the controls CSS hides there.
   screen.querySelector('.hd-bar-more')?.addEventListener('click', (e) => {
-    toggleMenu({ doc: document, anchor: e.currentTarget, items: runMoreItems(screen), align: 'end', label: 'More for this run' });
+    const extra = histDetailState ? wfvTests.runMenuItems(histDetailState.record, histDetailState.data) : [];   // G6: Use as test example
+    toggleMenu({ doc: document, anchor: e.currentTarget, items: runMoreItems(screen, { extra }), align: 'end', label: 'More for this run' });
   });
   screen.querySelector('.hd-glance .rd-sheet').addEventListener('click', (e) => {
     const row = e.target.closest && e.target.closest('[data-rd-tab]');
@@ -26097,11 +26981,11 @@ function openShipItModal(record, data, { link = null, onClose = null } = {}) {
         void paintHdSavePreset(screen, histDetailState.data);
         const mergeEl = screen.querySelector('.hist-merge');
         if (mergeEl) {
-          setMergePill(mergeEl, dd.mergeable);
+          setMergePill(mergeEl, dd.mergeable, mergePillOwner(record));
           // GitHub computes mergeability asynchronously; re-check once so the
           // "checking…" pill never sticks.
           if (String(dd.mergeable || 'UNKNOWN').toUpperCase() === 'UNKNOWN') {
-            scheduleMergeRecheck(mergeEl, { projectDir: record.projectDir || null, projectKey: record.projectKey, id: record.id });
+            scheduleMergeRecheck(mergeEl, { projectDir: record.projectDir || null, projectKey: record.projectKey, id: record.id }, mergePillOwner(record));
           }
         }
       }
@@ -26383,9 +27267,10 @@ function paintWsMergePills(record, rows) {
     if (!r.mergeable) continue;
     const pill = screen.querySelector(`.hd-pr-repo[data-member-key="${cssEscape(r.member.memberKey)}"] .hist-merge`);
     if (!pill) continue;
-    setMergePill(pill, r.mergeable);
+    const owner = mergePillOwner(record, r.member.memberKey);
+    setMergePill(pill, r.mergeable, owner);
     if (String(r.mergeable).toUpperCase() === 'UNKNOWN') {
-      scheduleMergeRecheck(pill, { projectDir: record.projectDir || null, projectKey: record.projectKey, id: record.id, memberKey: r.member.memberKey });
+      scheduleMergeRecheck(pill, { projectDir: record.projectDir || null, projectKey: record.projectKey, id: record.id, memberKey: r.member.memberKey }, owner);
     }
   }
 }
@@ -26544,9 +27429,18 @@ async function openFeatureShip(featureId, { opener = null, card = null } = {}) {
   const f = await safeJson(res);
   if (!res.ok || !f || !Array.isArray(f.slices) || !f.slices.length) throw new Error((f && f.error) || `HTTP ${res.status}`);
   const base = await groupShipBase(f.slices[f.slices.length - 1].pipelineId, f.projectKey);
+  // Small runs slice 4: along the real branches, the dialog counts the runs Ship lists (a carried run gets no PR).
+  const sr = f.ship && f.ship.smallRuns;
+  const listed = sr && sr.along && Array.isArray(sr.order)
+    ? sr.order.map((o) => f.slices.find((s) => s.index === o.index)).filter(Boolean) : f.slices;
   openShipItGroupModal({ kind: 'feature', id: f.id, title: f.title, projectKey: f.projectKey, base,
-    members: f.slices.map((s) => ({ position: s.index, pr: s.pr || null })), suggested: f.ship && f.ship.suggested,
-    hint: shipReason(f.ship && f.ship.suggested, f.ship && f.ship.linesAdded), release: (f.ship && f.ship.hint) || null },
+    members: listed.map((s) => ({ position: s.index, pr: s.pr || null })), suggested: f.ship && f.ship.suggested, smallRuns: !!(f.ship && f.ship.smallRuns),
+    // Small runs: every run, carried ones included, so a carried run's own PR turns One off too; One is offered only with
+    // the flag on (the server refuses it otherwise).
+    all: f.slices.map((s) => ({ position: s.index, pr: s.pr || null })), oneOk: flagOn('shaperSmallRuns'),
+    carried: (sr && sr.carried) || [],               // slice 5 (D11): the carried runs' lines, named while Stacked is picked
+    // Feature D1: stacked stays a small-runs feature's pick, so the size hint (which may suggest One) is left out.
+    hint: f.ship && f.ship.smallRuns ? '' : shipReason(f.ship && f.ship.suggested, f.ship && f.ship.linesAdded), release: (f.ship && f.ship.hint) || null },
     { opener, refocus: card ? shipCardRefocus(f.id, card) : focusGroupHead });
 }
 const shipMemberOf = (mb) => { const pr = mb.model && mb.model.pr;
@@ -26919,7 +27813,6 @@ function hdSyncPr(projectKey, id, row) {
   if (row) { histDetailState.record = row; askPanel?.pageChanged?.(); }   // a deep link's minimal record upgrades to the real row
   paintHdPr(histDetailState.screen, histDetailState.record, histDetailState.data);
   paintHdHeaderMeta(histDetailState.screen, histDetailState.record, histDetailState.data);
-  paintHdOvPrs(histDetailState.screen.querySelector('.hd-ov-prs'), histDetailState.record);
   paintHdBase(histDetailState.screen, histDetailState.record, histDetailState.data);   // an open PR owns the pipeline Resolve
   paintHdAfter(histDetailState.screen, histDetailState.record, histDetailState.data);
   void paintHdSavePreset(histDetailState.screen, histDetailState.data);
@@ -26935,7 +27828,7 @@ function hdSyncPr(projectKey, id, row) {
 function paintHdGlance(screen, record, data) {
   const glance = screen && screen.querySelector('.hd-glance');
   if (!glance || !data || !data.state) return;
-  void loadHdAwayAnswers(screen, record && record.id, data.state.steps);   // `st` is declared below (TDZ)
+  void loadHdAwayAnswers(screen, record && record.id);
   const st = data.state;
   const run = { status: st.status, steps: st.steps, stepper: st.stepper, pendingQuestion: null, active: st.active };
   const meta = histStatusMeta({ status: st.status });
@@ -26966,26 +27859,24 @@ function paintHdGlance(screen, record, data) {
   paintGroupLine(glance.querySelector('.rd-kv .rd-group-line'), record.id || '', record.title || '', home);
   paintRunPlace(screen, home);
   paintRunLabels(glance.querySelector('.rd-kv [data-fact="labels"] > .rd-kv-v'), { pipelineId: data.state.id, labels: data.state.labels, onSaved: (l) => { data.state.labels = l; } });
-  void paintRunPrAuto(glance.querySelector('.rd-kv [data-fact="pr-auto"]'), data.state.id, st.status, () => !!histDetailState && histDetailState.data === data);
+  const hdExempt = knownPrExempt(data.state.id);
+  void paintRunPrAuto(glance.querySelector('.rd-kv [data-fact="pr-auto"]'), data.state.id, st.status, () => !!histDetailState && histDetailState.data === data)
+    .then(() => { if (!hdExempt && knownPrExempt(data.state.id) && histDetailState && histDetailState.data === data) paintHdHead(screen, hdCurrentRecord(record), data); });   // C5: the route reads it
+  paintRerunOf(glance.querySelector('.rd-kv [data-fact="rerun"]'), st.rerunOf);
+  paintRerunCarrier(screen.querySelector('.hd-rerun'), { id: st.id, title: record.title || st.title, status: record.status || st.status, live: runLiveHere(st.id) });
   syncFacts(glance.querySelector('.rd-kv'));
 
   // Time · Cost · Changes, then the Cost tags row, as on the Running page in every state.
   paintHdFacts(screen, record, data);
 
-  // The result: every tab, the actions. The things to check live in Overview only.
+  // The local copy's way out; the tabs are the tab bar's.
   const host = glance.querySelector('.hd-result');
   const keptRow = host.querySelector('.rd-srow-checkout');
   const keptFocus = keptRow && keptRow.contains(document.activeElement) ? document.activeElement : null;
-  host.replaceChildren();
-  const trail = trailColumns(run);
+  host.replaceChildren(rdCheckoutGroup());
   const co = hdCheckoutFor(record);
   const held = hdRetainedFor(record, st);
   const canTry = hdCanTry(record, st, held.retained, held.provisional);
-  host.append(...rdActivityGroups(screen, {
-    overview: activityOverviewValue(results),
-    workflow: trail.count ? `${trail.count} step${trail.count === 1 ? '' : 's'}` : '',
-    actions: checkoutRowValue(co, { when: shortWhen, canTry }),
-  }));
   paintActionsRowValue(screen, co, canTry, () => hdCurrentRecord(record), keptRow);
   if (keptFocus && keptFocus.isConnected) keptFocus.focus();   // detaching the row dropped its focus
 
@@ -27024,6 +27915,33 @@ async function paintHdSavePreset(screen, data) {
   const run = data && data.state;
   return paintRunSavePreset(screen && screen.querySelector('.hd-save-preset'), run,
     () => !!histDetailState && histDetailState.data === data);
+}
+
+/** ⋯ › Rerun's hidden carrier (the menu item copies its gate): offered with a saved record, enabled once the run has
+ *  ended and is not live. `hint` is the visible reason on the item; `title` its tooltip. */
+function paintRerunCarrier(btn, run) {
+  if (!btn) return;
+  const g = rerunGate({ status: String(run.status || '').toLowerCase(), live: !!run.live, hasRecord: !!run.id });
+  btn.hidden = !g.offered;
+  btn.disabled = g.disabled;
+  btn.title = g.reason;
+  btn.dataset.hint = g.hint;
+  btn.onclick = g.offered && !g.disabled ? () => void rerunRun(run.id, run.title || '') : null;
+}
+/** A run of this pipeline is live in this page: the Rerun gate refuses it even when its saved status reads ended. */
+const runLiveHere = (pipelineId) => [...runs.values()].some((x) => x.pipelineId === pipelineId && !RD_TERMINAL.includes(x.status));
+
+/** The "Rerun of …" fact row: a link to the run this one was copied from, plain text once that run is gone. Text only. */
+function paintRerunOf(row, rerunOf) {
+  const dd = row && row.querySelector('.rd-kv-v');
+  if (!dd) return;
+  const m = rerunLinkModel(rerunOf);
+  const sig = m ? `${m.href || ''}|${m.text}` : '';
+  if (dd.dataset.sig === sig) return;
+  dd.dataset.sig = sig;
+  if (!m) { dd.replaceChildren(); return; }
+  if (!m.href) { dd.textContent = m.text; return; }
+  dd.replaceChildren(Object.assign(document.createElement('a'), { href: m.href, textContent: m.text }));
 }
 
 async function saveRunPresetDialog(run, btn) {
@@ -27132,16 +28050,27 @@ function gateHdResume(btn, { reason, detail }) {
 function hdPauseOf(live, screen, data, record) {
   const st = data?.state || {};
   return live
-    ? { reason: live.pauseReason, limitEngine: live.limitEngine, limitResetAt: live.limitResetAt }
+    ? { reason: live.pauseReason, limitEngine: live.limitEngine, limitResetAt: live.limitResetAt,
+      modelConfirm: live.modelConfirm || null, limitScope: live.limitScope || null, limitModel: live.limitModel || null,
+      mixed: Array.isArray(live.runEngines) }
     : { reason: screen.dataset.pauseReason || st.pauseReason, limitEngine: st.limitEngine ?? record.limitEngine,
-        limitResetAt: st.limitResetAt ?? record.limitResetAt ?? null };
+        limitResetAt: st.limitResetAt ?? record.limitResetAt ?? null,
+        modelConfirm: st.modelConfirm ?? record.modelConfirm ?? null, limitScope: st.limitScope ?? record.limitScope ?? null,
+        limitModel: st.limitModel ?? record.limitModel ?? null, mixed: Array.isArray(st.runEngines) };
 }
 /** A usage limit the run's own engine hit offers "Resume on <engine>" in the Resume split's menu
  *  (paintResumeEngineItems), never as buttons of its own. The caret is Advanced and up; while the menu holds
  *  such an offer it shows at every mode, so Simple can switch too. `ready`: the ready engines, null = all. */
 function paintHdResumeSwitch(screen, record, data, live, resumable, ready = null) {
-  const offers = resumable ? usageLimitSwitches(hdPauseOf(live, screen, data, record), ready) : [];
-  keepVisible(screen.querySelector('.hd-resume-more'), offers.length > 0);
+  const pause = hdPauseOf(live, screen, data, record);
+  const offers = resumable ? usageLimitSwitches(pause, ready) : [];
+  keepVisible(screen.querySelector('.hd-resume-more'), offers.length > 0 || (resumable && pauseNeedsModelMenu(pause)));
+}
+/** #1450: a pause whose way on lives in the Resume menu only ("Continue on <model>", "Switch model and continue…"):
+ *  a model_confirm pause, or a usage limit spent on one model family. A plain Resume would pause again, so the caret
+ *  shows at every mode. */
+function pauseNeedsModelMenu(pause) {
+  return pause?.reason === 'model_confirm' || (pause?.reason === 'usage_limit' && pause?.limitScope === 'model');
 }
 
 /** The engine a saved run resumes on by default: its live run's, else the saved state's. */
@@ -27192,6 +28121,15 @@ function paintHdActions(screen, record, data) {
   });
   // .hd-resume starts hidden in the template; the split follows it (as .rd-resume-split follows .rd-pause).
   if (split && resumeBtn) split.hidden = resumeBtn.hidden;
+  // Slice 8 (d8-6, d8-8): a shown, not busy Resume names the run it would wait for.
+  const resumeShown = !!resumeBtn && !resumeBtn.hidden && resumeBtn.dataset.resumeState !== 'busy';
+  if (resumeShown) {
+    paintResumeAfter(btnLabelEl(resumeBtn), record.id, () => {
+      if (histDetailState?.screen === screen) paintHdLive(screen, histDetailState.record, histDetailState.data);
+    });
+  }
+  // Slice 16 (D10): More ways to resume says the run waits for its turn, from the same slice info.
+  paintMenuTurn(screen.querySelector('.hd-resume-menu'), resumeShown ? heldTurnOf(record.id) : null);
 }
 // A live run in this tab has the last word (its frames are newer than any row). A parked one only ends, and a stop from
 // another tab or the CLI reaches only the row, so an ended row wins over it. (A resume mints a new, live run.)
@@ -27317,6 +28255,7 @@ function paintHdPr(screen, record, data) {
   if (!btn.querySelector('.ic')) setCtaContent(btn, 'pr-create', CREATE_PR_LABEL);
   const repos = screen.querySelector('.hd-pr-repos');
   if (repos) { repos.hidden = true; repos.replaceChildren(); }
+  paintHdMergePill(screen, record);
   if (!(gitOn() && isGitRun(hdRunOf(record, data)))) { paintHdPush(screen, null); return; }
   if (paintHdPush(screen, record)) return;   // a run on its source branch ships by Push, never a PR
   // Legacy workspace rows / minimal deep-link records (no members) keep the single path.
@@ -27339,8 +28278,8 @@ function paintHdPr(screen, record, data) {
   btn.onclick = () => openShipItModal(record, data);
 }
 
-// Watch PR (#619): the PR's status and Watch switch live on the Overview tab (paintHdOvPrs), drawn by paintRdPrStatus;
-// the run page card reads the same answer through its .rd-pr-feed (slice 3). The words are run-head.mjs's
+// Watch PR (#619): the run card reads the PR's status through its .rd-pr-feed (slice 3, paintRdPrStatus); its
+// View PR ▾ menu carries the Watch item. The words are run-head.mjs's
 // (HD_PR_WATCH_ACTIVE, hdPrWatchLabel).
 const hdPrWatchTone = (state) => (state.status === 'needs-person' ? 'bad' : HD_PR_WATCH_ACTIVE.has(state.status) ? 'run' : '');
 const HD_PR_WATCH_TIP = 'Watch: start a fix run when checks fail or reviewers ask for changes';
@@ -27378,11 +28317,14 @@ function hdWsRepoItem(m) {
   li.append(name, ' ');
   if (prLive(m.pr)) {
     li.appendChild(prRepoLink(m.pr));
-    const pill = document.createElement('span');     // post-ship mergeability, like the single header pill
-    pill.className = 'hist-merge';
-    pill.dataset.minLevel = 'expert';
-    pill.hidden = true;
-    li.appendChild(pill);
+    // Post-ship mergeability, like the single header pill; a merged or closed PR is final and gets none.
+    if (prStateOf(m.pr) === 'OPEN') {
+      const pill = document.createElement('span');
+      pill.className = 'hist-merge';
+      pill.dataset.minLevel = 'expert';
+      pill.hidden = true;
+      li.appendChild(pill);
+    }
   } else {
     const note = document.createElement('span');
     note.className = 'hd-pr-repo-note';
@@ -27407,36 +28349,40 @@ async function paintHdPublish(screen, record, data) {
   const note = screen.querySelector('.hd-published');
   if (!btn || !note) return;
   const gen = ++publishPaintGen;
-  btn.hidden = true;
-  note.hidden = true;
-  if (!(gitOn() && isGitRun(hdRunOf(record, data)))) return;
+  // What is shown stays while the state is read again (hdSyncPr repaints this seconds after the page paints): the
+  // head's button row is laid out around this button, so hiding it for the read's round trip shifts the other
+  // buttons under the pointer and back. Only an answer, or a gate that needs no read, changes it.
+  const none = () => { btn.hidden = true; note.hidden = true; };
+  if (!(gitOn() && isGitRun(hdRunOf(record, data)))) return none();
   const status = String((data && data.state && data.state.status) || record.status || '').toLowerCase();
-  if (!PUBLISH_FINISHED.has(status) || !record.id) return;
+  if (!PUBLISH_FINISHED.has(status) || !record.id) return none();
   // Merged back into its source: the run's branch is gone and Push ships the work (paintHdPush).
-  if ((record.sameAsSource && record.mergeBack?.merged === true) || data?.state?.branch?.mergeBack?.merged === true) return;
-  let members;
+  if ((record.sameAsSource && record.mergeBack?.merged === true) || data?.state?.branch?.mergeBack?.merged === true) return none();
+  let members = [];
   try {
     const res = await fetch(`/api/runs/${encodeURIComponent(record.id)}/publish?${new URLSearchParams(publishScope(record))}`);
     const d = await safeJson(res);
-    if (!res.ok || !d || !Array.isArray(d.members)) return;
     // A branch with a pull request was pushed when the PR opened: never "Publish branch" for it. Ship it repaints
     // this block once the PR is recorded (hdSyncPr), and this gate covers the forge deleting the merged branch
     // and a fetch pruning its tracking ref. Push changes stays for local commits.
     const ws = record.target === 'workspace';
     const prOf = (m) => (ws ? histWsMembers(record).find((x) => x.memberKey === m.memberKey)?.pr : record.pr);
-    members = d.members.filter((m) => m && m.branch && m.state && m.state !== 'none'
-      && !(m.state === 'unpublished' && prLive(prOf(m))));
-  } catch { return; }
-  if (gen !== publishPaintGen || !members.length) return;
+    if (res.ok && d && Array.isArray(d.members)) {
+      members = d.members.filter((m) => m && m.branch && m.state && m.state !== 'none'
+        && !(m.state === 'unpublished' && prLive(prOf(m))));
+    }
+  } catch { /* no answer: nothing to offer */ }
+  if (gen !== publishPaintGen) return;              // a newer paint decides
+  if (!members.length) return none();
   const pub = members.filter((m) => m.remote && m.state !== 'unpublished');
   if (pub.length) {
     note.textContent = record.target === 'workspace'
       ? `Published: ${pub.map((m) => `${m.name || m.memberKey} → ${publishTarget(m)}`).join(', ')}`
       : `Published to ${publishTarget(pub[0])}`;
-    note.hidden = false;
   }
+  note.hidden = !pub.length;
   const moved = members.some((m) => m.state === 'moved');
-  if (!moved && !members.some((m) => m.state === 'unpublished')) return;
+  if (!moved && !members.some((m) => m.state === 'unpublished')) { btn.hidden = true; return; }
   btn.textContent = moved ? 'Push changes' : 'Publish branch';
   btn.hidden = false;
   btn.onclick = () => openPublishModal(screen, record, data, members.filter((m) => m.state !== 'diverged'));   // property: repaints re-bind it
@@ -27595,10 +28541,11 @@ function paintHdFacts(screen, record, data) {
   // A Folder run counts its copy's changes (P1), never a git summary.
   const folder = hdWorkMode(record, data) === 'folder';
   const fc = folder ? changesCounts(hdChangesOf(record, data) || { state: 'pending' }) : null;
-  const activeMs = typeof st.totalActiveMs === 'number' ? st.totalActiveMs : liveTotalMs(st.steps, 0);
+  // The run time is the saved elapsed clock (an old run: its summed time); the sum itself is agent time.
+  const activeMs = runHeadlineMs(st) ?? liveTotalMs(st.steps, 0);
   const tags = costTagsFact(st.tags, record && record.projectDir, () => { if (screen.isConnected) paintHdGlance(screen, record, data); }, record && record.target);
-  paintGlanceFacts(glance, { summary: folder ? null : (s || null), changes: fc, diffHref: `#${hdHash({ projectKey: record.projectKey, id: record.id }, 'details', 'diff')}`, activeMs, cost: engineReportsCost(st.runEngine) ? (st.totalCostUsd || 0) : null,
-    costNote: costSummaryText(runCostBreakdown(st.steps, st.totalCostUsd), fmtUsd),
+  paintGlanceFacts(glance, { summary: folder ? null : (s || null), changes: fc, diffHref: `#${hdHash({ projectKey: record.projectKey, id: record.id }, 'details', 'diff')}`, activeMs, agentMs: st.totalActiveMs, cost: runCostKnown(st.runEngine, st.runEngines) !== 'none' ? (st.totalCostUsd || 0) : null,
+    costNote: glanceCostNote(st, costSummaryText(runCostBreakdown(st.steps, st.totalCostUsd), fmtUsd)),
     // D16: a finished run always has the row, so "Add cost tags" stays reachable.
     costTags: tags || { tags: [], missing: [] } });
   // Only when the row was rebuilt (its control is gone): re-appending on every glance repaint would move an open
@@ -27704,15 +28651,29 @@ function paintHdHeaderMeta(screen, record, data) {
   meta.appendChild(hdDot());
   const eng = document.createElement('span');
   eng.className = 'hd-engine';
-  eng.textContent = engineLabel(engine);
-  eng.title = `Engine: ${engineLabel(engine)}${isBetaEngine(engine) ? ' (beta)' : ''} runs this run's agents`;
+  // A run whose steps used several harnesses names the default one and the others.
+  const others = Array.isArray(st.runEngines) ? st.runEngines.filter((e) => e !== engine) : [];
+  if (others.length) {
+    eng.textContent = [engine, ...others].map(engineLabel).join(' + ');
+    eng.title = `Default harness: ${engineLabel(engine)}. Other steps run on ${others.map(engineLabel).join(', ')}.`;
+  } else {
+    eng.textContent = engineLabel(engine);
+    eng.title = `Engine: ${engineLabel(engine)}${isBetaEngine(engine) ? ' (beta)' : ''} runs this run's agents`;
+  }
   meta.appendChild(eng);
+  if (st.execEnv && st.execEnv !== 'local') {
+    meta.appendChild(hdDot());
+    const x = document.createElement('span'); x.className = 'hd-exec-env';
+    x.textContent = execEnvLabel(st.execEnv);
+    x.title = `Agents and scripts of this run executed in an ${execEnvLabel(st.execEnv)}; commits stayed local`;
+    meta.appendChild(x);
+  }
   const { day, clock } = splitDateStamp(st.startedAt || record.startedAt || record.mtime);
   const hdCost = runCostText(st, st.totalCostUsd, '');
   for (const [cls, text, strong] of [
     ['hd-day', day, false],
     ['hd-clock', clock, false],
-    ['hd-dur', typeof st.totalActiveMs === 'number' ? fmtDuration(st.totalActiveMs) : '', true],
+    ['hd-dur', runHeadlineMs(st) != null ? fmtDuration(runHeadlineMs(st)) : '', true],
     ['hd-cost', hdCost.text, true],
   ]) {
     if (!text) continue;
@@ -27725,7 +28686,7 @@ function paintHdHeaderMeta(screen, record, data) {
     meta.appendChild(seg);
   }
   paintCostBreakdown(screen.querySelector('.hd-header'), meta.querySelector('.hd-cost'), runCostBreakdown(st.steps, st.totalCostUsd), costFocus,
-    { agentsUnknown: !engineReportsCost(st.runEngine) });
+    { agentsUnknown: runCostKnown(st.runEngine, st.runEngines) !== 'all' });
   // Scheduled runs: say HOW this run started — "by schedule" links to the Schedules view.
   if (st.scheduledFor) {
     meta.appendChild(hdDot());
@@ -27851,6 +28812,33 @@ function paintHdHeaderMeta(screen, record, data) {
 // detail template ships; fall back to the button itself for any caller that
 // passes a plain, icon-less button.
 function btnLabelEl(btn) { return btn.querySelector('.hd-btn-label') || btn; }
+/** Slice 16 (D10): the run its held resume waits for, from the loaded slice info: null when not held (or flag off),
+ *  undefined while the info is loading (the menu keeps what it says until it lands). */
+function heldTurnOf(pipelineId) {
+  if (!pipelineId || !flagOn('shaperSmallRuns')) return null;
+  const info = sliceInfoFor(pipelineId);
+  if (!info) return SLICE_INFO_PENDING.has(pipelineId) ? undefined : null;
+  return info.heldResume && Number.isInteger(info.heldResume.after) ? info.heldResume.after : null;
+}
+/** Slice 16 (D10): paint a More ways to resume menu's note, unless the slice info is still loading. */
+function paintMenuTurn(menu, heldAfter) {
+  if (heldAfter !== undefined) paintResumeMenuTurn(menu, heldAfter);
+}
+/** Slice 16 (D6): whether a press is a Shaper one: a run of a marked feature with the flag on, its slice info loaded.
+ *  Read at the press: the hold's own feature repaint clears the slice info before the reply lands. */
+const shaperPress = (pipelineId) => !!pipelineId && flagOn('shaperSmallRuns') && !!sliceInfoFor(pipelineId);
+/** Slice 16 (D5): the toast of a Shaper press that did not go on; null otherwise, so every other run keeps today's toast. */
+const shaperResumeNote = (shaper, body, status) => (shaper ? resumeNote(body, status) : null);
+/** Shaper small runs slice 8 (d8-6, d8-8): a paused run's Resume label from its slice info's `resumeAfter` (the server's
+ *  preview). While the info is unknown (loading, or a failed /slice), a `Resume…` label is kept and any other becomes
+ *  `Resume`. Written only when it differs. Flag off, no pipeline or no label: nothing. */
+function paintResumeAfter(labelEl, pipelineId, onLoad) {
+  if (!labelEl || !pipelineId || !flagOn('shaperSmallRuns')) return;
+  const info = sliceInfoFor(pipelineId, onLoad);
+  const now = labelEl.textContent;
+  const text = info ? resumeLabel(info.resumeAfter) : now.startsWith('Resume') ? now : resumeLabel(null);
+  if (now !== text) labelEl.textContent = text;
+}
 
 // The POST /api/resume -> upsert -> seed-log -> land-on-running recipe, shared by
 // the detail header and the cost-override path.
@@ -27873,6 +28861,7 @@ async function resumePipeline(p, projectDir, btn, opts = {}) {
   btn.dataset.resumeState = 'busy';
   const label = labelEl.textContent;
   labelEl.textContent = 'Resuming…';
+  const shaper = shaperPress(p.id);
   showResumePending(p.id, true);
   try {
     const res = await fetch('/api/resume', {
@@ -27917,7 +28906,20 @@ async function resumePipeline(p, projectDir, btn, opts = {}) {
         if (btn.isConnected) btn.focus({ preventScroll: true });   // Cancel: back to the Resume the user pressed
         return;
       }
-      throw new Error((data && data.error) || `HTTP ${res.status}`);
+      // Slice 16 (D5): a Shaper refusal says why in its own words.
+      const why = shaperResumeNote(shaper, data, res.status);
+      throw new Error(why ? why.detail : (data && data.error) || `HTTP ${res.status}`);
+    }
+    // Shaper small runs slice 7 (D16): the resume is held for its turn; nothing started, so the paused copy stays.
+    if (data && data.held === true) {
+      showResumePending(p.id, false);
+      // Slice 8 (d8-14): once held, the row and the run head say `after run N`; the Resume reads plain Resume.
+      btn.disabled = false; labelEl.textContent = resumeLabel(null); delete btn.dataset.resumeState;
+      // Slice 16 (D5, D10): say that it goes on later, and why; its menu says so at once (the hold's frame cleared the info).
+      const note = shaperResumeNote(shaper, data, res.status);
+      if (note) notify({ tone: note.tone, title: note.title, detail: note.detail, key: `resume-${p.id}` });
+      if (shaper) paintResumeMenuTurn(btn.closest('.btn-split')?.querySelector('.btn-split-menu') || null, data.after);
+      return;
     }
     upsertRun({
       runId: data.runId, title: p.title || p.id, projectDir: p.projectDir || projectDir || '',
@@ -28006,7 +29008,8 @@ async function scheduleResumeAt({ pipelineId, title, projectDir = null, workspac
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         pipelineId, ...when,
-        ...(res.engine ? { engine: res.engine } : {}),
+        // Only a switch names an engine: a scheduled plain resume of a mixed run keeps each step on its own harness.
+        ...(res.engine && res.engine !== saved ? { engine: res.engine } : {}),
       }),
     });
     const data = await safeJson(r);
@@ -28215,9 +29218,11 @@ function runMoreItems(screen, { away = [], extra = [] } = {}) {
   const items = [...away];
   const preset = offered('.hd-save-preset, .rd-save-preset');
   if (preset) items.push({ label: 'Save as preset', title: preset.title, onSelect: () => preset.click() });
+  const rerun = offered('.hd-rerun, .rd-rerun');
+  if (rerun) items.push({ label: 'Rerun', disabled: rerun.disabled, title: rerun.title, ...(rerun.dataset.hint ? { hint: rerun.dataset.hint } : {}), onSelect: () => rerun.click() });
   items.push(...extra);
   // The Chat panel hides the terminal opener on purpose (.crp .term-opener): no Terminal item there either.
-  if (screen.dataset.presentation !== 'panel') items.push({ label: 'Terminal', hint: 'Ctrl+`', onSelect: () => terminalPane?.toggle() });
+  if (screen.dataset.presentation !== 'panel') items.push({ label: 'Terminal', hint: 'Ctrl+`', onSelect: () => toolPanel?.toggleKind('terminal') });
   const report = offered('.hd-report, .rd-report');
   const archive = offered('.hd-archive, .rd-archive');
   const restore = offered('.hd-restore');
@@ -28267,6 +29272,7 @@ async function archiveRunFlow({ btn, rec: r, run, screen, onGone }) {
     const dd = await safeJson(res);
     if (!res.ok) throw new Error((dd && dd.error) || `HTTP ${res.status}`);
     state.historyAll = state.historyAll.filter((x) => !(x && x.id === r.id && x.projectKey === r.projectKey));
+    toolPanel?.closeScope({ type: 'run', id: r.id });   // its tabs go (the server closed its shells)
     // The archived feed too, so a revisit of the Archived toggle does not show the
     // just-archived run as still archived.
     if (state.historyArchived) {
@@ -28304,17 +29310,21 @@ function hdCanTry(record, st, retained, provisional) {
 
 /** [{ key, name, rec, published, resolving, prOpen }] from the detail state; a row-level summary newer than the
  *  detail wins (no file list then). `published`: the branch's last recorded push. `prOpen`: the branch has an open
- *  PR, whose Overview row owns the pipeline Resolve. */
+ *  PR, whose Overview row owns the pipeline Resolve. A branch whose PR is merged or closed is final: it is left out
+ *  (after a squash merge it would always read "behind, merges cleanly"), so it gets no line and no automatic check. */
+const BASE_PR_FINAL = new Set(['MERGED', 'CLOSED']);
 function hdBaseMembers(record, data) {
   const st = (data && data.state) || {};
   if (st.target === 'workspace') {
     const names = new Map((st.projects || []).map((p) => [p.projectKey, p.projectName]));
     const rows = new Map(((record && record.members) || []).map((m) => [m.memberKey, m]));
     return Object.entries(st.branches || {}).filter(([, br]) => br && br.feature && br.branchKept !== false && !br.branchDeleted)
+      .filter(([key]) => !BASE_PR_FINAL.has(prStateOf(rows.get(key) && rows.get(key).pr)))
       .map(([key, br]) => ({ key, name: names.get(key) || key, rec: newerBaseCheck(br.baseCheck, rows.get(key) && rows.get(key).baseCheck),
         published: br.published || null, resolving: !!br.baseResolve, prOpen: prStateOf(rows.get(key) && rows.get(key).pr) === 'OPEN' }));
   }
   const br = st.branch || {};
+  if (BASE_PR_FINAL.has(prStateOf(record && record.pr))) return [];
   return br.feature ? [{ key: null, name: null, rec: newerBaseCheck(br.baseCheck, record && record.baseCheck),
     published: br.published || null, resolving: !!br.baseResolve, prOpen: prStateOf(record && record.pr) === 'OPEN' }] : [];
 }
@@ -28460,7 +29470,7 @@ async function hdBaseAction(screen, record, data, m, action, button) {
     if (action === 'resolve-terminal' && d.session) {
       hdBaseMarkResolving(data, m.key);              // the server marked it: Re-check now settles it
       say(`Merge started: ${(d.conflicts || []).length} conflicting file(s). Commit it in the terminal, then Re-check.`);
-      terminalPane?.showSession(d.session.id);
+      toolPanel?.showSession(d.session.id);
     }
   } catch (err) {
     say(`${BASE_ACTION_TITLE[action]}: ${err.message}`, true);
@@ -28504,19 +29514,21 @@ function setupHdActions(screen, record, data) {
     // The engine items (paintResumeEngineItems), read at CLICK time like Resume itself. Their clones are
     // painted after setup, so one delegated listener on the menu.
     resumeMenu.addEventListener('click', (e) => {
-      const item = e.target.closest('.resume-on-saved, .resume-on-other:not([data-template]), .resume-with-model');
+      const item = e.target.closest('.resume-on-saved, .resume-on-other:not([data-template]), .resume-with-model, .resume-confirm-model');
       if (!item || !resumeMenu.contains(item)) return;
       e.stopPropagation();
       closeResumeMenu();
       if (resumeBtn.disabled || resumeBtn.dataset.resumeState === 'busy') return;
       const r = hdCurrentRecord(record);
       const saved = hdRunEngine(r, data);
+      if (item.classList.contains('resume-confirm-model')) { resumePipeline(r, r.projectDir || null, resumeBtn, { confirmModel: item.dataset.model }); return; }
       if (item.classList.contains('resume-with-model')) {
-        pickResumeModel(saved, { reason: 'usage_limit', limitEngine: resumeMenu.dataset.limitEngine || null })
+        pickResumeModel(saved, menuPause(resumeMenu))
           .then((model) => { if (model) resumePipeline(r, r.projectDir || null, resumeBtn, { model }); });
         return;
       }
-      resumePipelineOnEngine(r, saved, resumeBtn, item.classList.contains('resume-on-other') ? item.dataset.engine : saved);
+      resumePipelineOnEngine(r, saved, resumeBtn, item.classList.contains('resume-on-other') ? item.dataset.engine : saved,
+        { offer: item.classList.contains('resume-on-other'), mixed: Array.isArray(data?.state?.runEngines) });
     });
     const resumeLimitItem = screen.querySelector('.hd-resume-limit-item');
     resumeLimitItem.addEventListener('click', (e) => {
@@ -28716,11 +29728,22 @@ function placeCostPop(header, btn, pop) {
   pop.style.left = `${Math.round(Math.max(8, Math.min(bb.left - hb.left, hb.width - w - 8)))}px`;
 }
 
+/** The glance tile's cost caption: today's share summary, else on a run whose cost is partly unknown, that. */
+function glanceCostNote(r, note) {
+  return note || (runCostKnown(r?.runEngine, r?.runEngines) === 'part' ? 'cost partly unknown' : note);
+}
+
 /** A run on an engine that reports no cost (Cursor): its cost is unknown, never a $0.00 (fmtUsd(null) prints $0.00).
  *  `fallback`: what the site shows today when the total is not a number ('' or '—'); a reporting engine is unchanged. */
 function runCostText(r, total, fallback = null) {
-  if (!engineReportsCost(r?.runEngine)) return { text: 'cost unknown', title: `${engineLabel(r.runEngine)} reports no cost${Number(total) > 0 ? ` (worca's own calls so far: ${fmtUsd(total)})` : ''}` };
+  const known = runCostKnown(r?.runEngine, r?.runEngines);
+  if (known === 'none') return { text: 'cost unknown', title: `${engineLabel(r.runEngine)} reports no cost${Number(total) > 0 ? ` (worca's own calls so far: ${fmtUsd(total)})` : ''}` };
   if (fallback !== null && typeof total !== 'number') return { text: fallback, title: '' };
+  // A run whose steps used a harness that reports no cost beside one that does: the known part, said so.
+  if (known === 'part') {
+    return { text: `${fmtUsd(Number(total) || 0)} (cost partly unknown)`,
+      title: `Steps on ${engineList(r.runEngines.filter((e) => !engineReportsCost(e)))} report no cost, so this total leaves them out` };
+  }
   return { text: fmtUsd(Number(total) || 0), title: '' };
 }
 
@@ -28877,6 +29900,7 @@ function reloadHistDetail() {
 // --- section tabs: pill row + lazily-built section bodies -------------------
 
 const HD_TAB_ICONS = {
+  task: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="5" y="4" width="14" height="17" rx="2"/><path d="M9 4.5V3h6v1.5M9 10h6M9 14h6M9 18h3" stroke-linecap="round" stroke-linejoin="round"/></svg>',
   diff: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M6 3h8l4 4v14H6z" stroke-linejoin="round"/><path d="M14 3v4h4" stroke-linejoin="round"/></svg>',
   overview: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="8"/><path d="M12 8h.01M11 12h1v4h1" stroke-linecap="round" stroke-linejoin="round"/></svg>',
   agents: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="6" cy="6" r="2.4"/><circle cx="6" cy="18" r="2.4"/><circle cx="18" cy="12" r="2.4"/><path d="M8 6h5a3 3 0 0 1 3 3v0M8 18h5a3 3 0 0 0 3-3v0" stroke-linecap="round"/></svg>',
@@ -28894,9 +29918,9 @@ const HD_TAB_ICONS = {
 // describe exactly ONE open detail; the Running detail is a second screen that
 // can be initialised while History's is still mounted. Keeping the cells on the
 // screen makes the engine reentrant and lets the state die with the node.
-const detailTabState = new WeakMap();   // screen -> { cells, activate }
+const detailTabState = new WeakMap();   // screen -> { cells, activate, relayout, menu }
 
-/** The tab cells + activate() of a screen initDetailTabs has run on, else null. */
+/** The tab state of a screen initDetailTabs has run on, else null. */
 function detailTabsOf(screen) {
   return (screen && detailTabState.get(screen)) || null;
 }
@@ -28904,7 +29928,7 @@ function detailTabsOf(screen) {
 // Table-driven pill row + lazily-built section bodies for a detail screen.
 // `tabs` is a list of { key, label, badge(ctx), visible(ctx), build(sec, ...args) }.
 // `opts` names the markup — { tabsSel, secsSel, tabClass, secClass, badgeClass,
-// idPrefix, initial?, buildArgs? } — and the five class/selector names
+// idPrefix, initial?, buildArgs?, overflow? } — and the five class/selector names
 // deliberately have NO defaults: falling back to History's class names inside the
 // Running screen would paint an unstyled tab bar that still passes every
 // structural check.
@@ -28913,16 +29937,31 @@ function detailTabsOf(screen) {
 //   initial   — (ctx) => key for the initially active tab; first visible otherwise
 //   buildArgs — (ctx) => extra args appended after `sec`, evaluated at ACTIVATION
 //               time so a builder sees late-corrected context (History's record)
+//   overflow  — { row: string[] }, opt-in. The keys in `row` are the default row; when
+//               two or more of the OTHER tabs are shown they go under a "More" menu. A
+//               row that does not fit the bar folds into it too (foldTabs: a lone other
+//               tab first, then the row from the right; never Overview or the open tab),
+//               and the open one under More joins the row just before it. A table entry
+//               may carry `menuIcon` (an icons.mjs name) for its menu row. The screen's
+//               state `relayout()` recomputes this after a level, git, visibility or
+//               size change (a ResizeObserver on the bar and its buttons, released by
+//               `dispose()`); without `overflow` it does nothing.
 function initDetailTabs(screen, tabs, ctx, opts) {
   const {
     tabsSel, secsSel, tabClass, secClass, badgeClass, idPrefix,
-    initial = null, buildArgs = null,
+    initial = null, buildArgs = null, overflow = null,
   } = opts;
   const bar = screen.querySelector(tabsSel);
   const secs = screen.querySelector(secsSel);
   if (!bar || !secs) return;   // a screen whose template lacks the two hosts
+  detailTabState.get(screen)?.menu?.close();   // never a menu left anchored to a button this rebuild drops
+  detailTabState.get(screen)?.dispose();       // nor an observer left watching those buttons
   bar.innerHTML = '';
   bar.classList.add('tabs');
+  // The run card lives in the Overview section (adoptRunCard): park it back at the screen's top level, so the
+  // rebuilt Overview adopts it again rather than the reset destroying it.
+  const card = secs.querySelector('.rd-glance');
+  if (card) screen.insertBefore(card, screen.querySelector(':scope > :is(.rd-details,.hd-details)'));
   secs.innerHTML = '';
   const shown = tabs.filter((t) => t.visible(ctx));
   const cells = new Map();
@@ -28977,6 +30016,7 @@ function initDetailTabs(screen, tabs, ctx, opts) {
       sec.hidden = !on;
       if (on && sec.dataset.loaded !== '1') pending = { tab, sec };
     }
+    relayout();
     if (pending) {
       // Stamp AFTER the builder returns: a builder that throws leaves the tab
       // un-stamped and retries on the next activation instead of being stuck
@@ -28988,14 +30028,100 @@ function initDetailTabs(screen, tabs, ctx, opts) {
       pending.sec.dataset.loaded = '1';
     }
   }
-  detailTabState.set(screen, { cells, activate });
+  // The More button (opts.overflow): not a tab, so no tab selector or selection state sees it.
+  let more = null;
+  if (overflow) {
+    more = document.createElement('button');
+    more.type = 'button';
+    more.className = 'tab tab-more';
+    more.setAttribute('aria-haspopup', 'menu');
+    more.setAttribute('aria-expanded', 'false');
+    more.append('More', icon(document, 'chevron-down', 12));
+    more.addEventListener('click', () => {
+      // Read at open time: the shown candidates, their live badge counts and the open one.
+      state.menu = toggleMenu({ doc: document, anchor: more, align: 'end', label: 'More tabs',
+        items: [...cells].filter(([k, c]) => inBar(k) && c.btn.hasAttribute('data-overflow')).map(([, { tab, btn }]) => ({
+          label: tab.label, icon: tab.menuIcon, hint: btn.querySelector(`.${badgeClass}`)?.textContent,
+          checked: btn.classList.contains('active'),
+          onSelect: () => { btn.click(); btn.focus({ preventScroll: true }); },
+        })) });
+    });
+  }
+  const state = { cells, activate, relayout, dispose, menu: null };
+  detailTabState.set(screen, state);
+  let observer = null;
+  let cancelFrame = null;
+  // A tab the interface mode and git show; `inBar` also drops one its page hid while open (the merged Agents place).
+  function showsTab(k) { return cells.has(k) && levelAtLeast(cells.get(k).tab.level || 'simple') && (gitOn() || !cells.get(k).tab.needsGit); }
+  function inBar(k) { return showsTab(k) && !cells.get(k).btn.hidden; }
+  // Which tabs go under More at the bar's width now. A folded tab is display:none and has no width, so a measured bar
+  // is unfolded (and given its More button) while the natural widths are read: relayout folds it again in the same
+  // task, before anything paints. The answer depends on those widths only, never on the fold the bar had.
+  function measureFold() {
+    const css = window.getComputedStyle(bar);
+    const px = (v) => parseFloat(v) || 0;
+    const avail = bar.clientWidth - px(css.paddingLeft) - px(css.paddingRight);
+    if (avail > 0) {
+      for (const { btn } of cells.values()) btn.removeAttribute('data-overflow');
+      if (!more.isConnected) bar.append(more);
+    }
+    const width = (node) => node.getBoundingClientRect().width;
+    const shown = (inRow) => [...cells].filter(([k]) => overflow.row.includes(k) === inRow && inBar(k))
+      .map(([key, { btn }]) => ({ key, width: width(btn) }));
+    const active = [...cells.keys()].find((k) => cells.get(k).btn.classList.contains('active'));
+    return foldTabs({ row: shown(true), rest: shown(false), active, avail, gap: px(css.columnGap), more: width(more) });
+  }
+  // The row's order: the tabs in the row, the ones under More (CSS draws only the open one), then More. With nothing
+  // under it there is no More, and every tab keeps its table place.
+  function relayout() {
+    if (!overflow) return;
+    const had = document.activeElement;
+    const fold = measureFold();
+    for (const [k, { btn }] of cells) btn.toggleAttribute('data-overflow', overflow.row.includes(k) ? fold.extra.includes(k) : fold.rest);
+    const use = fold.rest || fold.extra.length > 0;
+    const all = [...cells.values()].map((c) => c.btn);
+    const over = (b) => b.hasAttribute('data-overflow');
+    const order = use ? [...all.filter((b) => !over(b)), ...all.filter(over), more] : all;
+    const gone = !use && (had === more || !!state.menu?.el.contains(had));   // the focus is on More or in its menu
+    if (!use) { state.menu?.close(); more.remove(); }
+    // Move only when the order changed: moving a focused button drops its focus.
+    if (order.length !== bar.children.length || order.some((n, i) => n !== bar.children[i])) bar.append(...order);
+    const folded = all.includes(had) && over(had) && !had.classList.contains('active');   // a focused tab just left the row
+    if (folded) more.focus({ preventScroll: true });
+    else if (had && had !== document.activeElement && (gone || order.includes(had))) {
+      const to = order.includes(had) ? had : bar.querySelector('[role="tab"][aria-selected="true"]');
+      to?.focus({ preventScroll: true });
+    }
+  }
+  // A new size, re-fitted once per frame. A screen dropped without a rebuild lets go of its observer.
+  function schedule() {
+    if (cancelFrame) return;
+    const run = () => { cancelFrame = null; if (bar.isConnected) relayout(); else dispose(); };
+    if (typeof window.requestAnimationFrame === 'function') {
+      const id = window.requestAnimationFrame(run);
+      cancelFrame = () => window.cancelAnimationFrame(id);
+    } else {
+      const id = setTimeout(run, 16);
+      cancelFrame = () => clearTimeout(id);
+    }
+  }
+  function dispose() {
+    observer?.disconnect();
+    cancelFrame?.();
+    observer = cancelFrame = null;
+  }
   if (!cells.size) return;
   // The opening tab is always one the interface mode shows: History prefers Diff and Running the
   // live log, both advanced, so Simple lands on Overview instead of on a tab with no pill lit.
-  const showsTab = (k) => cells.has(k) && levelAtLeast(cells.get(k).tab.level || 'simple') && (gitOn() || !cells.get(k).tab.needsGit);
   const want = initial ? initial(ctx) : null;
   const first = [...cells.keys()].find(showsTab);
   activate(showsTab(want) ? want : (first || cells.keys().next().value));
+  // The buttons too: a badge count that grows takes room without resizing the bar. Through `window.` like the file's
+  // other ResizeObserver sites.
+  if (overflow && typeof window.ResizeObserver === 'function') {
+    observer = new window.ResizeObserver(schedule);
+    for (const node of [bar, ...[...cells.values()].map((c) => c.btn), more]) observer.observe(node);
+  }
 }
 // A mode change can hide the tab that is open. Its pill would vanish with the section still up, so
 // the first tab the new mode shows takes over. (A deep link never lands here: tabs have no route.)
@@ -29003,9 +30129,13 @@ function reselectHiddenDetailTabs() {
   for (const active of $$('.rd-tab.active, .hd-tab.active, .pd-tab.active')) {
     const shows = (b) => levelAtLeast(b.dataset.minLevel || 'simple') && (gitOn() || b.dataset.needsGit === undefined);
     if (shows(active)) continue;
-    const next = [...active.parentElement.children].find(shows);
+    const next = [...active.parentElement.children].find((b) => b.getAttribute('role') === 'tab' && shows(b));   // never "More"
     if (next) next.click();
   }
+}
+/** A level or git change: each open run page recomputes which tabs go under "More". */
+function relayoutDetailTabs() {
+  for (const screen of $$('.rd, .hd')) detailTabsOf(screen)?.relayout();
 }
 
 function hdClarifyCount(data) {
@@ -29013,9 +30143,30 @@ function hdClarifyCount(data) {
   // A form ask is ONE ask, whatever its field count (spec §9: one ask = one form).
   // X3: the reader's field is `ask`, never `form`.
   const form = (data.clarify && data.clarify.ask) ? 1 : 0;
-  const stepQ = Array.isArray(data.stepQuestions)
-    ? data.stepQuestions.reduce((n, r) => n + ((r && r.questions) || []).length + ((r && r.ask) ? 1 : 0), 0) : 0;
-  return q + form + stepQ;
+  const stepQ = hdStepRounds(data).reduce((n, r) => n + ((r && r.questions) || []).length + ((r && r.ask) ? 1 : 0), 0);
+  return q + form + stepQ + awayAnswerCounts(hdAwayOthers(data)).answers;
+}
+
+/** The step rounds the Q&A tab lists: a graph Clarify node's round is the run's Clarify itself (data.clarify), so it
+ *  is listed once, there. */
+function hdStepRounds(data) {
+  const rounds = data && Array.isArray(data.stepQuestions) ? data.stepQuestions : [];
+  const asked = new Set(((data && data.clarify && data.clarify.questions) || []).map((q) => q && q.id));
+  return rounds.filter((r) => !(r && r.agentKey === 'clarify' && !r.ask && (r.questions || []).length
+    && r.questions.every((q) => q && asked.has(q.id))));
+}
+
+/** Away mode's answers that no question card shows: plan stops, review gates, workflows, retries, limits. A Clarify,
+ *  a mid-step question or a form carries its own "Answered by Away mode" line. */
+function hdAwayOthers(data) {
+  const all = data && Array.isArray(data.awayAnswers) ? data.awayAnswers : [];
+  return all.filter((d) => d && (d.choice == null || !['clarify', 'questions', 'form'].includes(d.kind)));
+}
+
+/** The run pages' row tabs (initDetailTabs `overflow`) in priority order; the others go under "More". At a narrow
+ *  width the row's right-most tabs fold in too (foldTabs). `qa` is the page's own Q&A key. */
+function runTabRow(qa) {
+  return { row: ['overview', 'task', 'diff', 'changes', 'artifacts', qa, 'logs'] };
 }
 
 const HD_TABS = [
@@ -29024,10 +30175,12 @@ const HD_TABS = [
   // counted in filesDeleted, so adding filesDeleted double-counts every deletion
   // against the rendered file list.
   // ONE order on both run pages (RD_TABS matches), in the order a reader asks: what did
-  // it produce (Overview · Diff · Artifacts), what can I do with it (Actions), then how did it
+  // it produce and what was it asked (Overview · Task · Diff · Artifacts), what can I do with it (Actions), then how did it
   // get there, coarse to fine (Workflow · Q&A · Logs · Agents). "Details ›" opens the first shown tab; the trail
   // opens Workflow.
   { key: 'overview', label: 'Overview', level: 'simple', badge: () => null, visible: () => true, build: (...a) => buildHdOverview(...a) },
+  // The run's prompt, second: what it was asked, right after what it did.
+  { key: 'task', label: 'Task', level: 'simple', badge: () => null, visible: () => true, build: (...a) => buildHdTask(...a) },
   { key: 'diff', label: 'Diff', level: 'simple', needsGit: true,
     badge: (d) => { const r = gitOnlyResults(d.results, (d.folderMembers || []).map((m) => m.memberKey)); return r && r.summary ? String((r.summary.filesNew || 0) + (r.summary.filesChanged || 0)) : null; },
     visible: (d) => isGitRun(d.state), build: (...a) => buildHdDiff(...a) },
@@ -29046,19 +30199,19 @@ const HD_TABS = [
   // step attribution); it only gates VISIBILITY here — buildHdArtifacts fetches the
   // attributed GET /api/runs/:id/artifacts before rendering. Hidden when a run has
   // no indexed artifact beyond the transient live-log / run-dir markers.
-  { key: 'artifacts', label: 'Artifacts', level: 'advanced',
+  { key: 'artifacts', label: 'Artifacts', menuIcon: 'cube', level: 'advanced',
     badge: (d) => {
       const n = Array.isArray(d.artifacts) ? d.artifacts.filter(isDisplayableArtifact).length : 0;
       return n ? String(n) : null;
     },
     visible: (d) => Array.isArray(d.artifacts) && d.artifacts.some(isDisplayableArtifact),
     build: (...a) => buildHdArtifacts(...a) },
-  { key: 'actions', label: 'Actions', level: 'advanced', needsGit: true, badge: () => null, visible: (d) => isGitRun(d.state),
+  { key: 'actions', label: 'Actions', menuIcon: 'play', level: 'advanced', needsGit: true, badge: () => null, visible: (d) => isGitRun(d.state),
     build: (...a) => buildHdActions(...a) },
   // The graph, moved off the page body into its own tab (as on the Running page).
   // loadHistDetailScreen paints it into `.hd-graph` before the tabs exist; the builder
   // MOVES that node, so its mounted view, decor and log links come along.
-  { key: 'workflow', label: 'Workflow', level: 'simple', badge: () => null, visible: () => true,
+  { key: 'workflow', label: 'Workflow', menuIcon: 'workflow', level: 'simple', badge: () => null, visible: () => true,
     build: (sec) => {
       const screen = sec.closest('.hd');
       const g = screen && screen.querySelector('.hd-graph');
@@ -29072,10 +30225,11 @@ const HD_TABS = [
     visible: (d) => Array.isArray(d.artifacts) && d.artifacts.some((a) => a && a.kind === 'live-log'),
     build: (...a) => buildHdLogs(...a) },
   // Session groups (Task 58): only on a run that has a session (its summaries, or a session in its manifest).
-  { key: 'sessions', label: 'Sessions', level: 'advanced', badge: (d) => sessionsBadge(d.state), visible: (d) => sessionsTabVisible(d.state), build: (...a) => buildHdSessions(...a) },
-  { key: 'agents', label: 'Agents', level: 'expert',
+  { key: 'sessions', label: 'Sessions', menuIcon: 'terminal', level: 'advanced', badge: (d) => sessionsBadge(d.state), visible: (d) => sessionsTabVisible(d.state), build: (...a) => buildHdSessions(...a) },
+  { key: 'agents', label: 'Agents', menuIcon: 'agent', level: 'expert',
     badge: (d) => ((Array.isArray(d.state.subAgents) && d.state.subAgents.length) ? String(d.state.subAgents.length) : null),
-    visible: () => true, build: (...a) => buildHdAgents(...a) },
+    // Shaper small runs D2 (D11): with the flag on, a Care run's Agents live in the Overview's one Agents place.
+    visible: (d) => !hdAgentsMerged(d.state), build: (...a) => buildHdAgents(...a) },
 ];
 
 function initHdTabs(screen, record, data) {
@@ -29090,6 +30244,7 @@ function initHdTabs(screen, record, data) {
     tabsSel: '.hd-tabs', secsSel: '.hd-sections',
     tabClass: 'hd-tab', secClass: 'hd-sec', badgeClass: 'hd-tab-badge',
     idPrefix: 'hd',
+    overflow: runTabRow('clarify'),
     // hdCurrentRecord(), NOT the captured `record`: build() runs at CLICK time,
     // and refreshHdFromRow REPLACES histDetailState.record (deep link, and every
     // pipelines-changed forced reload). Closing over the load-time object is
@@ -30418,7 +31573,10 @@ function buildHdDiff(sec, record, data) {
     if (entry.f.from) {
       selectedPath.setAttribute('aria-label', `Renamed from ${entry.f.from} to ${entry.f.path}`);
     }
-    ph.append(selectedPath, hdFileCountsNode(document, entry.f));
+    const headEnd = document.createElement('span');
+    headEnd.className = 'hd-diff-head-end';          // the counts, then the open icon (diff-open-editor.mjs)
+    headEnd.append(hdFileCountsNode(document, entry.f));
+    ph.append(selectedPath, headEnd);
     pane.appendChild(ph);
 
     // Both loads, not just the patch — so the first window already has cards and
@@ -30436,7 +31594,7 @@ function buildHdDiff(sec, record, data) {
       lock.className = 'hd-diff-guarded';
       lock.textContent = 'protected path';
       lock.title = 'New comments are not stored for credential-shaped paths (.env*, *.pem, *.key, **/secrets/**, …). Existing comments still show.';
-      ph.appendChild(lock);
+      ph.insertBefore(lock, headEnd);
     }
 
     const body = document.createElement('div');
@@ -30444,6 +31602,8 @@ function buildHdDiff(sec, record, data) {
     const section = pstate.index && pstate.index.get(sectionKey(entry.project, entry.f.path));
     const meta = diffSectionMeta(entry, fileKey, section);
     lastMeta = meta;                                   // what repaintCards re-attaches against
+    const parsed = section ? parseFileSection(section.raw, { maxCodeUnits: HD_MAX_SECTION_CODE_UNITS }) : null;
+    void addOpenIcon(firstChangedLine(parsed)).catch(() => {});
     if (!section) {
       body.classList.add('hint');
       const note = document.createElement('div');
@@ -30457,7 +31617,6 @@ function buildHdDiff(sec, record, data) {
       pane.appendChild(body);
       return;
     }
-    const parsed = parseFileSection(section.raw, { maxCodeUnits: HD_MAX_SECTION_CODE_UNITS });
     if (parsed.binary || !parsed.hunks.length) {
       body.classList.add('hint');
       const note = document.createElement('div');
@@ -30495,6 +31654,19 @@ function buildHdDiff(sec, record, data) {
     const lang = langForPath(syntaxPath);
     if (lang && canHighlightParsed(parsed)) {
       void enhanceDiffBody(view, lang).catch(() => {});
+    }
+
+    // The file head's open icon, once the run's Actions model says it may show (a deleted file, a comment-only
+    // row, a protected path, an archived run or a blocked checkout get none). Dropped if another file was picked.
+    async function addOpenIcon(line) {
+      if (entry.f.status === 'D' || entry.synthetic || ctx.guarded(entry.project, entry.f.path)) return;
+      const q = runActionQuery(record.projectDir, record).toString();
+      const model = await diffEditorModel(record.id, q, { finishedNow: hdRunFinished(data) });
+      if (epoch !== pstate.selEpoch || !headEnd.isConnected) return;
+      const pick = editorOpenFor(model, { projectKey: entry.project, archived: !!data.state?.archivedAt });
+      if (!pick) return;
+      headEnd.append(buildOpenFileButton(document, { fileName: entry.f.path.split('/').pop(), label: pick.label, mode: pick.mode,
+        onOpen: () => openInEditor(record.id, q, { member: pick.member, workspace: !!model.workspace, file: entry.f.path, line, mode: pick.mode }) }));
     }
   }
 
@@ -30563,16 +31735,6 @@ function hdWorktreeRow(word, dir) {
   return row;
 }
 
-function hdStatCard(kind, label, value, sub) {
-  const card = document.createElement('div');
-  card.className = `hd-ov-card hd-ov-card-${kind}`;
-  const l = document.createElement('div'); l.className = 'hd-ov-label'; l.textContent = label;
-  const v = document.createElement('div'); v.className = 'hd-ov-value'; v.textContent = value;
-  card.append(l, v);
-  if (sub) { const s = document.createElement('div'); s.className = 'hd-ov-sub'; s.textContent = sub; card.appendChild(s); }
-  return card;
-}
-
 // Workspace results have NO top-level keyThingsToCheck — findings live under
 // perProject[<key>].keyThingsToCheck (the rollup summary only counts them), so a
 // workspace run would otherwise always read "Clean".
@@ -30585,57 +31747,32 @@ function hdChecks(r) {
   return r.keyThingsToCheck || [];
 }
 
-// "What did the run touch?" without the Diff tab (docs/ui-levels.md): Diff is advanced, so the
-// Overview — the one results tab Simple mode has — lists the files in plain words. No hunks, no
-// comments; from advanced up a button hands over to the real diff.
-const HD_FILES_SHOWN = 12;
-function hdFilesChangedBox(sec, results, { diffLink = true } = {}) {
-  if (!results) return null;
-  const rows = hdDiffFileRows(results);
-  if (!rows.length) return null;
-  const box = document.createElement('div');
-  box.className = 'hd-ov-files';
-  const head = document.createElement('div'); head.className = 'hd-ov-files-head';
-  const l = document.createElement('div'); l.className = 'hd-ov-label';
-  l.textContent = rows.length === 1 ? 'Files changed · 1' : `Files changed · ${rows.length}`;
-  const open = tagLevel(document.createElement('button'), 'advanced');
-  open.type = 'button'; open.className = 'link-btn'; open.textContent = 'Open the diff';
-  open.dataset.needsGit = '';
-  open.addEventListener('click', () => {
-    const screen = histDetailState && histDetailState.screen;   // the state is keyed on the cloned template root
-    const tabs = screen && detailTabState.get(screen);
-    if (tabs && tabs.cells.has('diff')) tabs.activate('diff');
-  });
-  head.append(l);
-  if (diffLink) head.append(open);
-  box.appendChild(head);
-  const list = document.createElement('ul'); list.className = 'hd-ov-files-list';
-  for (const { project, f, isNew } of rows.slice(0, HD_FILES_SHOWN)) {
-    const li = document.createElement('li');
-    const kind = document.createElement('span');
-    const word = isNew ? 'new' : (f.status === 'D' ? 'deleted' : (f.status === 'R' ? 'renamed' : 'edited'));
-    kind.className = `hd-ov-file-kind k-${word}`; kind.textContent = word;
-    const name = document.createElement('span'); name.className = 'hd-ov-file-path mono';
-    name.textContent = project ? `${project}/${f.path}` : f.path; name.title = name.textContent;
-    li.append(kind, name);
-    list.appendChild(li);
-  }
-  box.appendChild(list);
-  if (rows.length > HD_FILES_SHOWN) {
-    const more = document.createElement('div'); more.className = 'hint';
-    more.textContent = `and ${rows.length - HD_FILES_SHOWN} more`;
-    box.appendChild(more);
-  }
-  return box;
+// One level (no separate glance): the run card is the Overview tab's body. Moves the screen's card (.rd-glance) into
+// `sec`, puts the Overview's short facts (`side`: the verdict, the run's state) in the card's right column and its long
+// lists (`below`: findings, checklists, skills, memory) under the card, full width. A screen without the card (the Chat run panel
+// takes it out) gets both alone. A rebuild swaps only the Overview's own parts: the card stays attached, so a field
+// being edited in it (Edit cost tags) keeps its focus.
+function adoptRunCard(sec, side, below) {
+  const glance = sec.closest('.rd, .hd')?.querySelector('.rd-glance') || null;
+  for (const c of [...sec.children]) if (c !== glance) c.remove();
+  const nav = glance && glance.querySelector('.rd-sheet-nav');
+  const sheet = glance && glance.querySelector(':scope > .rd-sheet');
+  if (!nav || !sheet) { sec.append(side, below); return; }
+  for (const old of glance.querySelectorAll('.hd-ov')) old.remove();
+  nav.appendChild(side);
+  sheet.after(below);
+  if (glance.parentNode !== sec) sec.appendChild(glance);
 }
 
 function buildHdOverview(sec, record, data) {
-  sec.innerHTML = '';
   const st = data.state;
   const results = data.results;
+  // Short facts beside the card's details; the long lists under the card, full width.
   const wrap = document.createElement('div');
   wrap.className = 'hd-ov';
-  sec.appendChild(wrap);
+  const below = document.createElement('div');
+  below.className = 'hd-ov hd-ov-below';
+  adoptRunCard(sec, wrap, below);
 
   // 1) Verdict banner (+ findings list).
   const verdict = document.createElement('div');
@@ -30662,42 +31799,15 @@ function buildHdOverview(sec, record, data) {
     verdict.append(chip, document.createTextNode(' No review results captured. The run did not complete.'));
   }
   if (verdict.childNodes.length) wrap.appendChild(verdict);
-  // The open pull request(s) as GitHub sees them now, beside the review's verdict from the run.
-  const prs = document.createElement('div');
-  prs.className = 'hd-ov-prs';
-  prs.dataset.needsGit = '';
-  wrap.appendChild(prs);
-  paintHdOvPrs(prs, record);
+  hdRunPlaces(wrap, record, data);
+  // The pull request is the card head's; the Actions tab has the controls.
   const git = gitOn() && isGitRun(hdRunOf(record, data));
-  if (git && isTerminalStatus(record.status)) {
-    const strip = document.createElement('div'); strip.className = 'act-strip'; tagLevel(strip, 'advanced');
-    strip.dataset.needsGit = '';
-    wrap.appendChild(strip);
-    paintActionsStrip(strip, record.id, runActionQuery(record.projectDir, record).toString());
-  }
-  if (checks.length) wrap.appendChild(issueList(checks.map((c) => ({ ...c, origin: 'review' }))));
+  if (checks.length) below.appendChild(issueList(checks.map((c) => ({ ...c, origin: 'review' }))));
   // spec D7: the same groups as the run page
   const cl = renderChecklistGroups(document, data.reviews);
-  if (cl) wrap.appendChild(cl);
+  if (cl) below.appendChild(cl);
 
-  // 2) Stat cards.
-  const grid = document.createElement('div');
-  grid.className = 'hd-ov-grid';
-  const steps = Array.isArray(st.steps) ? st.steps : [];
-  const maxCycle = steps.reduce((m, s) => Math.max(m, Number(s && s.cycle) || 0), 0) || 1;
-  grid.appendChild(hdStatCard('duration', 'Duration',
-    typeof st.totalActiveMs === 'number' ? fmtDuration(st.totalActiveMs) : '—',
-    isGraphManifest(st.stepper)
-      ? histCountsLine(st)
-      : `${steps.length} step${steps.length === 1 ? '' : 's'} · ${maxCycle} cycle${maxCycle === 1 ? '' : 's'}`));
-  const histCost = runCostText(st, st.totalCostUsd, '—');
-  const costCard = hdStatCard('cost', 'Cost',
-    histCost.text,
-    [`across ${steps.length} step${steps.length === 1 ? '' : 's'}`,
-      costSummaryText(runCostBreakdown(steps, st.totalCostUsd), fmtUsd)].filter(Boolean).join(' · '));
-  if (histCost.title) costCard.querySelector('.hd-ov-value').title = histCost.title;
-  else if (typeof st.totalCostUsd === 'number') costCard.querySelector('.hd-ov-value').title = estTitle(st.totalCostUsd);
-  grid.appendChild(costCard);
+  // Time and cost are the card's tiles. The worktree row (Expert) stays here.
   const wt = st.branch && typeof st.branch === 'object' ? st.branch : {};
   // `worktreeRemoved` is ABSENT on a paused run, `true` after teardown
   // (orchestrator.mjs:1443/1489/1498/1597/1604) and explicitly `false` on the
@@ -30717,7 +31827,6 @@ function buildHdOverview(sec, record, data) {
   // refreshHdFromRow — nothing else ever rebuilds a tab. (Do not "simplify" that
   // call away: the header painters run on every row arrival, but the tab bodies do
   // not, so without it the card would read `released` for the life of the screen.)
-  wrap.appendChild(grid);
   // The row and the notice card read one model (audit F-2): a checkout shows here as well as on the card.
   const ovModel = worktreeNoticeModel({ ...hdRetainedFor(record, st), checkout: hdCheckoutFor(record),
     workspace: record.target === 'workspace', names: memberNamesOf(record) });
@@ -30726,9 +31835,7 @@ function buildHdOverview(sec, record, data) {
   if (git) wrap.appendChild(tagLevel(hdWorktreeRow(wtRowState.word, wtRowState.dir || wt.worktreeDir || ''), 'expert'));
   // Skills registry §6 board 9: the set skills the run got (run.json.skillMount, in the detail payload).
   const skillsCard = renderRunSkills(data.skillMount, { doc: document });
-  if (skillsCard) wrap.appendChild(tagLevel(skillsCard, 'advanced'));
-  const filesBox = hdFilesChangedBox(sec, results, { diffLink: git });
-  if (filesBox) wrap.appendChild(filesBox);
+  if (skillsCard) below.appendChild(tagLevel(skillsCard, 'advanced'));
   // Agent memory (§6): what this run wrote into worca's memory, per execution.
   const memRows = memoryChangesRows(data.memory || (results && results.memory));
   if (memRows.length) {
@@ -30765,7 +31872,7 @@ function buildHdOverview(sec, record, data) {
       }
       box.appendChild(line);
     }
-    wrap.appendChild(box);
+    below.appendChild(box);
   }
   // spec §8: the one-line quiescence note, under the stat grid, v2 runs only.
   if (isGraphManifest(st.stepper) && decorFromState(st, { live: false, now: 0 }).quiescent) {
@@ -30775,44 +31882,130 @@ function buildHdOverview(sec, record, data) {
     note.textContent = 'finished at quiescence — End not reached';
     wrap.appendChild(note);
   }
+}
 
-  // 3) Task card.
-  const task = document.createElement('div');
-  task.className = 'hd-ov-task';
-  const th = document.createElement('div'); th.className = 'hd-ov-task-h'; th.textContent = 'Task';
-  task.appendChild(th);
-  const prompt = String(st.prompt || '').trim();
-  const p = document.createElement('p');
-  const LIMIT = 600;
-  if (prompt.length > LIMIT) {
-    p.textContent = prompt.slice(0, LIMIT) + '…';
-    const more = document.createElement('button');
-    more.type = 'button';
-    more.className = 'hd-ov-more';
-    more.textContent = 'Show more';
-    more.addEventListener('click', () => { p.textContent = prompt; more.remove(); });
-    task.append(p, more);
-  } else {
-    p.textContent = prompt || '(no prompt recorded)';
-    task.appendChild(p);
+/** Shaper small runs D2 (D12, D16): the saved Overview's run facts and its one Agents place. With the flag on, a Care run
+ *  gets C2's `.rd-run-agents` box (dev's saved page has none) holding dev's sub-agent body at Expert, in place of the
+ *  Agents tab (HD_TABS); the facts host is made only once a /slice answer carries `owns`. Flag off: nothing. */
+function hdRunPlaces(wrap, record, data) {
+  if (!flagOn('shaperSmallRuns')) return;
+  const st = data.state || {};
+  let agents = null;
+  if (hdAgentsMerged(st)) {
+    agents = document.createElement('div');
+    agents.className = 'rd-run-agents';
+    wrap.appendChild(agents);
   }
-  const chips = document.createElement('div');
-  chips.className = 'hd-ov-chips';
-  // The agents' own sub-agents: worca's AI calls (run title, Auto workflow, Away mode) are on the Agents tab.
-  const subCount = Array.isArray(st.subAgents) ? st.subAgents.filter((s) => !isWorcaSub(s)).length : 0;
-  for (const text of [
-    record.projectName || record.projectKey || '',
-    (st.branch && typeof st.branch === 'object' ? st.branch.source : '') || record.sourceBranch || '',
-    subCount ? `${subCount} sub-agent${subCount === 1 ? '' : 's'}` : '',
-  ]) {
+  const paintAgents = (info) => {
+    if (!agents) return;
+    agents.hidden = !mountRunAgents(agents, snapshotFromState(st), { stored: info && info.stored });
+    let sub = agents.querySelector(':scope > .rd-run-subagents');
+    if (!sub) {
+      sub = tagLevel(document.createElement('div'), 'expert');
+      sub.className = 'rd-run-subagents';
+      buildHdAgents(sub, record, data);
+    }
+    agents.append(sub);   // under the rows
+  };
+  let facts = null;
+  const paintFacts = (info) => {
+    if (info && 'owns' in info) {
+      if (!facts) {
+        facts = document.createElement('div');
+        facts.className = 'rd-run-facts';
+        if (agents) agents.before(facts); else wrap.appendChild(facts);
+      }
+      mountRunFacts(facts, info);
+    }
+    paintAgents(info);
+  };
+  const pid = (record && record.id) || st.id || '';
+  paintFacts(pid ? sliceInfoFor(pid, paintFacts) : null);
+}
+
+/** D11: with the flag on, a saved Care run's one Agents place is the Overview's `.rd-run-agents`. */
+function hdAgentsMerged(st) {
+  return flagOn('shaperSmallRuns') && !!(st && st.stepper && typeof st.stepper === 'object' && st.stepper.careRun);
+}
+
+/** The Task tab: the run's prompt in full, rendered as the markdown it was written in, under the run's place (project,
+ *  source branch, sub-agents). `chips`: those words, empty ones dropped. */
+function runTaskCard(prompt, chips) {
+  const card = document.createElement('div');
+  card.className = 'run-task';
+  const tags = document.createElement('div');
+  tags.className = 'hd-ov-chips';
+  for (const text of chips) {
     if (!text) continue;
     const c = document.createElement('span');
     c.className = 'hd-ov-tag mono';
     c.textContent = text;
-    chips.appendChild(c);
+    tags.appendChild(c);
   }
-  task.appendChild(chips);
-  wrap.appendChild(task);
+  if (tags.childElementCount) card.appendChild(tags);
+  const body = document.createElement('div');
+  body.className = 'run-task-body';
+  const text = String(prompt || '').trim();
+  if (!text) body.textContent = '(no prompt recorded)';
+  else if (!bindMarkdown(body, text)) void bindMarkdownReady().then((ok) => { if (ok && body.isConnected) bindMarkdown(body, text); });
+  card.appendChild(body);
+  return card;
+}
+/** While a graph run goes: its workflow in the card's summary column, framed on the running step(s) (the `focus` host),
+ *  the way into the Workflow tab. Gone once the run ends. In the Chat run panel it shows only while the panel is wide
+ *  enough for the card's two columns (runs/run-card.css): the narrow panel has no room for it. */
+function paintRdLive(screen, r) {
+  const panel = screen.querySelector('.rd-live');
+  if (!panel) return;
+  const on = !RD_TERMINAL.includes(r.status) && isGraphRun(r);
+  if (on) {
+    panel.hidden = false;
+    paintGraphFor(panel.querySelector('.run-flow'), r.stepper, runDecorFor(r, 'focus'), r.steps);
+  } else if (!panel.hidden) {
+    destroyGraphMounts(panel);
+    panel.hidden = true;
+  }
+}
+
+/** The run's setup as it started (GET /api/pipelines/:id/setup), once per run per page load: it never changes. */
+const runSetupCache = new Map();   // pipelineId → Promise<setup | null>
+function loadRunSetup(pipelineId) {
+  if (!pipelineId) return Promise.resolve(null);
+  if (!runSetupCache.has(pipelineId)) {
+    runSetupCache.set(pipelineId, fetch(`/api/pipelines/${encodeURIComponent(pipelineId)}/setup`)
+      .then((r) => (r.ok ? r.json() : null)).then((d) => (d && d.setup) || null)
+      .catch(() => { runSetupCache.delete(pipelineId); return null; }));
+  }
+  return runSetupCache.get(pipelineId);
+}
+/** The Task tab's body: the prompt, and beside it (under it when narrow) the choices the run started with. */
+function paintTaskTab(sec, card, pipelineId, state) {
+  const wrap = document.createElement('div');
+  wrap.className = 'run-task-tab';
+  const side = document.createElement('div');
+  side.className = 'run-task-side';
+  const paint = (setup) => {
+    const el = renderRunSetup(document, runSetupModel(setup, state));
+    side.hidden = !el;
+    side.replaceChildren(...(el ? [el] : []));
+  };
+  paint(null);
+  wrap.append(card, side);
+  sec.replaceChildren(wrap);
+  void loadRunSetup(pipelineId).then((setup) => { if (setup && side.isConnected) paint(setup); });
+}
+// The agents' own sub-agents: worca's AI calls (run title, Auto workflow, Away mode) are on the Agents tab.
+const taskSubWord = (subs) => {
+  const n = Array.isArray(subs) ? subs.filter((s) => !isWorcaSub(s)).length : 0;
+  return n ? `${n} sub-agent${n === 1 ? '' : 's'}` : '';
+};
+function buildHdTask(sec, record, data) {
+  const st = (data && data.state) || {};
+  paintTaskTab(sec, runTaskCard(st.prompt, [
+    record.projectName || record.projectKey || '',
+    (st.branch && typeof st.branch === 'object' ? st.branch.source : '') || record.sourceBranch || '',
+    taskSubWord(st.subAgents),
+  ]), record.id, st);
 }
 
 // One sub-agent's wall time. `durationMs` is authoritative when the orchestrator
@@ -30846,7 +32039,7 @@ function buildHdAgents(sec, record, data) {
   const skillsByGroup = stepSkillsFromSteps(st.steps);
   const graphifyByGroup = stepGraphifyFromSteps(st.steps);
   const statusOf = stepStatusByKey(st.steps, st.stepper);
-  const modelByNode = stepModelByNode(st.stepper, st.runEngine || 'claude');
+  const modelByNode = stepModelByNode(st.stepper, st.runEngine || 'claude', st.steps);
 
   for (const key of keys) {
     const list = Array.isArray(groups[key]) ? groups[key] : [];
@@ -31025,7 +32218,7 @@ function buildHdClarify(sec, record, data) {
   for (const q of questions) addCard(q, byId.get(q.id), data.clarify && data.clarify.night);
   if (questions.length && data.clarify) { const by = answeredByLine(data.clarify.answeredBy, data.clarify.night); if (by) wrap.appendChild(by); }
   if (data.clarify && data.clarify.ask) wrap.appendChild(hdRenderAskForm(record, data.clarify.ask));
-  for (const r of Array.isArray(data.stepQuestions) ? data.stepQuestions : []) {
+  for (const r of hdStepRounds(data)) {
     const roundLabel = `${r && (r.agentKey || r.nodeId) ? (r.agentKey || r.nodeId) : 'agent'}, round ${r && r.round}`
       + (String((r && r.stepKey) || '').split('#')[1] ? ` · cycle ${String(r.stepKey).split('#')[1]}` : '');
     if (r && r.ask) {
@@ -31042,6 +32235,17 @@ function buildHdClarify(sec, record, data) {
     for (const q of r.questions) addCard(q, rById.get(q.id), r.night);
     const by = answeredByLine(r.answeredBy, r.night);
     if (by) wrap.appendChild(by);
+  }
+  // Away mode's other answers (plan stops, review gates, workflows, retries), each with its reason: the run card's
+  // Away note jumps here.
+  const others = hdAwayOthers(data);
+  if (others.length) {
+    const away = Object.assign(document.createElement('section'), { className: 'rd-night-sec hd-cl-away-sec' });
+    const h3 = Object.assign(document.createElement('h3'), { className: 'rd-night-h', textContent: 'Answered for you' });
+    h3.append(Object.assign(document.createElement('span'), { className: 'rd-night-count' }));
+    away.append(h3, Object.assign(document.createElement('div'), { className: 'rd-night-asks' }));
+    wrap.appendChild(away);
+    paintAwayAnswers(away, others, []);
   }
 }
 
@@ -31093,11 +32297,16 @@ const RD_WORKFLOW_ICON = '<svg width="15" height="15" viewBox="0 0 24 24" fill="
 // not here.
 const RD_TABS = [
   // The same order as History's HD_TABS: results first, then the process —
-  // Overview · Diff · Artifacts · Actions · Workflow · Q&A · Logs · Agents.
+  // Overview · Task · Diff · Artifacts · Actions · Workflow · Q&A · Logs · Agents.
   {
     key: 'overview', label: 'Overview', icon: HD_TAB_ICONS.overview, level: 'simple',
     badge: () => null, visible: () => true,
     build: (sec, ctx) => buildRdOverview(sec, ctx),
+  },
+  {
+    key: 'task', label: 'Task', icon: HD_TAB_ICONS.task, level: 'simple',
+    badge: () => null, visible: () => true,
+    build: (sec, ctx) => buildRdTask(sec, ctx),
   },
   {
     key: 'diff', label: 'Diff', icon: HD_TAB_ICONS.diff, level: 'simple', needsGit: true,
@@ -31107,7 +32316,7 @@ const RD_TABS = [
   },
   { key: 'changes', label: 'Changes', icon: HD_TAB_ICONS.changes, level: 'simple', badge: (ctx) => { const fm = rdFolderMembers(ctx.run); const n = fm.length ? memberChangesTotal(fm) : ((changesCounts(rdFolderChanges(ctx.run)) || {}).total || 0); return n ? String(n) : null; }, visible: (ctx) => isFolderRun(ctx.run) || rdFolderMembers(ctx.run).length > 0, build: (sec, ctx) => buildRdChanges(sec, ctx) },
   {
-    key: 'artifacts', label: 'Artifacts', icon: HD_TAB_ICONS.artifacts, level: 'advanced',
+    key: 'artifacts', label: 'Artifacts', menuIcon: 'cube', icon: HD_TAB_ICONS.artifacts, level: 'advanced',
     badge: (ctx) => {
       const n = Array.isArray(ctx.run.artifacts)
         ? ctx.run.artifacts.filter(isDisplayableArtifact).length : 0;
@@ -31117,12 +32326,12 @@ const RD_TABS = [
     build: (sec, ctx) => buildRdArtifacts(sec, ctx),
   },
   {
-    key: 'actions', label: 'Actions', icon: HD_TAB_ICONS.actions, level: 'advanced', needsGit: true,
+    key: 'actions', label: 'Actions', menuIcon: 'play', icon: HD_TAB_ICONS.actions, level: 'advanced', needsGit: true,
     badge: () => null, visible: (ctx) => isGitRun(ctx.run),
     build: (sec, ctx) => buildRdActions(sec, ctx),
   },
   {
-    key: 'workflow', label: 'Workflow', icon: RD_WORKFLOW_ICON, level: 'simple',
+    key: 'workflow', label: 'Workflow', menuIcon: 'workflow', icon: RD_WORKFLOW_ICON, level: 'simple',
     badge: () => null, visible: () => true,
     build: (sec, ctx) => buildRdWorkflow(sec, ctx),
   },
@@ -31137,12 +32346,12 @@ const RD_TABS = [
     build: (sec, ctx) => buildRdLogs(sec, ctx),
   },
   {
-    key: 'sessions', label: 'Sessions', icon: HD_TAB_ICONS.sessions, level: 'advanced',
+    key: 'sessions', label: 'Sessions', menuIcon: 'terminal', icon: HD_TAB_ICONS.sessions, level: 'advanced',
     badge: (ctx) => sessionsBadge(ctx.run), visible: (ctx) => sessionsTabVisible(ctx.run),
     build: (sec, ctx) => buildRdSessions(sec, ctx),
   },
   {
-    key: 'agents', label: 'Agents', icon: HD_TAB_ICONS.agents, level: 'expert',
+    key: 'agents', label: 'Agents', menuIcon: 'agent', icon: HD_TAB_ICONS.agents, level: 'expert',
     badge: (ctx) => {
       const n = Array.isArray(ctx.run.subAgents) ? ctx.run.subAgents.length : 0;
       return n ? String(n) : null;
@@ -31165,6 +32374,7 @@ function initRdTabs(screen, r) {
     secClass: 'rd-sec',
     badgeClass: 'rd-tab-badge',
     idPrefix: 'rd',
+    overflow: runTabRow('qa'),
   });
 }
 
@@ -31269,19 +32479,34 @@ async function rdFetchDiff(r) {
 // Up to this many diff rows are connected per file; the rest stay one click away on the saved run.
 const RD_DIFF_MAX_LINES = 4000;
 
-function rdRenderFileBody(pane, index, entry) {
+/**
+ * One file of the run page's Diff tab. `openCtx` ({ runId, q, model, protectedKeys }) adds the file head's
+ * open-in-editor icon (diff-open-editor.mjs); the Folder runs' Changes tab passes none.
+ */
+function rdRenderFileBody(pane, index, entry, openCtx = null) {
   pane.innerHTML = '';
+  const section = index && index.get(sectionKey(entry.project, entry.f.path));
+  const parsed = section ? parseFileSection(section.raw, { maxCodeUnits: HD_MAX_SECTION_CODE_UNITS }) : null;
   const head = document.createElement('div');
   head.className = 'hd-diff-pane-head mono';
   const path = document.createElement('h3');
   path.className = 'hd-diff-path';
   path.textContent = entry.f.path;
-  head.append(path, hdFileCountsNode(document, entry.f));
+  const headEnd = document.createElement('span');
+  headEnd.className = 'hd-diff-head-end';
+  headEnd.append(hdFileCountsNode(document, entry.f));
+  const pick = openCtx && entry.f.status !== 'D' && !openCtx.protectedKeys.has(sectionKey(entry.project, entry.f.path))
+    ? editorOpenFor(openCtx.model, { projectKey: entry.project, archived: false }) : null;
+  if (pick) {
+    const line = firstChangedLine(parsed);
+    headEnd.append(buildOpenFileButton(document, { fileName: entry.f.path.split('/').pop(), label: pick.label, mode: pick.mode,
+      onOpen: () => openInEditor(openCtx.runId, openCtx.q, { member: pick.member, workspace: !!openCtx.model.workspace,
+        file: entry.f.path, line, mode: pick.mode }) }));
+  }
+  head.append(path, headEnd);
   pane.appendChild(head);
   const body = document.createElement('div');
   body.className = 'hd-diff-body mono';
-  const section = index && index.get(sectionKey(entry.project, entry.f.path));
-  const parsed = section ? parseFileSection(section.raw, { maxCodeUnits: HD_MAX_SECTION_CODE_UNITS }) : null;
   if (!parsed || parsed.binary || !parsed.hunks.length) {
     body.classList.add('hint');
     const note = document.createElement('div');
@@ -31314,6 +32539,66 @@ function rdRenderFileBody(pane, index, entry) {
   pane.appendChild(body);
 }
 
+// The Diff tab's file list and body for a { results, patch } diff; the tool panel's Changes tab draws with it too
+// (issue 1064). `picked`: the section key to open first; `onPick(key)` after every pick; `openCtx`: rdRenderFileBody's
+// open-in-editor context (the run page only). Returns the key picked.
+function paintDiffGrid(host, out, { picked = null, onPick = null, openCtx = null } = {}) {
+  const results = out.results;
+  const rows = results ? hdDiffFileRows(results) : [];
+  if (!rows.length) return picked;
+  const grid = document.createElement('div');
+  grid.className = 'hd-diff';
+  const list = document.createElement('div');
+  list.className = 'hd-diff-list';
+  const pane = document.createElement('div');
+  pane.className = 'hd-diff-pane';
+  grid.append(list, pane);
+  host.appendChild(grid);
+  const sums = results.summary || {};
+  const head = document.createElement('div');
+  head.className = 'hd-diff-list-head';
+  const nFiles = (sums.filesNew || 0) + (sums.filesChanged || 0);
+  const total = document.createElement('b');
+  total.textContent = `${nFiles} file${nFiles === 1 ? '' : 's'} changed`;
+  head.append(total, hdFileCountsNode(document, { added: sums.linesAdded || 0, removed: sums.linesRemoved || 0 }));
+  list.appendChild(head);
+  const rowsHost = document.createElement('div');
+  rowsHost.className = 'hd-diff-rows';
+  list.appendChild(rowsHost);
+  const index = out.patch ? patchIndex(splitPatchSections(out.patch)) : null;
+  const pick = (entry, btn) => {
+    for (const b of rowsHost.querySelectorAll('.rd-diff-row')) b.classList.toggle('active', b === btn);
+    picked = sectionKey(entry.project, entry.f.path);
+    rdRenderFileBody(pane, index, entry, openCtx);
+    if (onPick) onPick(picked);
+  };
+  let first = null;
+  for (const entry of rows) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'rd-diff-row';
+    // What Ask Worca's page context reads as "the file open here" (getPageContext).
+    btn.dataset.path = entry.f.path;
+    if (entry.project) btn.dataset.project = entry.project;
+    const name = document.createElement('span');
+    name.className = 'rd-diff-row-path mono';
+    name.textContent = entry.project ? `${entry.project}/${entry.f.path}` : entry.f.path;
+    name.title = name.textContent;
+    if (entry.isNew) {
+      const tag = document.createElement('span');
+      tag.className = 'rd-diff-new';
+      tag.textContent = 'new';
+      btn.append(name, tag, hdFileCountsNode(document, entry.f));
+    } else btn.append(name, hdFileCountsNode(document, entry.f));
+    btn.addEventListener('click', () => pick(entry, btn));
+    rowsHost.appendChild(btn);
+    const key = sectionKey(entry.project, entry.f.path);
+    if (!first || key === picked) first = { entry, btn };
+  }
+  if (first) pick(first.entry, first.btn);
+  return picked;
+}
+
 function buildRdDiff(sec, ctx) {
   const r = ctx.run;
   sec.innerHTML = '';
@@ -31324,22 +32609,42 @@ function buildRdDiff(sec, ctx) {
   refresh.type = 'button';
   refresh.className = 'btn btn-sm rd-diff-refresh';
   refresh.textContent = 'Refresh';
-  note.append(noteText, refresh);
+  const noteEnd = document.createElement('span');
+  noteEnd.className = 'rd-diff-note-end';          // Refresh, then Open in <Editor> while the run is live
+  noteEnd.append(refresh);
+  note.append(noteText, noteEnd);
   const host = document.createElement('div');
   host.className = 'rd-diff-host';
   sec.append(note, host);
   let epoch = 0;
   let picked = null;
+  let openBtn = null;
   const load = async () => {
     const mine = ++epoch;
     const live = !RD_TERMINAL.includes(r.status);
     refresh.hidden = !live;
     noteText.textContent = live ? 'Live: the worktree right now, against where the run started.' : 'The final diff of this run.';
     refresh.disabled = true;
+    const q = rdScopeQuery(r);
     let out;
-    try { out = await rdFetchDiff(r); } catch (e) { out = { error: e.message }; }
+    let model = null;
+    try {
+      [out, model] = await Promise.all([rdFetchDiff(r),
+        r.pipelineId ? diffEditorModel(r.pipelineId, q, { finishedNow: !live }) : null]);
+    } catch (e) { out = { error: e.message }; }
     refresh.disabled = false;
     if (mine !== epoch || !sec.isConnected) return;
+    openBtn?.remove();
+    openBtn = null;
+    clearOpenError(note);
+    const folder = live && r.pipelineId ? runFolderOpenFor(model) : null;
+    if (folder) {
+      noteText.textContent = 'Live: edits you make there go into the run.';
+      openBtn = buildOpenRunButton(document, { label: folder.label, onOpen: () => openInEditor(r.pipelineId, q, { mode: 'open' }) });
+      noteEnd.append(openBtn);
+    }
+    const openCtx = r.pipelineId && model ? { runId: r.pipelineId, q, model,
+      protectedKeys: new Set(live && Array.isArray(r._rdLiveDiff?.protectedPaths) ? r._rdLiveDiff.protectedPaths : []) } : null;
     host.innerHTML = '';
     if (out.error) { host.appendChild(histEmpty(`Could not load the diff: ${out.error}`)); return; }
     const results = out.results;
@@ -31352,55 +32657,7 @@ function buildRdDiff(sec, ctx) {
       return;
     }
     if (out.capped) noteText.textContent += ' Some new files are not listed.';
-    const grid = document.createElement('div');
-    grid.className = 'hd-diff';
-    const list = document.createElement('div');
-    list.className = 'hd-diff-list';
-    const pane = document.createElement('div');
-    pane.className = 'hd-diff-pane';
-    grid.append(list, pane);
-    host.appendChild(grid);
-    const sums = results.summary || {};
-    const head = document.createElement('div');
-    head.className = 'hd-diff-list-head';
-    const nFiles = (sums.filesNew || 0) + (sums.filesChanged || 0);
-    const total = document.createElement('b');
-    total.textContent = `${nFiles} file${nFiles === 1 ? '' : 's'} changed`;
-    head.append(total, hdFileCountsNode(document, { added: sums.linesAdded || 0, removed: sums.linesRemoved || 0 }));
-    list.appendChild(head);
-    const rowsHost = document.createElement('div');
-    rowsHost.className = 'hd-diff-rows';
-    list.appendChild(rowsHost);
-    const index = out.patch ? patchIndex(splitPatchSections(out.patch)) : null;
-    const pick = (entry, btn) => {
-      for (const b of rowsHost.querySelectorAll('.rd-diff-row')) b.classList.toggle('active', b === btn);
-      picked = sectionKey(entry.project, entry.f.path);
-      rdRenderFileBody(pane, index, entry);
-    };
-    let first = null;
-    for (const entry of rows) {
-      const btn = document.createElement('button');
-      btn.type = 'button';
-      btn.className = 'rd-diff-row';
-      // What Ask Worca's page context reads as "the file open here" (getPageContext).
-      btn.dataset.path = entry.f.path;
-      if (entry.project) btn.dataset.project = entry.project;
-      const name = document.createElement('span');
-      name.className = 'rd-diff-row-path mono';
-      name.textContent = entry.project ? `${entry.project}/${entry.f.path}` : entry.f.path;
-      name.title = name.textContent;
-      if (entry.isNew) {
-        const tag = document.createElement('span');
-        tag.className = 'rd-diff-new';
-        tag.textContent = 'new';
-        btn.append(name, tag, hdFileCountsNode(document, entry.f));
-      } else btn.append(name, hdFileCountsNode(document, entry.f));
-      btn.addEventListener('click', () => pick(entry, btn));
-      rowsHost.appendChild(btn);
-      const key = sectionKey(entry.project, entry.f.path);
-      if (!first || key === picked) first = { entry, btn };
-    }
-    pick(first.entry, first.btn);
+    picked = paintDiffGrid(host, out, { picked, onPick: (k) => { picked = k; }, openCtx });
     if (askSide?.shown()) askPanel?.pageChanged?.();   // Ask worca beside the page: the first file opens with no click
     rdPaintTabBadges(runDetailState.screen || sec, rdCtx(r));
   };
@@ -31583,7 +32840,7 @@ function buildRdQa(sec, ctx) {
     const questions = (data && data.clarify && data.clarify.questions) || [];
     const rounds = (data && Array.isArray(data.stepQuestions)) ? data.stepQuestions : [];
     const hasAsk = data && data.clarify && data.clarify.ask;
-    if (!data || (!questions.length && !rounds.length && !hasAsk)) {
+    if (!data || (!questions.length && !rounds.length && !hasAsk && !hdAwayOthers(data).length)) {
       sec.innerHTML = '';
       const empty = document.createElement('div');
       empty.className = 'rd-empty';
@@ -31621,6 +32878,7 @@ function ensureRdTabs(screen, r) {
     const tabs = detailTabsOf(screen);
     if (tabs && tabs.cells.has(want) && levelAtLeast(tabs.cells.get(want).tab.level || 'simple') && (gitOn() || !tabs.cells.get(want).tab.needsGit)) tabs.activate(want);
   }
+  rdSyncAgentsPlace(screen, rdCtx(r));   // D2 (D11): a rebuilt bar keeps the one Agents place
 }
 
 // ── Live log tab ────────────────────────────────────────────────────────────
@@ -31998,6 +33256,12 @@ function rdStateCopy(r, stepName) {
   if (r.pauseReason === 'cost_pipeline_policy') return 'Paused: team cost cap reached.';
   if (r.pauseReason === 'cost_total_policy') return 'Paused: team total cap reached.';
   if (r.pauseReason === 'night_guardrail') return r.pauseDetail || 'Paused: Away mode limit reached.';
+  if (r.pauseReason === 'model_confirm') {
+    // #1450: a premium model nobody chose — never resumed by itself; the person continues on it or switches.
+    const id = r.modelConfirm?.model || '';
+    const label = id ? (modelById(id)?.label || id) : 'a premium model';
+    return `Paused before ${step}: it would run on ${label}, a premium model nobody chose. Continue on it, or switch model.`;
+  }
   if (r.pauseReason === 'drain') return 'Paused while worca was stopping. Resume continues from here. The worktree and progress are kept.';
   if (r.pauseReason === 'time_limit') {
     const why = r.pauseDetail ? `: ${r.pauseDetail}` : '';
@@ -32036,8 +33300,8 @@ function rdStateCopy(r, stepName) {
     const by = r.status === 'stopped' && r.lastAction && r.lastAction.kind === 'stop' ? personLabel(r.lastAction.by) : '';
     return `${runStatusMeta(r).word}${by ? ` by ${by}` : ''}.${at}`;
   }
-  // The ACTIVE agent names the line (the v1 phase/cycle scalars are gone).
-  return `${activeCopy(r).text}.`;
+  // A run that is simply working: the chip beside this line already names the active agent, so there is nothing to add.
+  return '';
 }
 
 function rdOvStateBanner(host, r) {
@@ -32050,7 +33314,8 @@ function rdOvStateBanner(host, r) {
   const copy = document.createElement('span');
   copy.className = 'rd-ov-copy';
   copy.textContent = rdStateCopy(r, name);
-  host.append(chip, copy);
+  host.append(chip);
+  if (copy.textContent) host.append(copy);
   // A usage limit the engine hit: each other engine has its own allowance, so offer them here, at
   // every interface level (the Resume menu's caret is Advanced only).
   const pause = { reason: r.pauseReason, limitEngine: r.limitEngine };
@@ -32064,12 +33329,12 @@ function rdOvStateBanner(host, r) {
     btn.className = 'btn btn-sm rd-ov-switch';
     btn.dataset.engine = other;
     btn.textContent = `Resume on ${engineLabel(other)}`;
-    btn.title = engineSwitchNote(other);
+    btn.title = engineSwitchNote(other, { mixed: Array.isArray(r.runEngines) });
     btn.addEventListener('click', () => {
       // The toggle carries the busy state (the banner repaints on every frame).
       const pauseBtn = rdOpenPauseBtn();
       if (pauseBtn && pauseBtn.disabled) return;
-      resumeRunOnEngine(r.runId, pauseBtn || btn, other);
+      resumeRunOnEngine(r.runId, pauseBtn || btn, other, { offer: true });
     });
     host.append(btn);
   }
@@ -32098,95 +33363,25 @@ function rdOvStateBanner(host, r) {
   ensureLimitTick();
 }
 
-function rdOvStats(host, r) {
-  const prevWt = host.querySelector('.hd-ov-wt');
-  host.innerHTML = '';
-  const { n, m, name } = runStepLabel(r);
-  const stepSub = `step ${n}/${m}${name ? ` · ${name}` : ''}`;
-
-  const elapsed = hdStatCard('elapsed', 'Elapsed',
-    fmtDuration(liveTotalMs(r.steps, Date.now())) || '0s', stepSub);
-  // `.run-time` is the class the 1 s interval writes, so tagging the value node
-  // makes this card tick with the header and the graph — one timer, no second
-  // interval to drift against it (§11).
-  elapsed.querySelector('.hd-ov-value').classList.add('run-time');
-  host.appendChild(elapsed);
-
-  const steps = Array.isArray(r.steps) ? r.steps : [];
-  // The per-pipeline cap comes from the SAME budget record renderCostPauseBanner
-  // consumes (budgetState.budget; the field is budgetStatus()'s
-  // pipelineLimitUsd) — i.e. the value that drives pauseReason 'cost_pipeline'.
-  // null/absent means no cap is configured, and the sub-line falls back to a fact
-  // rather than a fabricated number.
-  const cap = Number(budgetState.budget && budgetState.budget.pipelineLimitUsd);
-  const costSub = [Number.isFinite(cap) && cap > 0
-    ? `cap ${fmtUsd(cap)} per pipeline`
-    : `across ${steps.length} step${steps.length === 1 ? '' : 's'}`,
-  costSummaryText(runCostBreakdown(steps, r.totalCostUsd), fmtUsd)].filter(Boolean).join(' · ');
-  const soFar = runCostText(r, r.totalCostUsd);
-  const cost = hdStatCard('cost', 'Cost so far', soFar.text, costSub);
-  cost.querySelector('.hd-ov-value').title = soFar.title || estTitle(r.totalCostUsd || 0);
-  host.appendChild(cost);
-
-  // No worktree row unless gitOn() && isGitRun(r) (SEAMS S8): a prevWt from a git-mode paint went with the reset above.
-  if (!(gitOn() && isGitRun(r))) return;
-  // Tri-state, exactly like History's card: absent while the run holds the
-  // worktree, true after teardown, explicitly false on the commit-failure path.
-  // `!== true` is the correct test for all three.
-  const held = !!r.worktreeDir && r.worktreeRemoved !== true;
-  // Live frames repaint this grid: keep the row (its hover and "copied" tick) while
-  // nothing about it changed.
-  const wtRec = r.pipelineId ? rdHistoryRecord(r) : null;
-  const wtModel = wtRec ? worktreeNoticeModel({ ...hdRetainedFor(wtRec, null), checkout: RD_TERMINAL.includes(r.status) ? hdCheckoutFor(wtRec) : null,
-    workspace: wtRec.target === 'workspace', names: memberNamesOf(wtRec) }) : null;
-  const wtState = worktreeRowState(wtModel && wtModel.kind === 'checkout' ? wtModel : null,
-    { live: held, dir: r.worktreeDir || '', removed: r.worktreeRemoved });
-  const wtRow = hdWorktreeRow(wtState.word, wtState.dir || r.worktreeDir || '');
-  host.appendChild(prevWt && prevWt.dataset.sig === wtRow.dataset.sig ? prevWt : tagLevel(wtRow, 'expert'));
-}
-
-function rdOvTask(r) {
-  const task = document.createElement('div');
-  task.className = 'hd-ov-task';
-  const h = document.createElement('div');
-  h.className = 'hd-ov-task-h';
-  h.textContent = 'Task';
-  task.appendChild(h);
-  const prompt = String(r.prompt || '').trim();
-  const p = document.createElement('p');
-  const LIMIT = 600;
-  if (prompt.length > LIMIT) {
-    p.textContent = prompt.slice(0, LIMIT) + '…';
-    const more = document.createElement('button');
-    more.type = 'button';
-    more.className = 'hd-ov-more';
-    more.textContent = 'Show more';
-    more.addEventListener('click', () => { p.textContent = prompt; more.remove(); });
-    task.append(p, more);
-  } else {
-    p.textContent = prompt || '(no prompt recorded)';
-    task.appendChild(p);
-  }
-  const chips = document.createElement('div');
-  chips.className = 'hd-ov-chips';
-  // The agents' own sub-agents: worca's AI calls (run title, Auto workflow, Away mode) are on the Agents tab.
-  const subCount = Array.isArray(r.subAgents) ? r.subAgents.filter((s) => !isWorcaSub(s)).length : 0;
-  // A workspace run carries NO projectDir (the New form sends workspaceId
-  // instead) — name it by its member list rather than letting projectName()
-  // print "(no project)".
+function buildRdTask(sec, ctx) {
+  const r = ctx.run;
+  // A workspace run carries NO projectDir (the New form sends workspaceId instead): name it by its member list
+  // rather than letting projectName() print "(no project)".
   const project = isNoProjectRun(r) ? 'No project'   // P3-D10: its work folder is not a project name
-    : r.projectDir
-      ? projectName(r.projectDir)
-      : (Array.isArray(r.projectNames) ? r.projectNames.join(' · ') : '');
-  for (const text of [project, r.branchSource || '', subCount ? `${subCount} sub-agent${subCount === 1 ? '' : 's'}` : '']) {
-    if (!text) continue;
-    const c = document.createElement('span');
-    c.className = 'hd-ov-tag mono';
-    c.textContent = text;
-    chips.appendChild(c);
-  }
-  task.appendChild(chips);
-  return task;
+    : r.projectDir ? projectName(r.projectDir) : (Array.isArray(r.projectNames) ? r.projectNames.join(' · ') : '');
+  const paint = () => paintTaskTab(sec, runTaskCard(r.prompt, [project, r.branchSource || '', taskSubWord(r.subAgents)]), r.pipelineId, r);
+  paint();
+  // The prompt rides state snapshots, and a run parked on a question sends none after the page opens: read it (and
+  // the source branch) from the run's saved state instead.
+  if (String(r.prompt || '').trim()) return;
+  const wrap = sec.firstElementChild;
+  void rdLoadData(r).then((data) => {
+    const st = data && data.state;
+    if (!st || !String(st.prompt || '').trim() || sec.firstElementChild !== wrap) return;
+    r.prompt = st.prompt;
+    if (!r.branchSource && st.branch && typeof st.branch === 'object' && st.branch.source) r.branchSource = st.branch.source;
+    paint();
+  });
 }
 
 /** Skills registry §6 board 9: a run's set-skill card into `host` (hidden without a record). */
@@ -32214,35 +33409,92 @@ function paintRdChecklists(host, run) {
 }
 
 function buildRdOverview(sec, ctx) {
-  sec.innerHTML = '';
   const wrap = document.createElement('div');
   wrap.className = 'hd-ov';
   const banner = document.createElement('div');
   banner.className = 'rd-ov-state';
-  const grid = document.createElement('div');
-  grid.className = 'hd-ov-grid';
   // The Task card is built ONCE and never re-rendered: the prompt cannot change
   // mid-run, and rebuilding it would slam the "Show more" expander shut under the
-  // user on every arriving `state` frame.
-  // Actions strip: terminal runs only, filled once the run has its pipeline id.
-  const strip = document.createElement('div'); strip.className = 'act-strip'; tagLevel(strip, 'advanced');
-  strip.dataset.needsGit = '';
-  strip.hidden = true;
+  // user on every arriving `state` frame. Time and cost are the run card's tiles; the Actions tab has the controls.
   const skills = tagLevel(document.createElement('div'), 'advanced');   // the set skills it got (§6 board 9)
   skills.className = 'hd-ov-skills-host';
   const checklists = document.createElement('div');   // Perspective checklists (spec D7)
   checklists.className = 'rd-checklists';
   checklists.hidden = true;
-  wrap.append(banner, strip, grid, checklists, skills, rdOvTask(ctx.run));
-  sec.appendChild(wrap);
-  const paintStrip = (run) => {
-    const on = gitOn() && isGitRun(run) && isTerminalStatus(run.status) && !!run.pipelineId;
-    strip.hidden = !on;
-    if (on && strip.dataset.runId !== run.pipelineId) paintActionsStrip(strip, run.pipelineId, rdScopeQuery(run));
+  // Small runs C2 (D14): the Care roles of a marked slice run and their step word, inside the card (item 11); hidden and
+  // empty for every other run.
+  const agents = document.createElement('div');
+  agents.className = 'rd-run-agents';
+  agents.hidden = true;
+  const below = document.createElement('div');
+  below.className = 'hd-ov hd-ov-below';
+  wrap.append(banner, agents);
+  below.append(checklists, skills);
+  adoptRunCard(sec, wrap, below);
+  // Shaper small runs D2 (D16): the run's facts host is made only once a /slice answer carries `owns` (a marked feature,
+  // flag on), so every other Overview keeps dev's DOM. The facts and the Agents rows' detail paint from the same answer.
+  let facts = null;
+  const ensureFactsHost = () => {
+    if (!facts) { facts = document.createElement('div'); facts.className = 'rd-run-facts'; agents.before(facts); }
+    return facts;
   };
-  const paint = (c) => { rdOvStateBanner(banner, c.run); paintStrip(c.run); rdOvStats(grid, c.run); paintRdChecklists(checklists, c.run); paintRunSkills(skills, c.run.skillMount); };
+  let last = ctx;
+  let doneSig = null;
+  let subSig = null;
+  const repaint = () => { if (sec.isConnected) paint(last); };
+  const paintAgents = (run, info) => {
+    const snap = run && run.stepper && run.stepper.careRun ? snapshotFromState(run) : null;
+    const full = snap ? { ...snap, pendingQuestion: run.pendingQuestion || null } : null;
+    agents.hidden = !mountRunAgents(agents, full, { stored: info && info.stored });
+    // D16: a finished agent changes what the stored facts say: drop the cached answer and ask again, once per change.
+    // The emptied entry is momentary, as the shape-feature frame's SLICE_INFO.clear() already makes it.
+    const sig = full ? runAgentRows(full).filter((r) => r.word === 'done').map((r) => r.key).join(',') : null;
+    if (info && 'owns' in info && doneSig !== null && sig !== doneSig && run.pipelineId) {
+      SLICE_INFO.delete(run.pipelineId);
+      sliceInfoFor(run.pipelineId, repaint);
+    }
+    doneSig = sig;
+    // D11: the one Agents place holds dev's sub-agent groups at Expert, repainted only when they change.
+    let sub = agents.querySelector(':scope > .rd-run-subagents');
+    if (!rdAgentsMerged(run) || agents.hidden) { if (sub) sub.remove(); subSig = null; return; }
+    if (!sub) { sub = tagLevel(document.createElement('div'), 'expert'); sub.className = 'rd-run-subagents'; subSig = null; }
+    agents.append(sub);   // after the rows
+    const sig2 = (Array.isArray(run.subAgents) ? run.subAgents : []).map((a) => `${a && a.id}:${a && a.status}`).join(',');
+    if (sig2 !== subSig) { subSig = sig2; rdAgentsBody(sub, run); }
+  };
+  const paint = (c) => {
+    last = c;
+    rdOvStateBanner(banner, c.run);
+    const info = flagOn('shaperSmallRuns') && c.run.pipelineId ? sliceInfoFor(c.run.pipelineId, repaint) : null;
+    if (info && 'owns' in info) mountRunFacts(ensureFactsHost(), info);
+    else if (facts && info) mountRunFacts(facts, null);
+    paintAgents(c.run, info);
+    paintRdChecklists(checklists, c.run);
+    paintRunSkills(skills, c.run.skillMount);
+  };
   paint(ctx);
   sec.__update = paint;
+}
+
+/** Shaper small runs D2 (D11): with the flag on, a Care run's one Agents place is the Overview's `.rd-run-agents`. */
+function rdAgentsMerged(run) {
+  return flagOn('shaperSmallRuns') && !!(run && run.stepper && typeof run.stepper === 'object' && run.stepper.careRun);
+}
+
+/** D11: initDetailTabs filters `visible` once, at build, and `careRun` can arrive later: each frame hides the Agents tab
+ *  and its section once the condition holds. An open Agents tab gives way to Overview, and its focus with it. */
+function rdSyncAgentsPlace(screen, ctx) {
+  if (!screen || !rdAgentsMerged(ctx && ctx.run)) return;
+  const btn = screen.querySelector('.rd-tab[data-sec="agents"]');
+  if (!btn) return;
+  const ov = screen.querySelector('.rd-tab[data-sec="overview"]');
+  const hadFocus = document.activeElement === btn;
+  if (btn.classList.contains('active') && ov) ov.click();
+  btn.hidden = true;
+  detailTabsOf(screen)?.relayout();                    // one candidate fewer for More
+  const sec = screen.querySelector('.rd-sec[data-sec="agents"]');
+  if (sec) sec.hidden = true;
+  if (hadFocus && ov) ov.focus();
 }
 
 // ── Agents tab ──────────────────────────────────────────────────────────────
@@ -32275,7 +33527,7 @@ function rdAgentsBody(sec, r) {
   const skillsByGroup = stepSkillsFromSteps(r.steps);
   const graphifyByGroup = stepGraphifyFromSteps(r.steps);
   const statusOf = stepStatusByKey(r.steps, r.stepper);
-  const modelByNode = stepModelByNode(r.stepper, r.runEngine || 'claude');
+  const modelByNode = stepModelByNode(r.stepper, r.runEngine || 'claude', r.steps);
   const cardsByNode = new Map();   // nodeId -> first group card, for the per-node artifact affordance
 
   for (const key of keys) {
@@ -32477,6 +33729,7 @@ function rdUpdateSections(r) {
     if (typeof sec.__update === 'function') sec.__update(ctx);
   }
   rdPaintTabBadges(screen, ctx);
+  rdSyncAgentsPlace(screen, ctx);
   paintActionsHeaders();   // the pill needs the run's pipeline id, which arrives with state frames
 }
 
@@ -32630,10 +33883,7 @@ document.addEventListener('keydown', (e) => {
   // a guard here is the only way to opt a subtree out.
   if (e.target && typeof e.target.closest === 'function' && e.target.closest('.hd-cmt-composer')) return;
   if (closeCostPop({ focusTrigger: true })) return;
-  // Details steps back to the run's glance; the glance steps back to the list, in the
-  // slide only: side by side the list is already there.
-  const hs = histDetailState;
-  if (hs && hs.screen && hs.screen.dataset.mode === 'details') { location.hash = hdHash(hs); return; }
+  // The run page steps back to the list, in the slide only: side by side the list is already there.
   if (runsLayout() === 'slide') location.hash = 'runs';
 }, true);
 
@@ -32652,10 +33902,7 @@ document.addEventListener('keydown', (e) => {
   if (e.target?.closest?.('.wf-log-drawer')) return;                 // the step log drawer owns its Escape (closes itself)
   // The header cost's breakdown owns Escape while it is open (same reason as History's ⋯ menu).
   if (closeCostPop({ focusTrigger: true })) return;
-  // Details steps back to the run's glance; the glance steps back to the list, in the
-  // slide only: side by side the list is already there.
-  const screen = runDetailState.screen;
-  if (screen && screen.dataset.mode === 'details') { location.hash = rdHash(runDetailState.runId); return; }
+  // The run page steps back to the list, in the slide only: side by side the list is already there.
   if (runsLayout() === 'slide') location.hash = 'runs';
 }, true);
 
@@ -33201,8 +34448,8 @@ function askRunSnapshot(r) {
     ...(r.shaping ? { shaping: r.shaping } : {}),
     ...(isGitRun(r) ? {} : { workMode: workModeOf(r), changes: null }),
     live: isLive(r), terminal: !!r._finished || isTerminalStatus(r.status),
-    startedAt: r.startedAt || null, elapsedMs: liveTotalMs(r.steps, Date.now()),
-    costUsd: engineReportsCost(r.runEngine) ? (r.totalCostUsd || 0) : null,   // null: cost unknown (Cursor), never $0.00
+    startedAt: r.startedAt || null, elapsedMs: rdElapsedMs(r),
+    costUsd: runCostKnown(r.runEngine, r.runEngines) !== 'none' ? (r.totalCostUsd || 0) : null,   // null: cost unknown (Cursor), never $0.00
     // Chat P3 (U10): activeNodes' model + effort, named through the catalog, plus the execution's cycle.
     progress: decor ? decor.progress : null, active: graph ? activeAgents(decor, r.stepper, { modelLabel: graphModelLabel }) : [],
     stageProgress: decor ? decor.stageProgress : null,
@@ -33298,8 +34545,52 @@ function chatPaintQuestion(ref, host) {
     set.add(panel);
     if (r._answering) setPanelBusy(r, true);   // an answer already in flight (paintRdQuestions' rule)
   }
+  paintQpanelDeadline(r, host);                // the E2B release time follows state frames
   return { id: pq.id || null, kind: askKindOf(pq), heading: askHeading(r, pq),
-    step: pq.nodeId ? nodeLabel(r.stepper, pq.nodeId) : '', stepCard: isStepCard(pq, r, true) };
+    step: pq.nodeId ? nodeLabel(r.stepper, pq.nodeId) : '', stepCard: isStepCard(pq, r, true), ...(pq.stop ? { stop: true } : {}) };
+}
+/** Shaper small runs C1 (R-ux-2): the Prototype step's working moment (building, reviewing, matching) on the one card,
+ *  from the card's saved state while no ask is open: the same renderer as the step's asks, with nothing to answer.
+ *  Rebuilt only when the moment, round or build changes, so the live rows keep following the design frames. */
+function chatPaintPrototypeWork(ref, host, proto) {
+  const panel = host && host.querySelector('.qpanel');
+  const r = chatLiveRun(ref);
+  if (!panel || !r || r._finished || r.pendingQuestion || !proto) { chatReleaseQuestion(host); return null; }
+  if (panel.dataset.qid !== protoWorkKey(proto) || panel.dataset.qrun !== r.runId) {
+    for (const [runId, old] of CHAT_QPANELS) { old.delete(panel); if (!old.size) CHAT_QPANELS.delete(runId); }
+  }
+  const key = paintPrototypeWork(panel, r, proto);
+  return { id: key, kind: 'prototype', heading: '', step: '', stepCard: true };
+}
+const PROTO_WORKING = new Set(['building', 'reviewing', 'matching']);
+const protoWorkKey = (proto) => `proto-work|${proto.state}|${proto.reviewRounds || 0}|${proto.buildId || ''}`;
+/** C1 (R-ux-2): the one paint of the Prototype step's working moment into a .qpanel, for the Chat card and the run page's
+ *  step area. Rebuilt only when the moment, round or build changes (the key), so the live rows keep following the
+ *  design frames. Returns the key. */
+function paintPrototypeWork(panel, r, proto) {
+  const key = protoWorkKey(proto);
+  if (panel.dataset.qid !== key || panel.dataset.qrun !== r.runId) {
+    disposeQpanel(panel);
+    panel.innerHTML = '';
+    panel.classList.remove('qpanel-workflow', 'hidden');
+    panel.dataset.kind = 'prototype';
+    askRendererFor('prototype').render(panel, { id: key, kind: 'prototype', prototype: { ...proto, moment: proto.state } }, askCtxFor(r, panel));
+    panel.dataset.qid = key;
+    panel.dataset.qrun = r.runId;
+  }
+  return key;
+}
+/** The run page's twin of the Chat card's rule: a live shaping run with no ask open and its saved card in a working
+ *  moment. The card is read once per pipeline (shaperCardFor); its answer repaints the open run page. */
+function rdPrototypeWork(r) {
+  if (!r || r._finished || r.pendingQuestion || !isShapingRun(r) || !r.pipelineId) return null;
+  const card = shaperCardFor(r.pipelineId, rdRepaintOpen);
+  const proto = card && card.prototype;
+  return proto && PROTO_WORKING.has(proto.state) ? proto : null;
+}
+function rdRepaintOpen() {
+  const r = runDetailState.screen ? runs.get(runDetailState.runId) : null;
+  if (r) repaintRunDetail(r);
 }
 // ---- Runs redesign slice 4: the one model's actions (D5, D6) and a run's group (D7), for the chat card and the pages.
 /** D7: the group a pipeline belongs to, as the list's group row, with its place in it. */
@@ -33422,6 +34713,7 @@ const chatRunControls = {
     return postAnswer(r, payload);
   },
   paintQuestion: chatPaintQuestion,
+  paintPrototypeWork: chatPaintPrototypeWork,
   releaseQuestion: chatReleaseQuestion,
   /** Shaper s3: a feature card's Resume / Re-plan the rest / Cancel the rest / Ask before each run. */
   featureAct: async (featureId, action, body) => {
@@ -33470,6 +34762,65 @@ if (typeof window !== 'undefined' && window.__np) window.__np.chatRunControls = 
 // CONTRACT §3: registered before createAskPanel runs (this line evaluates long before the mount at the end of the file).
 chatRunCards = registerChatRunCard({ controls: chatRunControls, runStore: askRunStore });
 registerDirectionAddon();                      // R10: the composer's "→ <run title>" chip
+// Attach Requirements features to a New run: the button, the `#` search in both prompt boxes, and the title hint.
+const pullBtn = document.getElementById('pull-from-requirements');
+const attachFetch = attachFetcher();
+const attachByKey = {   // the picker speaks project keys; the select's values are paths
+  get options() { return (state.projects || []).filter((p) => p && p.key).map((p) => ({ value: p.key, textContent: p.name || p.key })); },
+  set value(key) { const p = (state.projects || []).find((x) => x && x.key === key); if (p) attachByKeyPath = p.path; },
+  // The picker's choice goes through the Target guard like any other change: Cancel restores the whole previous target.
+  dispatchEvent: () => { if (attachByKeyPath) void applyNewRunProject(attachByKeyPath); return true; },
+};
+let attachByKeyPath = '';
+function cycleNewRunProject() {
+  const projects = (state.projects || []).filter((p) => p && p.path);
+  if (!projects.length) return;
+  const at = projects.findIndex((p) => p.path === el.projectSelect.value);
+  void applyNewRunProject(projects[(at + 1) % projects.length].path);
+}
+for (const ta of [el.prompt, el.promptMarkdown]) {
+  newRunHash.set(ta, attachHashSearch({
+    textarea: ta, store: newRunAttachStore, doc: document, onProjectCycle: cycleNewRunProject,
+    getScope: () => newRunScope(newRunTarget()).scope,
+    searchFn: ({ scopeType, scopeKey, q = '', exclude = [] }) => {
+      const params = new URLSearchParams({ scopeType, scopeKey, q });
+      if (exclude.length) params.set('exclude', exclude.join(','));
+      return attachFetch(`/api/requirements/search?${params}`);
+    },
+    position: (t, caret) => {
+      const { x, y } = mentionAnchor(t, caret);
+      return { left: Math.min(x, Math.max(0, (window.innerWidth || 0) - 330)), top: y + 4 };
+    },
+  }));
+}
+// The project adapter's change applies the target inside the Target guard, so the entry's own setRunTarget does nothing here.
+mountNewRunAttach({ button: pullBtn, store: newRunAttachStore, getTarget: newRunTarget, setRunTarget: () => {}, projectSelect: attachByKey });
+/** Attach is for the built-in Prompt / Markdown sources: a plugin source supplies its own task. */
+function syncNewRunAttach() {
+  if (pullBtn) pullBtn.disabled = !!state.activePluginSource;
+  const items = newRunAttachStore.get().items;
+  el.title.placeholder = items.length ? suggestTitle(items) : NEW_RUN_TITLE_PLACEHOLDER;
+  const cards = document.getElementById('attach-cards');
+  if (cards) {
+    const shown = state.activePluginSource ? [] : items;
+    renderAttachedCards(cards, shown, { onRemove: (seq) => newRunAttachStore.remove(seq), flagOn: () => flagOn('requirements') });
+    cards.hidden = !shown.length;
+  }
+  // The wrapper is not flag-gated: it hides only when the flag is off AND no card is left to explain.
+  const field = document.getElementById('pull-field');
+  if (field) field.hidden = !flagOn('requirements') && !(state.activePluginSource ? [] : items).length;
+}
+const NEW_RUN_TITLE_PLACEHOLDER = el.title.placeholder;
+newRunAttachStore.subscribe(syncNewRunAttach);
+onFlagChange('requirements', syncNewRunAttach);
+el.sourceSeg?.addEventListener('click', () => setTimeout(syncNewRunAttach, 0));
+syncNewRunAttach();
+/** On entering New run: the store is restored from the session by construction; check it against the server once. */
+function restoreNewRunAttach() {
+  syncNewRunAttach();
+  const fetchJson = (url, opts = {}) => attachFetch(url, { ...opts, body: typeof opts.body === 'string' ? JSON.parse(opts.body) : opts.body, method: opts.method });
+  void revalidateAttached(newRunAttachStore, fetchJson, newRunScope(newRunTarget()).scope, () => flagOn('requirements')).catch(() => {});
+}
 
 /** History Overview DURATION sub-line: `9 executions · 2 loop deliveries`. */
 function histCountsLine(st) {
@@ -33554,6 +34905,7 @@ function statusPill(r) {
     if (r.pauseReason === 'night_guardrail') return { family: 'amber', text: 'Paused · Away mode limit' };
     if (r.pauseReason === 'drain') return { family: 'amber', text: 'Paused · restart' };
     if (r.pauseReason === 'time_limit') return { family: 'amber', text: 'Paused · time limit' };
+    if (r.pauseReason === 'model_confirm') return { family: 'amber', text: 'Paused · confirm model' };
     // An error pause is parked and resumable (never dead), so it stays in the amber family.
     if (r.pauseReason === 'error') return { family: 'amber', text: 'Paused · error' };
     if (r.pauseReason === 'recoverable') return { family: 'amber', text: 'Paused · recoverable' };
@@ -33723,22 +35075,42 @@ function subModelPillHtml(model) {
 // at run time (§4.2), so it gets no pill, like '' (inherit the CLI/global default, which the
 // client cannot resolve): no entry, never a guess. An id the catalog does not know is kept, as
 // the run keeps it. v2 graph manifests only (frozen v1 snapshots recorded none).
-function stepModelByNode(stepper, runEngine = 'claude') {
+function stepModelByNode(stepper, runEngine = 'claude', steps = null) {
   const out = {};
   if (!isGraphManifest(stepper)) return out;
+  // #1450: the model each node's session actually started ([init], step.modelUsed), and who picks when no one did.
+  const used = modelUsedByNode(steps);
+  const tool = engineLabel(runEngine || 'claude');
   for (const n of stepper.graph.nodes) {
-    if (!n || n.kind !== 'agent' || !n.id || typeof n.model !== 'string' || !n.model) continue;
+    if (!n || n.kind !== 'agent' || !n.id) continue;
+    if (typeof n.model !== 'string' || !n.model) {
+      // No model in the manifest: the tool picked. Show what ran once [init] said so, else who decides.
+      // A pre-#1450 manifest (no modelSource) shows nothing new until a model is observed.
+      if (used[n.id]) out[n.id] = { model: used[n.id], effort: '', observed: true, tool };
+      else if (Object.hasOwn(n, 'modelSource')) out[n.id] = { model: '', effort: '', decides: true, tool };
+      continue;
+    }
+    // A node is judged on its own harness (a step pinned to another one), else the run's.
+    const onEngine = typeof n.engine === 'string' && n.engine ? n.engine : runEngine;
     const entry = modelById(n.model);
-    if (entry && !runsOn(entry, runEngine)) continue;
+    if (entry && !runsOn(entry, onEngine)) continue;
     // A node that ran the model the run's own overlay set (the Ask run card's per-agent picks, manifest.runOverlay) says
     // so on its pill — not when another model ran (a pinned Memory pair or the run's engine won), and never for an entry
     // naming only fan-out or questions.
     const ov = stepper.runOverlay && stepper.runOverlay.nodes && typeof stepper.runOverlay.nodes === 'object' && Object.hasOwn(stepper.runOverlay.nodes, n.id)
       ? stepper.runOverlay.nodes[n.id] : null;
     const perRun = !!(ov && typeof ov.model === 'string' && ov.model && typeof n.model === 'string' && ov.model.toLowerCase() === n.model.toLowerCase());
-    out[n.id] = { model: n.model, effort: typeof n.effort === 'string' ? n.effort : '', ...(perRun ? { perRun: true } : {}) };
+    const ran = used[n.id] && sameModelId(used[n.id], n.model) ? null : used[n.id] || null;
+    out[n.id] = { model: n.model, effort: typeof n.effort === 'string' ? n.effort : '', ...(perRun ? { perRun: true } : {}),
+      ...(n.modelSource === 'worca-default' ? { worcaDefault: true } : {}), ...(ran ? { ranOn: ran } : {}),
+      ...(onEngine !== (runEngine || 'claude') ? { engine: onEngine } : {}) };
   }
   return out;
+}
+/** Two ids name one model: case, a vendor prefix, `[1m]`, a dated snapshot and dots vs dashes aside (model-roles upstreamKey). */
+function sameModelId(a, b) {
+  const k = (id) => String(id ?? '').trim().toLowerCase().replace(/^[a-z0-9._-]+\//, '').replace(/\[1m\]$/, '').replace(/-\d{8}$/, '').replace(/\./g, '-');
+  return k(a) === k(b);
 }
 
 // The Agents-tab group header's model pill: the catalog label when the id is
@@ -33746,14 +35118,19 @@ function stepModelByNode(stepper, runEngine = 'claude') {
 // "· effort" only when one was set. Same quiet outline as the sub-agent rows'
 // run-model pill — it is configuration, not status.
 function stepModelPillHtml(sel) {
+  if (sel && sel.decides) return `<span class="sub-model-pill">${escapeHtml(`Default · ${sel.tool || 'Claude Code'} decides`)}</span>`;
   if (!sel || !sel.model) return '';
   const m = modelById(sel.model);
   // "· bridged" (model-bridge-design.md §8.6): the node ran through worca's own
   // bridge — the catalog knows, the manifest does not.
   // " · this run": the model came from the run's own per-run picks (manifest.runOverlay) — said in the text, like
   // " · bridged", because a title is hover-only (touch, keyboard and screen-reader users never get it).
-  const text = (m ? m.label : sel.model) + (sel.effort ? ` · ${sel.effort}` : '') + (m && m.bridged ? ' · bridged' : '') + (sel.perRun ? ' · this run' : '');
-  return `<span class="sub-model-pill"${sel.perRun ? ' title="Picked for this run only"' : ''}>${escapeHtml(text)}</span>`;
+  const text = (m ? m.label : sel.model) + (sel.effort ? ` · ${sel.effort}` : '') + (sel.engine ? ` · on ${engineLabel(sel.engine)}` : '') + (m && m.bridged ? ' · bridged' : '') + (sel.perRun ? ' · this run' : '')
+    + (sel.observed ? ` · ${sel.tool || 'Claude Code'}'s pick` : '') + (sel.worcaDefault ? ' · Worca default' : '');
+  // #1450: the session started another model than the one asked for.
+  const ran = sel.ranOn ? (modelById(sel.ranOn)?.label || sel.ranOn) : '';
+  const title = ran ? `Asked for ${m ? m.label : sel.model}, ran on ${ran}` : sel.perRun ? 'Picked for this run only' : '';
+  return `<span class="sub-model-pill"${title ? ` title="${escapeHtml(title)}"` : ''}>${escapeHtml(text)}</span>`;
 }
 
 // Neutral count badge for how many times an agent / sub-agent invoked the graphify
@@ -34285,6 +35662,9 @@ function artifactViewerDeps() {
     loadMarkdown: window.__worcaTestHooks?.askMarkdown
       ?? (() => Promise.all([import('/vendor/marked/marked.esm.js'), import('/vendor/dompurify/purify.es.mjs')])
         .then(([m, d]) => ({ marked: m.marked, createDOMPurify: d.default }))),
+    // No LibreOffice on the server (the PDF probe answers 501): the simplified in-browser Office preview, loaded on demand.
+    loadOfficeLite: () => import('./artifacts/office-lite.mjs'),
+    officeImport: window.__worcaTestHooks?.officeImport,
   };
 }
 
@@ -34397,6 +35777,7 @@ function runArtifactUrls(base) {
     text: (rel) => `${base}/artifact?rel=${encodeURIComponent(rel)}`,
     raw: (rel) => rawArtifactUrl(base, rel),
     download: (rel) => `${rawArtifactUrl(base, rel)}?download=1`,
+    pdf: (rel) => `${rawArtifactUrl(base, rel)}?as=pdf`,
   };
 }
 
@@ -35022,25 +36403,111 @@ const requirementsView = createRequirementsView({
   // who: the signed-in person on a shared deployment (the start-before-Ready dialog's "Recorded as"), else nobody
   // openRun: a started run is where the person goes next (the run page, #running/<runId>)
   // confirm: the model switch asks it (9c board 4), in the shared confirm modal
+  // engineRows: the run setup's model picker reads each harness's readiness through it
   deps: { route: (p) => { location.hash = p ? `#requirements/${p}` : '#requirements'; }, who: () => viewer.name, openRun: (runId) => { location.hash = `#running/${runId}`; },
-    confirm: (o) => confirmModal(o) },
+    confirm: (o) => confirmModal(o), engineRows: readyEngineRows },
 });
 // Turning the flag off while the page is open leaves it for Chat (a hidden page must not stay up).
 onFlagChange('requirements', (on) => { if (!on && currentView() === 'requirements') showView('chat', ''); });
 
-// Design (behind the design flag): the page module owns #design-host and the nav row's live count; app.js routes and
-// relays the design-* frames and hello's design list.
-const designView = mountDesignView({ doc: document, win: window, host: $('#design-host'), fetch: (...a) => fetch(...a), sendWs: (obj) => { const s = state.ws; if (s && state.wsReady) { try { s.send(JSON.stringify(obj)); } catch { /* ignore */ } } }, route: (p) => { location.hash = p ? `#design/${p}` : '#design'; }, prompt: (o) => promptModal(o),
-  createChat: createDesignChat, confirm: (o) => confirmModal(o),
-  // As the Workflows chat's: once marked loads, the open design chat paints its replies again.
-  renderMarkdown: (text, mount) => {
-    const out = hdMarkdown.render(text);
-    if (out && out.kind === 'md') { mount.classList.add('ask-md'); mount.replaceChildren(out.frag); return; }
-    mount.textContent = text;
-    if (!hdMarkdown.isReady() && !hdMarkdown.isFailed()) void hdMarkdown.ensure().then((ok) => { if (ok) repaintDesignChat(); });
+// Design (behind the design flag): the page module owns the nav row's live count and `#design/<id>`; `#design` itself is
+// the design start with every design shown (#chat/new/design/all, showView). app.js routes and relays the design-*
+// frames and hello's design list. A design opens as its chat (docs/design.md, "In the chat"): the Chat page's design
+// slot holds its dock, the tool panel's Design tab its stage.
+const designSendWs = (obj) => { const s = state.ws; if (s && state.wsReady) { try { s.send(JSON.stringify(obj)); } catch { /* ignore */ } } };
+// As the Workflows chat's: once marked loads, the open design chat paints its replies again.
+const designRenderMarkdown = (text, mount) => {
+  const out = hdMarkdown.render(text);
+  if (out && out.kind === 'md') { mount.classList.add('ask-md'); mount.replaceChildren(out.frag); return; }
+  mount.textContent = text;
+  if (!hdMarkdown.isReady() && !hdMarkdown.isFailed()) void hdMarkdown.ensure().then((ok) => { if (ok) designStudio?.studio.repaintChat(); });
+};
+const DESIGN_HASH_RE = /^#?design\/(d_[0-9a-f]{12})$/;
+/** A design's chat: `#chat/<its thread>`. A design whose chat is gone (Delete all chat history) gets it back first; one
+ *  that cannot be read leaves the design start as it was (a tile of it), else goes to `#design`. */
+async function openDesignChat(designId) {
+  let threadId = null;
+  try {
+    const r = await fetch(`/api/design/${encodeURIComponent(designId)}`);
+    const j = r.ok ? await r.json() : null;
+    threadId = j && j.design && typeof j.design.threadId === 'string' ? j.design.threadId : null;
+    if (r.ok) {
+      const t = await fetch('/api/ask/threads', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ mode: 'design', designId }) });
+      const tj = await t.json().catch(() => null);
+      threadId = (tj && tj.thread && tj.thread.id) || (tj && tj.threadId) || threadId;
+    }
+  } catch { threadId = null; }
+  // A tile of the design start whose design cannot be read (deleted elsewhere): the start stays, its kind and list too.
+  if (!threadId && /^#chat\/new\/design(\/all)?$/.test(location.hash)) return;
+  const target = threadId ? `chat/${threadId}` : 'design';
+  // `#design/<id>` itself (a tile's own tab, an Activity row) is swapped, so Back does not land on it and come back here.
+  if (DESIGN_HASH_RE.test(location.hash)) location.replace(`#${target}`);
+  else location.hash = target;
+}
+/** The design pages' links: a design's own address opens its chat; anything else is a hash. */
+const designNavigate = (hash) => {
+  const m = DESIGN_HASH_RE.exec(String(hash));
+  if (m) void openDesignChat(m[1]);
+  else location.hash = String(hash).replace(/^#/, '');
+};
+// A bad `#design/<x>` (no design id) goes to `#design`, swapped as openDesignChat's: pushed, Back would land on the bad
+// address again, be sent on again, and never get past it.
+const designView = mountDesignView({ doc: document, win: window,
+  route: (p) => {
+    const target = p ? `#design/${p}` : '#design';
+    if (!p && /^#design\/./.test(location.hash)) location.replace(target);
+    else location.hash = target;
   },
+  openDesign: (id) => openDesignChat(id) });
+/** The design chat on screen: { threadId, studio } (design/studio.mjs), or null. The ask panel mounts and unmounts it. */
+let designStudio = null;
+let designKind = null;   // the tool panel's Design tab (tool-design.mjs), registered with the panel's kinds
+// The proof hook (tools/verify-design-stage-cdp.mjs): a frame as the socket would push it; the open design chat's stage.
+window.__design = { view: designView, pushFrame: (f) => { pushDesignFrame(f); designStudio?.studio.pushFrame(f); }, stage: () => designStudio?.studio.stage() || null };
+/** The tool panel's Design tab for this design chat: open, beside the chat. */
+function showDesignStage(threadId) {
+  return toolPanel ? toolPanel.openIn('design', { type: 'chat', id: threadId }, {}, { match: () => true }) : Promise.resolve(null);
+}
+const designChatHost = {
+  enabled: () => flagOn('design'),   // Design off: a design chat reads as a plain transcript, and Design starts nothing
+  mount(slot, { threadId, designId, setTitle, headSlot, setComposer }) {
+    designChatHost.unmount();
+    const studio = createDesignStudio({ doc: document, win: window, host: slot, headSlot, designId, fetch: (...a) => fetch(...a), sendWs: designSendWs,
+      renderMarkdown: designRenderMarkdown, confirm: (o) => confirmModal(o), prompt: (o) => promptModal(o), navigate: designNavigate,
+      createChat: createDesignChat, showStage: () => showDesignStage(threadId), setTitle, setComposer,
+      onCards: () => designChatCards.repaint(), onDeleted: () => askPanel?.setDesign(threadId, null) });
+    designStudio = { threadId, studio };
+    repaintChatNav();                 // a design chat is the sidebar's Design
+    designKind?.ready(threadId);      // a Design tab the panel mounted before the studio existed
+    toolPanel?.onContextChange();     // a design chat's tools open in its design's folder (toolPageContext chatDesign)
+    void showDesignStage(threadId);   // the design shows beside its chat
+  },
+  /** A new design chat: the Chat page's start (kind, project, models, files), which creates the design and opens it,
+   *  with the designs under it (`all`: every one shown, as `#design` asks). */
+  mountStart(slot, { setComposer, all = false } = {}) {
+    designChatHost.unmount();
+    const page = createDesignStartPage({ doc: document, win: window, host: slot, fetch: (...a) => fetch(...a), navigate: designNavigate, setComposer,
+      all, onAll: designStartRoute });
+    designStudio = { threadId: null, studio: page };
+  },
+  unmount() { const d = designStudio; designStudio = null; d?.studio.destroy(); if (d) { designChatCards.repaint(); repaintChatNav(); } },
+};
+/** Show all designs and Show fewer on the design start: the address follows, swapped (no history entry, no route, so the
+ *  start and what was typed stay), and Back from a design opened later returns to the list as it was left. Only while
+ *  the start's own address shows: after a tile click the hash is the design's chat while the start stays up until that
+ *  chat loads (ask-panel syncDesign). */
+function designStartRoute(all) {
+  if (!/^#chat\/new\/design(\/all)?$/.test(location.hash)) return;
+  const target = all ? 'chat/new/design/all' : 'chat/new/design';
+  if (location.hash.slice(1) === target) return;
+  try { window.history.replaceState(null, '', `#${target}`); } catch { /* sandboxed */ }
+  wfvReturn = target;                          // no hashchange, so showView never records the swapped address
+}
+// Turning the flag off leaves the Design page and the design start for the Chat home (a hidden page must not stay up).
+onFlagChange('design', (on) => {
+  if (!on && (currentView() === 'design' || (currentView() === 'chat' && /^#chat\/new\/design(\/|$)/.test(location.hash)))) showView('chat', '');
+  updateNavCounts();
 });
-onFlagChange('design', (on) => { if (!on && currentView() === 'design') showView('chat', ''); updateNavCounts(); });
 
 /** The workspace read-model, loaded once: a scheduled run card names "Workspace · <name>", not an id. */
 function withWorkspaces() {
@@ -35139,7 +36606,7 @@ function runsLiveItem(r) {
     // run takes its History row's PR (rdModelRun), so it reads In review here as on the run page.
     run: rdModelRun(r), memo: memoFor(r.pipelineId || r.runId),
     // D32: "Cost unknown" for an engine with none. D5: a finished run still live at 0 takes its History row's cost.
-    cost: engineReportsCost(r.runEngine) ? memberCostUsd(r.totalCostUsd, rec && rec.totalCostUsd) : null,
+    cost: runCostKnown(r.runEngine, r.runEngines) !== 'none' ? memberCostUsd(r.totalCostUsd, rec && rec.totalCostUsd) : null,
   };
 }
 /** A Run-after chain member (scheduler.mjs runChains) has `state` done|current|waiting|failed and `prUrl`, never a
@@ -35187,12 +36654,14 @@ const withChainPr = (x, m) => (x && !x.pr && m.prUrl && isTerminalStatus(x.statu
 
 /** A group (a Run-after chain from schedulesView, or a feature / user group from /api/run-groups) as the list's group
  *  item: members carry their raw run from this tab's live map, else memberRun, else their ticket. */
-function runsGroupItem({ id, groupKind, title, members, cost = null, planning = null }) {
+function runsGroupItem({ id, groupKind, title, members, cost = null, planning = null, smallRuns = false, hold = null, checks = null }) {
   // /api/run-groups members carry no projectKey / historyKey (src/core/run-groups.mjs member()), so a finished member's
   // href would fall back to the group page itself: the History row knows the project.
   const histPk = (pid) => (pid ? (((state.historyAll || []).find((p) => p && p.id === pid)) || {}).projectKey || '' : '');
+  const words = smallRuns && flagOn('shaperSmallRuns');
   const items = members.map((m, i) => {
     const r = m.pipelineId ? latestPipelineRun(m.pipelineId) : null;
+    const stopped = !!(r && r.pendingQuestion && r.pendingQuestion.stop);
     const h = histOf(m.pipelineId);
     // An after-ticket has no start time: never pass its AFTER_RUN_AT sentinel (runModel does not read ticket.after).
     // `m.after` (D29): the 1-based position of the member this one runs after (runChains and listRunGroups both send it),
@@ -35213,6 +36682,12 @@ function runsGroupItem({ id, groupKind, title, members, cost = null, planning = 
       ticketId: m.ticketId || null, runId: r ? r.runId : '', kind: r ? 'live' : m.pipelineId ? 'hist' : 'sched', run,
       roundOf: m.pipelineId ? runsRoundOf(r, h) : null,   // null for an origin: a member's own rounds fold under it
       memo: memoFor(m.pipelineId || m.ticketId || `${id}:${i}`),
+      // D2: a small-runs member's row says the card's short word (runs-list.mjs cardShortWord), read from its live snapshot.
+      // Its pending question rides along, as the run page's Agents panel attaches it, so a waiting member reads so.
+      // A stopped run without a Care plan says so too; a finished one without either has none and reads `done`.
+      ...(smallRuns && r && ((r.stepper && r.stepper.careRun) || (words && stopped)) ? { snap: { ...snapshotFromState(r), pendingQuestion: r.pendingQuestion || null } } : {}),
+      // The server's slice words; its stop is dropped once this tab's live run asks nothing more (a stale answer).
+      ...(words && m.slice ? { slice: r && !stopped && m.slice.stop ? { ...m.slice, stop: undefined } : m.slice } : {}),
       startedAt: (r && r.startedAt) || (h && h.startedAt) || null,       // D12: the group's dispatch time
       // D32: the member's own cost (a chain's total sums these). D5: max(live, History, the group's stored byPipeline):
       // a finished run in the live map at 0 never wins.
@@ -35230,6 +36705,15 @@ function runsGroupItem({ id, groupKind, title, members, cost = null, planning = 
       startedAt: (r && r.startedAt) || (hp && hp.startedAt) || null,
       cost: memberCostUsd(r && r.totalCostUsd, hp && hp.totalCostUsd, cost && cost.byPipeline ? cost.byPipeline[planning.pipelineId] : undefined) };
   })() : null;
+  // Slice 11 (R-ux-4): the feature's Verifier rounds (the server's `checks`, flag on), each linked to its run page as a
+  // member is; its cost is the group's stored one (the round was already priced, slice 6).
+  const checkItems = flagOn('shaperSmallRuns') && Array.isArray(checks) ? checks.map((c) => {
+    const r = c.pipelineId ? latestPipelineRun(c.pipelineId) : null;
+    const pk = histPk(c.pipelineId);
+    return { kind: 'check', round: c.round, state: c.state, gaps: c.gaps ?? null, pipelineId: c.pipelineId, runId: r ? r.runId : '',
+      href: r ? `#running/${r.runId}` : pk ? `#history/${pk}/${c.pipelineId}` : `#feature/${encodeURIComponent(id)}`,
+      cost: cost && cost.byPipeline && typeof cost.byPipeline[c.pipelineId] === 'number' ? cost.byPipeline[c.pipelineId] : null };
+  }) : null;
   const first = members[0] || {};
   const g = runsGroupFor({ pipelineId: first.pipelineId || '', projectDir: first.projectDir || '', workspaceId: first.workspaceId || '', projectKey: first.projectKey || '' });
   // groupProgress keeps the fill monotonic through `memo` (max of every fraction seen). Adding a member lowers the true
@@ -35240,11 +36724,13 @@ function runsGroupItem({ id, groupKind, title, members, cost = null, planning = 
   const liveCost = Object.fromEntries(items.filter((x) => x.kind === 'live' && x.run && typeof x.run.totalCostUsd === 'number')
     .map((x) => [x.pipelineId, x.run.totalCostUsd]));
   return { id, groupKind, title, members: items, planning: planningItem, groupKey: g.key, groupName: g.name, memo: memoFor(`group:${id}:${sig}`),
-    cost, liveCost, costMemo: memoFor(`cost:${id}:${sig}`) };
+    cost, liveCost, costMemo: memoFor(`cost:${id}:${sig}`), ...(smallRuns ? { smallRuns: true } : {}), ...(hold ? { hold } : {}),   // D2 (D1)
+    ...(checkItems && checkItems.length ? { checks: checkItems } : {}) };
 }
 function runsGroupItems() {
   const owned = new Set((state.runGroups || []).flatMap((g) => g.members.flatMap((m) => [m.pipelineId && `p:${m.pipelineId}`, m.ticketId && `t:${m.ticketId}`])).filter(Boolean));
-  const own = (state.runGroups || []).map((g) => runsGroupItem({ id: g.id, groupKind: g.kind, title: g.title, members: g.members, cost: g.cost || null, planning: g.planning || null }));
+  const own = (state.runGroups || []).map((g) => runsGroupItem({ id: g.id, groupKind: g.kind, title: g.title, members: g.members, cost: g.cost || null, planning: g.planning || null,
+    smallRuns: g.smallRuns === true, hold: (flagOn('shaperSmallRuns') && g.hold) || null, checks: g.checks || null }));
   // A run group stands for any chain that shares a member with it (a feature's Run-after chain).
   const chains = schedulesView.chains()
     .filter((c) => !c.members.some((m) => owned.has(`p:${m.pipelineId}`) || owned.has(`t:${m.ticketId}`)))
@@ -35261,6 +36747,7 @@ async function loadRunGroups() {
     else { state.runGroups = state.runGroups || []; state.runGroupsFailed = true; }
   } catch { state.runGroups = state.runGroups || []; state.runGroupsFailed = true; }
   state.runGroupsLoaded = true;                    // every outcome: the group page tells "loading" from "no such group"
+  updateNavCounts();                               // slice 7: a confirmation hold counts in the Runs badge
   scheduleRunsPaint();
   paintGroupPageNow();
   repaintOpenRunGroupLine();                       // the Group row changes at once after Add to group
@@ -35294,9 +36781,12 @@ el.groupDetail?.addEventListener('click', (e) => {
   e.preventDefault();
   backToRunsList();
 });
-async function mountGroupPage(host, { route, id, tab, reentered = false }) {
+async function mountGroupPage(host, { route, id, tab, reentered = false, at = '' }) {
   const fresh = GROUP_PAGE.host !== host || GROUP_PAGE.route !== route || GROUP_PAGE.id !== id;
-  Object.assign(GROUP_PAGE, { host, route, id, tab, reentered, ...(fresh ? { featureId: '', gone: false, failed: false, resolving: false, unmarked: 0 } : {}) });
+  if (fresh || tab !== 'requirements') GROUP_PAGE.at = '';   // slice 6 (D14): another feature or tab drops Mark and ship's reveal
+  if (at === 'ship') GROUP_PAGE.at = 'ship';                  // Shaper slice 7 (D6): #feature/ID/requirements/ship, after the reset
+  if (reentered && host.__gp) delete host.__gp.__order;   // small runs slice 10 (D6): Show order is closed again on a return
+  Object.assign(GROUP_PAGE, { host, route, id, tab, reentered, ...(fresh ? { featureId: '', gone: false, failed: false, resolving: false, unmarked: 0, stackedOnly: false, feature: null, requirements: false, memberKey: '', memberPending: '', memberFailed: '' } : {}) });
   if (fresh) {
     groupMessage(host, 'feature-page-loading', 'Loading group…');
     host.__gp = null;
@@ -35313,20 +36803,61 @@ async function mountGroupPage(host, { route, id, tab, reentered = false }) {
     if (route === 'feature') {
       // F47: a replaced feature id carries on as the newest one; the route answers the current id, or 404.
       GROUP_PAGE.resolving = true;
+      const ticket = groupFeatureTicket();
       const res = await fetch(`/api/shape/features/${encodeURIComponent(id)}`).catch(() => null);
       if (GROUP_PAGE.id !== id || GROUP_PAGE.route !== route) return;
       GROUP_PAGE.resolving = false;
       // A network error or a 5xx is not an answer; only a 404 means gone.
       GROUP_PAGE.failed = !res || (!res.ok && res.status !== 404);
       if (res && res.status === 404) GROUP_PAGE.gone = true;
-      else if (res && res.ok) { const f = await res.json().catch(() => ({})); GROUP_PAGE.featureId = f.id || id; GROUP_PAGE.unmarked = unmarkedOf(f); }
+      else if (res && res.ok) { const f = await res.json().catch(() => ({})); GROUP_PAGE.featureId = f.id || id; GROUP_PAGE.unmarked = unmarkedOf(f); GROUP_PAGE.stackedOnly = stackedOnlyOf(f); if (ticket >= GROUP_PAGE.featureApplied) { GROUP_PAGE.featureApplied = ticket; storeGroupFeature(f); } }
     }
   }
   paintGroupPageNow();
 }
+/** Shaper small runs s4 (D8, D10): a marked feature's Runs rows take word and mark from runStatus, over the members'
+ *  own slices and snapshots (s5 D2: the shared adapter). */
+function featureRowStatus(row) {
+  return memberStatusOf(row.members);
+}
+/** Small runs slice 7 (D9): the marked feature page's state line and need count, from the stored feature view and the
+ *  members' live snapshots. */
+function featureLineOf(row) {
+  const snapOf = memberSnapOf(row);
+  return { stateLine: featureStateLine(GROUP_PAGE.feature, { snapOf }), needCount: stopLinesOf(GROUP_PAGE.feature, { snapOf }).length };
+}
+/** A group row's member snapshots by pipeline id (the feature page's state line, need count and stop list read them). */
+function memberSnapOf(row) {
+  return (pid) => { const mb = row.members.find((x) => x.pipelineId === pid); return (mb && mb.snap) || null; };
+}
+/** Slice 12 (D11): the Runs tab's stop list deps, the Chat card's wiring, built once per group page host. An opened
+ *  line's step card answers for that line's live run; a failed line's Resume posts the feature's resume route. `lines`
+ *  holds the last painted lines by key, so a delegate follows a resumed run. `focusOut` (D6) only notes the move: the
+ *  rows are repainted after the list, so paintGroupPageNow focuses them once the page has painted. */
+function groupStopDeps(gp) {
+  if (gp.__stopDeps) return gp.__stopDeps;
+  const lines = new Map();
+  const live = (key) => { const l = lines.get(key); return l && l.ref ? chatLiveRun(l.ref) : null; };
+  gp.__stopDeps = {
+    lines,
+    focusPending: false,
+    paintQuestion: chatPaintQuestion,
+    releaseQuestion: chatReleaseQuestion,
+    bindQuestion: (qHost, line) => delegateQuestion(qHost, {
+      question: () => { const r = live(line.key); return (r && r.pendingQuestion) || null; },
+      send: (payload) => { const r = live(line.key); if (r) void postAnswer(r, payload); },
+    }),
+    resume: (index) => chatRunControls.featureAct(GROUP_PAGE.featureId || GROUP_PAGE.id, 'resume', { index }),
+    focusOut: () => { gp.__stopDeps.focusPending = true; },
+  };
+  return gp.__stopDeps;
+}
 function paintGroupPageNow() {
   const { host, route, id, tab } = GROUP_PAGE;
   if (!host || !host.isConnected || host.closest('.view.hidden') || !(el.groupShell && el.groupShell.classList.contains('detail-open'))) return;
+  // Small runs D3: a Requirements deep link keeps "Loading group…" while its feature is fetched (no Runs flash). Slice 6
+  // (D6): so do the tabs whose place the marked feature's layout decides (flag on): Cost, Log and the old Overview address.
+  if (route === 'feature' && (tab === 'requirements' || (flagOn('shaperSmallRuns') && ['cost', 'logs', 'overview'].includes(tab))) && GROUP_PAGE.resolving && !host.__gp) return;
   const gid = GROUP_PAGE.featureId || id;
   const it = !GROUP_PAGE.gone && state.runGroupsLoaded ? runsGroupItems().find((g) => g.id === gid) : null;
   if (!it && !GROUP_PAGE.gone && (state.runGroupsFailed || GROUP_PAGE.failed)) {
@@ -35359,7 +36890,10 @@ function paintGroupPageNow() {
     }
     return;                                        // not loaded yet: "Loading group…" stays; loadRunGroups repaints
   }
-  const row = groupRow(it, { now: Date.now() });
+  // Small runs: the runs are done but the feature is not ready to ship (the Verifier checks, asks or stopped): say so, as
+  // the Runs list's held row does, never "Ready to ship".
+  const hold = it.hold || (route === 'feature' && GROUP_PAGE.requirements ? shipWaitText(GROUP_PAGE.feature) : '');
+  const row = groupRow(hold ? { ...it, hold } : it, { now: Date.now() });
   if (!host.__gp) {
     host.__gp = buildGroupPage(document);
     // Run 4 (D2): a Shaper card set or changed its primary's label: the bar's Answer follows it.
@@ -35370,8 +36904,20 @@ function paintGroupPageNow() {
   // The run page's Logs tab is Expert-only, so the group page offers its Logs (links to those tabs) at Expert too.
   // Run 3 (D15): the group's Labels fact is the read-only union of its members' History labels.
   const labels = [...new Set(row.members.flatMap((mb) => (histOf(mb.pipelineId) || {}).labels || []))].sort();
-  paintGroupPage(host.__gp, { row, project: row.groupName || '', tab, overview: row.groupKind === 'feature', logs: levelAtLeast('expert'), labels,
-    unmarked: route === 'feature' ? GROUP_PAGE.unmarked : 0 }, {
+  // Slice 6 (D7): in a marked feature's layout, Log (it holds the step log) shows at every level; its Open logs rows stay
+  // Expert-only (`expert`).
+  const layout = route === 'feature' && GROUP_PAGE.requirements;
+  // Slice 12 (D9, D11): the marked feature's open stops, listed first on the Runs tab; while one is listed, the question
+  // slot shows no step card (its line is the way in).
+  const stops = layout ? stopLinesOf(GROUP_PAGE.feature, { snapOf: memberSnapOf(row) }) : null;
+  const stopDeps = layout ? groupStopDeps(host.__gp) : null;
+  if (stopDeps) { stopDeps.lines.clear(); for (const l of stops) stopDeps.lines.set(l.key, l); }
+  const listed = !!stops && stops.some((l) => !l.failed);
+  paintGroupPage(host.__gp, { row, project: row.groupName || '', tab, overview: row.groupKind === 'feature', logs: layout || levelAtLeast('expert'), labels,
+    unmarked: route === 'feature' ? GROUP_PAGE.unmarked : 0, stackedOnly: route === 'feature' && GROUP_PAGE.stackedOnly,
+    requirements: layout, ...(layout ? { shortState: memberShortWord, status: featureRowStatus(row), ship: groupShipOf(GROUP_PAGE.feature), ...featureLineOf(row), stops, order: (GROUP_PAGE.feature && GROUP_PAGE.feature.slices) || null,
+      expert: levelAtLeast('expert'), cost: featureCostModel(it, row.costUsd), markOpen: markOpen(GROUP_PAGE.feature),
+      ...(typeof GROUP_PAGE.feature?.hasChat === 'boolean' ? { hasChat: GROUP_PAGE.feature.hasChat } : {}) } : {}) }, {
     onAction: (aid, b) => groupAction(row, aid, b),
     onMore: (anchor) => openGroupMoreMenu(anchor, row),
     // One ship flow (D11): Create PR / View PR ▾ / View PRs ▾ on the status line, for every group kind.
@@ -35386,39 +36932,186 @@ function paintGroupPageNow() {
     },
     labelChip: (d, l) => labelChip(d, l, {}),
     onTab: (t) => { location.hash = t === 'runs' ? base : `${base}/${t}`; },
-    mountQuestion: (slot, mb) => paintGroupQuestion(slot, mb),
+    mountQuestion: (slot, mb) => paintGroupQuestion(slot, listed ? null : groupAsker(slot, row, mb)),
+    ...(stopDeps ? { stopDeps } : {}),
     answerLabel: () => answerLabelOf(host.__gp.querySelector('.gpage-question')),
+    // Slice 11 (d11-2): the footer Resume acts on the group's current member, so it reads that member's slice preview.
+    resumeLabel: () => {
+      if (route !== 'feature') return '';
+      const cur = [...(row.planning ? [row.planning] : []), ...row.members].find((mb) => mb.model === row.model.current) || null;
+      return resumeLabel(resumeAfterOf(GROUP_PAGE.feature && GROUP_PAGE.feature.slices, cur && cur.pipelineId));
+    },
     // Mount once per feature: paintGroupPageNow runs on every run frame, and a remount would refetch and rebuild the
     // Shaper view each time.
     // D10/D12: the group model's footer owns Pause / Stop / Resume, so the Shaper view omits what it already shows; a
     // change of those actions repaints the view (a same-actions repaint keeps the same .shape-feature node).
-    mountOverview: (h) => {
+    // Slice 6 (D4): `shipFirst` on the marked feature's Requirements tab; a change of it remounts the view.
+    mountOverview: (h, { shipFirst = false } = {}) => {
       const omit = (row.model && Array.isArray(row.model.actions)) ? row.model.actions.slice() : [];
       const changed = String(h.__groupOmit || '') !== String(omit);
       h.__groupOmit = omit;
-      if (h.__shapeWant !== row.groupId || !(h.__shapeOpts && h.__shapeOpts.inGroup)) mountShapeFeature(h, row.groupId, { loading: true, inGroup: true,
+      if (h.__shapeWant !== row.groupId || !(h.__shapeOpts && h.__shapeOpts.inGroup) || !!h.__shapeOpts.shipFirst !== shipFirst) mountShapeFeature(h, row.groupId, { loading: true, inGroup: true, shipFirst,
         focusFallback: () => (host.__gp ? host.__gp.querySelector('.gpage-more') : null) });   // openGroupMoreMenu's anchor
       else if (GROUP_PAGE.reentered || changed) paintShapeFeature(h);   // away: the hidden page skipped frames
       GROUP_PAGE.reentered = false;
     },
-    mountDecisions: (h, r) => { void paintGroupDecisions(h, r); },
+    // Small runs D3 (D8): a marked feature's Decisions is its decision log; the per-run receipts stay on each run's page.
+    // Deleting the receipts' signature makes an in-flight paintGroupDecisions bail at its own check.
+    mountDecisions: (h, r) => {
+      if (route === 'feature' && GROUP_PAGE.requirements) { delete h.dataset.sig; paintFeatureDecisions(document, h, GROUP_PAGE.feature); refetchGroupFeature(r); return; }
+      h.classList.remove('plan-body', 'srows', 'shape-feature-decisions');
+      void paintGroupDecisions(h, r);
+    },
+    mountRequirements: (h, r) => {
+      refetchGroupFeature(r);
+      // Link only a run with its own page: a waiting ticket's href is the feature page (or Schedules), so it stays text.
+      return renderFeatureRequirements(document, GROUP_PAGE.feature, { runHref: (n) => {
+        const mb = r.members.find((x) => x.position === n);
+        if (!mb) return null;
+        if (mb.runId) return `#running/${mb.runId}`;
+        return mb.href && mb.href.startsWith('#history/') ? mb.href : null;
+      } });
+    },
+    // Slice 6 (D5): the Log tab's step log, from the stored feature view (refetchGroupFeature keeps it fresh).
+    mountStepLog: (h, r) => { refetchGroupFeature(r); paintGroupStepLog(h, GROUP_PAGE.feature); },
+    onMarkShip: () => openShipCard(base),
     // A member with no run page yet (a waiting ticket) links its row's own href.
     logsHref: (mb) => {
       const page = mb.runId ? `#running/${mb.runId}` : mb.href || '#runs';
       return mb.runId || page.startsWith('#history/') ? `${page}/details/logs` : page;
     },
   });
+  if (stopDeps && stopDeps.focusPending) {
+    stopDeps.focusPending = false;
+    host.__gp.querySelector('.gpage-runs button, .gpage-runs a[href], .gpage-runs [tabindex]')?.focus();
+  }
+  revealShipCard();
+}
+/** Slice 6 (D5): the Log tab's step log, the lines the Overview showed: a "Step log" heading and the list, or one muted
+ *  line while there are none. Painted again only when the lines change. */
+function paintGroupStepLog(h, f) {
+  const lines = f ? featureModelOf(f, (pid) => askRunStore.byPipeline(pid)).log : [];
+  const sig = JSON.stringify(lines);
+  if (h.__stepSig === sig) return;
+  h.__stepSig = sig;
+  if (!lines.length) {
+    h.replaceChildren(Object.assign(document.createElement('p'), { className: 'empty-line muted', textContent: 'No steps yet.' }));   // the design system's empty line
+    return;
+  }
+  let list = h.querySelector(':scope > ol.shape-feature-log');
+  if (!list) {
+    list = Object.assign(document.createElement('ol'), { className: 'chat-rc-log shape-feature-log' });
+    list.setAttribute('aria-label', 'Steps');
+    h.replaceChildren(Object.assign(document.createElement('h2'), { className: 'section-title', textContent: 'Step log' }), list);
+  }
+  paintFeatureLog(document, list, lines);
+}
+/** Slice 6 (D14): Mark and ship (s7's reason link reuses it). Open the feature's Requirements, then bring its Ship card
+ *  into view and focus it once it is painted (revealShipCard). */
+function openShipCard(base) {
+  GROUP_PAGE.at = 'ship';
+  const target = `${base}/requirements`;
+  if (location.hash === target) scheduleGroupPagePaint();
+  else location.hash = target;
+}
+/** Runs after each group page paint and each paint of its feature view: while Mark and ship's intent is set and the
+ *  Ship card is in the open Requirements panel, scroll it to the top, focus it, and clear the intent. */
+function revealShipCard() {
+  if (GROUP_PAGE.at !== 'ship' || !GROUP_PAGE.host || !GROUP_PAGE.host.__gp) return;
+  const card = GROUP_PAGE.host.__gp.querySelector('.gpage-panel[data-tab="requirements"]:not([hidden]) [data-ship-card]');
+  if (!card) return;
+  GROUP_PAGE.at = '';
+  card.setAttribute('tabindex', '-1');
+  card.scrollIntoView({ block: 'start' });
+  card.focus({ preventScroll: true });
+  // Shaper slice 7 (D6): the address of a followed reason link drops `/ship`, so the same link works again.
+  if (location.hash.endsWith('/requirements/ship')) {
+    try { window.history.replaceState(null, '', location.hash.slice(0, -'/ship'.length)); } catch { /* sandboxed */ }
+  }
 }
 // Frames arrive in bursts: paint the group page once per microtask. The flag lives on GROUP_PAGE (declared at the
 // top) because History's cached paint can call this during boot, before a `let` down here is initialised.
 /** Shaper requirements s3: a feature's unmarked agreed requirements (0 without a ledger, or with the flag off: the
  *  route then leaves ship.acceptance out). The page header's Create PR locks on it, as the Ship card does. */
-function unmarkedOf(f) { const a = f && f.ship && f.ship.acceptance; return a && !a.ready ? Math.max(0, (a.total || 0) - (a.marked || 0)) : 0; }
-/** The open feature page's lock from a fetched feature view; a change repaints the page header. */
-function noteGroupFeatureLock(f) {
+function unmarkedOf(f) {
+  // Feature D1: a small-runs feature's lock is its ledger's waiting ids. Its acceptance also counts the run-owned ids,
+  // which a person can never mark (RUN_OWNED).
+  const sr = f && f.ship && f.ship.smallRuns;
+  if (sr) return sr.blocked && Array.isArray(sr.waiting) ? sr.waiting.length + (sr.unowned || []).length : 0;
+  const a = f && f.ship && f.ship.acceptance; return a && !a.ready ? Math.max(0, (a.total || 0) - (a.marked || 0)) : 0;
+}
+/** Feature D1: a small-runs feature (its marker, whatever the flag says). */
+function smallRunsOf(f) { return !!(f && f.ship && f.ship.smallRuns); }
+/** With the Shaper small runs flag off, a small-runs feature ships a PR per run, so its page never offers One. */
+function stackedOnlyOf(f) { return smallRunsOf(f) && !flagOn('shaperSmallRuns'); }
+// A Labs toggle on an open feature page: the ship line follows at once.
+onFlagChange('shaperSmallRuns', () => {
+  repaintJobs();   // Models › Jobs › Helper jobs lists Guide only while the flag is on
+  if (GROUP_PAGE.route !== 'feature' || !GROUP_PAGE.feature) return;
+  const so = stackedOnlyOf(GROUP_PAGE.feature);
+  if (so !== GROUP_PAGE.stackedOnly) { GROUP_PAGE.stackedOnly = so; scheduleGroupPagePaint(); }
+});
+/** Small runs D3 (D11): the open feature page's feature view. Its Requirements tab exists only for a marked feature with
+ *  the flag on (the route sends ship.smallRuns for a marked feature with the flag off too). */
+function storeGroupFeature(f) {
+  GROUP_PAGE.feature = f;
+  GROUP_PAGE.requirements = flagOn('shaperSmallRuns') && smallRunsOf(f);
+}
+/** What the head's Create N PRs reads from a small-runs feature, as the Ship card does: it is locked until the feature is
+ *  ready to ship, then by its ledger. */
+function groupShipOf(f) {
+  const sr = f.ship.smallRuns;
+  const wait = shipWaitText(f);
+  return { n: sr.newPrs ?? (sr.order || []).length, blocked: !!wait || !!sr.blocked, reason: wait || sr.reason || '' };
+}
+/** What the Requirements and Decisions tabs and the head paint from: every row's status text, the Care line, the ship
+ *  lock and the log. */
+function groupFeatureSig(f) {
+  const sr = f && f.ship && f.ship.smallRuns;
+  return JSON.stringify([sr ? [...(sr.owned || []), ...(sr.confirmed || [])].map((e) => [e.id, e.shown ? e.shown.text : '']) : null,
+    sr && sr.care ? sr.care.line : '', sr ? [shipWaitText(f), !!sr.blocked, sr.reason || '', sr.newPrs ?? (sr.order || []).length] : null, (f && f.log) || [],
+    // Slice 7: what the state line and the need count read (only a view with `asks`: flag on, marked, active).
+    Array.isArray(f && f.asks) ? [f.status, f.asks, (f.slices || []).map((x) => [x.index, x.state, x.nextTurn === true, x.stop || null, !!x.cannotStart,
+      // Slice 8 (d8-10): a resume held or released, or the Resume's preview, keeps the state `paused`.
+      x.heldResume ? x.heldResume.after : null, Number.isInteger(x.resumeAfter) ? x.resumeAfter : null]), f.held ? [f.held.index, f.held.reason || ''] : null] : null]);
+}
+/** Every feature fetch that may reach GROUP_PAGE takes a rising ticket before it is sent; noteGroupFeatureLock drops an
+ *  answer older than the last one applied, so a slow fetch never paints a stale feature over a newer one. */
+function groupFeatureTicket() { return ++GROUP_PAGE.featureSeq; }
+/** The open feature page's lock from a fetched feature view; a change repaints the page header. D3: the view is kept,
+ *  and a change of what the Requirements or Decisions tab shows repaints the page too. */
+function noteGroupFeatureLock(f, ticket) {
   if (GROUP_PAGE.route !== 'feature' || !f || f.id !== GROUP_PAGE.featureId) return;
+  if (ticket < GROUP_PAGE.featureApplied) return;
+  GROUP_PAGE.featureApplied = ticket;
   const n = unmarkedOf(f);
-  if (n !== GROUP_PAGE.unmarked) { GROUP_PAGE.unmarked = n; scheduleGroupPagePaint(); }
+  const so = stackedOnlyOf(f);
+  const was = [groupFeatureSig(GROUP_PAGE.feature), GROUP_PAGE.requirements];
+  storeGroupFeature(f);
+  const moved = was[0] !== groupFeatureSig(f) || was[1] !== GROUP_PAGE.requirements;
+  if (n !== GROUP_PAGE.unmarked || so !== GROUP_PAGE.stackedOnly || moved) { GROUP_PAGE.unmarked = n; GROUP_PAGE.stackedOnly = so; scheduleGroupPagePaint(); }
+}
+/** D3 (D11): while Requirements or Decisions shows a marked feature, a member that moves on (its model state) refetches
+ *  the feature once per change, as paintGroupDecisions keys on it. The key lives in GROUP_PAGE (one for both tabs),
+ *  never in the DOM; the first key after the page's own fetch is seeded without a refetch. A failed refetch keeps the
+ *  painted rows and stores no key: the next change retries. */
+function refetchGroupFeature(row) {
+  const key = [...(row.planning ? [row.planning] : []), ...row.members]
+    .map((mb) => `${mb.pipelineId || mb.ticketId || ''}:${mb.model ? mb.model.state : ''}`).join(',');
+  const gp = GROUP_PAGE;
+  if (!gp.memberKey && gp.feature) { gp.memberKey = key; return; }
+  if (gp.memberKey === key || gp.memberPending === key || gp.memberFailed === key) return;
+  const fid = gp.featureId;
+  gp.memberPending = key;
+  const ticket = groupFeatureTicket();
+  void fetch(`/api/shape/features/${encodeURIComponent(fid)}`).then((r) => (r && r.ok ? r.json() : null)).catch(() => null).then((f) => {
+    if (gp.featureId !== fid) return;
+    if (gp.memberPending === key) gp.memberPending = '';
+    if (!f) { gp.memberFailed = key; return; }
+    gp.memberKey = key;
+    gp.memberFailed = '';
+    noteGroupFeatureLock(f, ticket);
+  });
 }
 /** A shape-feature frame (a mark saved here, in Chat or in another tab): re-read the open feature page's lock. A
  *  mounted Overview view of the feature refetches it anyway (refreshShapeFeatures) and notes the lock itself. */
@@ -35428,18 +37121,44 @@ async function refreshGroupFeatureLock(id) {
   for (const [host, hid] of SHAPE_FEATURE_HOSTS) {
     if (host.isConnected && !host.closest('.view.hidden') && (hid === fid || host.__shapeShown === fid)) return;
   }
+  const ticket = groupFeatureTicket();
   const res = await fetch(`/api/shape/features/${encodeURIComponent(fid)}`).catch(() => null);
-  noteGroupFeatureLock(res && res.ok ? await res.json().catch(() => null) : null);
+  noteGroupFeatureLock(res && res.ok ? await res.json().catch(() => null) : null, ticket);
 }
 function scheduleGroupPagePaint() {
   if (GROUP_PAGE.paintQueued) return;
   GROUP_PAGE.paintQueued = true;
   queueMicrotask(() => { GROUP_PAGE.paintQueued = false; paintGroupPageNow(); });
 }
+/** Whose question the group page shows. A small-runs feature (flag on): an open stop whose answer is not held, the one on
+ *  screen first (another run's stop never takes a half-picked one away), whichever member is current, since a run can
+ *  stop while another works; else the current member's; else the Verifier's. Any other group: the current member's. */
+function groupAsker(slot, row, mb) {
+  if (!flagOn('shaperSmallRuns') || GROUP_PAGE.route !== 'feature') return mb;
+  const asks = (x) => { const r = x && x.runId ? runs.get(x.runId) : null; return (r && r.pendingQuestion) || null; };
+  if (GROUP_PAGE.requirements) {
+    const open = [...(row.planning ? [row.planning] : []), ...row.members]
+      .filter((x) => { const pq = asks(x); return !!pq && !!pq.stop && !(x.slice && x.slice.stop && x.slice.stop.held); });
+    if (open.length) return open.find((x) => x.runId === slot.__runId) || open[0];
+  }
+  return asks(mb) ? mb : groupVerifierAsk() || mb;
+}
+/** The Verifier's run is no member of its feature's group: with the flag on and no member asking, its open stop is the
+ *  feature page's question (a feature no Chat thread started has no other place to answer it). */
+function groupVerifierAsk() {
+  if (!flagOn('shaperSmallRuns') || GROUP_PAGE.route !== 'feature' || !GROUP_PAGE.featureId) return null;
+  for (const r of runs.values()) {
+    const pq = r && r.pendingQuestion;
+    if (!pq || !pq.stop || pq.stop.node !== 'n_verify' || !r.pipelineId) continue;
+    const home = stopHomeFor(r.pipelineId, scheduleGroupPagePaint, pq.id);
+    if (home && home.featureId === GROUP_PAGE.featureId) return { runId: r.runId };
+  }
+  return null;
+}
 /** D12, Known bug 7: the group page's question, answered through the one question delegate. */
 function paintGroupQuestion(slot, mb) {
   const r = mb && mb.runId ? runs.get(mb.runId) : null;
-  if (!r || !r.pendingQuestion) { chatReleaseQuestion(slot); slot.hidden = true; slot.__runId = ''; return; }
+  if (!r || !r.pendingQuestion) { chatReleaseQuestion(slot); slot.hidden = true; slot.__runId = ''; delete slot.dataset.stop; return; }
   if (!slot.querySelector('.qpanel')) slot.appendChild(Object.assign(document.createElement('div'), { className: 'qpanel hidden' }));
   if (!slot.__offQ) {
     // chatLiveRun follows the pipeline's newest run (as chatPaintQuestion does), so an answer after a resume goes to
@@ -35453,6 +37172,9 @@ function paintGroupQuestion(slot, mb) {
   slot.__runId = r.runId;
   slot.__pipelineId = r.pipelineId || '';
   slot.hidden = false;
+  // Small runs: a stop (held or not) is its own head and primary: no ask banner over it (shape-it.css), no bar answer and
+  // no Re-plan in the page's ⋯.
+  if (r.pendingQuestion.stop && flagOn('shaperSmallRuns')) slot.dataset.stop = ''; else delete slot.dataset.stop;
   chatPaintQuestion({ runId: r.runId, pipelineId: r.pipelineId }, slot);
 }
 /** D6: one handler for a group's actions, from the group page and from a group's chat card (chatRunControls.act). */
@@ -35547,11 +37269,12 @@ function runsHistItem(p) {
     checks: typeof p.checks === 'number' ? p.checks : null,
     changes: folder ? { state: (p.changes && p.changes.state) || 'pending' } : null,
     files: folder ? (fc ? fc.total : null) : (typeof p.files === 'number' ? p.files : null),
-    base: gitOn() ? baseRowNote(p.baseCheck) : '',
+    // A merged or closed PR is final (the server leaves it out of the summary; a live PR state newer than the stored one too).
+    base: gitOn() && (hasWsMembers(p) || !BASE_PR_FINAL.has(prStateOf(p.pr))) ? baseRowNote(p.baseCheck) : '',
     tags: p.tags || [],
     labels: flagOn('runLabels') ? (p.labels || []) : [],
     run: histRun(p),
-    cost: engineReportsCost(p.runEngine) ? (p.totalCostUsd ?? null) : null,
+    cost: runCostKnown(p.runEngine, p.runEngines) !== 'none' ? (p.totalCostUsd ?? null) : null,
   };
 }
 /** D11: an after-ticket's predecessor inside a /api/run-groups group, worded "Complete Design Language Rollout · run 3". */
@@ -35576,11 +37299,17 @@ function runsSchedItem(t) {
 const roundsSig = (r) => (r.rounds && r.rounds.length ? [r.roundsLine || '', r.roundsOwnLine ? 1 : 0, r.rounds.length,
   runsUi.groupsToggled.get(`rounds:${r.roundsId}`) ? 1 : 0, runsUi.roundsAll.has(`rounds:${r.roundsId}`) ? 1 : 0,
   r.rounds.map((rd) => [rd.n, rd.status, rd.words || '', rd.time, rd.href])] : 0);
-const runsRowSig = (r) => [r.key, r.pipelineId, r.href, r.title, r.model.state, roundsSig(r), r.model.symbol || '', r.model.line, r.model.pulse ? 1 : 0, r.count || '',
-  r.model.pr ? [r.model.pr.id, r.model.pr.word, r.model.pr.title, r.model.pr.icon, r.model.pr.pending ? 1 : 0] : 0, r.model.progress && r.model.progress.mode === 'stages' ? [r.model.progress.stage, r.model.progress.label] : 0,
-  r.activityMs || 0, r.groupName, r.cost ?? null, r.costUsd ?? null, r.needs ? 1 : 0,
-  r.kind === 'chain' ? [r.open ? 1 : 0, r.members.map((m) => [m.key, m.model.state, m.model.line, m.title, m.href, m.cost ?? null, m.model.symbol || '', roundsSig(m),
-    m.model.pr ? [m.model.pr.id, m.model.pr.word, m.model.pr.title, m.model.pr.icon, m.model.pr.pending ? 1 : 0] : 0])] : 0, (r.labels || []).join('\n')];
+const runsRowSig = (r) => {
+  const st = r.kind === 'chain' && r.smallRuns ? memberStatusOf(r.members) : null;   // s5 (D6): the shared word and mark
+  const shared = (m) => { const x = st(m); return [x ? x.word ?? '' : '', x ? x.mark ?? '' : '']; };
+  return [r.key, r.pipelineId, r.href, r.title, r.model.state, roundsSig(r), r.model.symbol || '', r.model.line, r.model.pulse ? 1 : 0, r.count || '',
+    r.model.pr ? [r.model.pr.id, r.model.pr.word, r.model.pr.title, r.model.pr.icon, r.model.pr.pending ? 1 : 0] : 0, r.model.progress && r.model.progress.mode === 'stages' ? [r.model.progress.stage, r.model.progress.label] : 0,
+    r.activityMs || 0, r.groupName, r.cost ?? null, r.costUsd ?? null, r.needs ? 1 : 0,
+    r.kind === 'chain' ? [r.open ? 1 : 0, r.members.map((m) => [m.key, m.model.state, m.model.line, m.title, m.href, m.cost ?? null, m.model.symbol || '', roundsSig(m),
+      r.smallRuns ? memberShortWord(m) || '' : '',   // D2: the member's short word
+      st ? shared(m) : 0,
+      m.model.pr ? [m.model.pr.id, m.model.pr.word, m.model.pr.title, m.model.pr.icon, m.model.pr.pending ? 1 : 0] : 0])] : 0, (r.labels || []).join('\n')];
+};
 // Where focus goes back to after the list is rebuilt under it. A row can change key in the
 // rebuild: opening a finished run acknowledges it, and the same paint turns live:<runId> into
 // hist:<projectKey>/<pipelineId>. Its pipeline id carries over, then the selected row stands in;
@@ -35928,7 +37657,7 @@ function foldRunsKey(open, nav, item) {
     else if (open) focusRunsNav(item.querySelector('.runs-members a.runs-row'));
     return;
   }
-  if (!open && item?.dataset.level === 'member') focusRunsNav(runsRowLink(item.parentElement.closest('.runs-item[data-level="top"]')));
+  if (!open && (item?.dataset.level === 'member' || item?.dataset.level === 'check')) focusRunsNav(runsRowLink(item.parentElement.closest('.runs-item[data-level="top"]')));
 }
 /** S / E / ⌫ / G / ⇧G: the selection through the bar's action, else the focused row's own ⋯ item (same rule, same level). */
 function runsLetterKey(action, item) {
@@ -35972,6 +37701,8 @@ document.getElementById('runs-list-pane')?.addEventListener('keydown', (e) => {
   // A stack's round link, toggle or "+n earlier" sits inside its head's item but names another run: the letter and menu
   // keys (archive, stop, delete, group, ⋯) would act on the head, so they do nothing there. Arrows still move.
   if (RUNS_ROW_ONLY_KEYS.has(action) && t.closest?.('.runs-rounds, .runs-rounds-line')) return;
+  // Slice 11 (D13): a Verifier check row is never selected and has no ⋯: Space and the row keys do nothing there.
+  if ((action === 'toggle' || RUNS_ROW_ONLY_KEYS.has(action)) && t.closest?.('.runs-item.is-check')) return;
   const item = t.closest?.('.runs-item') || null;
   const nav = t.closest?.(RUNS_NAV) || runsRowLink(item);
   e.preventDefault();
@@ -36020,8 +37751,9 @@ document.addEventListener('keydown', (e) => {
 // A11 (spec §3.2): ⌘/Ctrl-click toggles a row and enters selection; Shift-click adds the range from the anchor; a touch
 // long-press starts selecting and swallows its click. None opens the run (list-dom.mjs, shared with the Chats column).
 bindPointerSelect({ list: el.runsList, win: window, visibleKeys: visibleTopKeys,
-  getAnchor: () => runsUi.anchorKey, setAnchor: (k) => { runsUi.anchorKey = k; },
-  toggle: (k) => { runsUi.selecting = true; toggleRunsKey(k); },
+  // Slice 11 (D13): a Verifier check row (`check:` key) is never selected, by pointer either.
+  getAnchor: () => runsUi.anchorKey, setAnchor: (k) => { if (!k.startsWith('check:')) runsUi.anchorKey = k; },
+  toggle: (k) => { if (k.startsWith('check:')) return; runsUi.selecting = true; toggleRunsKey(k); },
   selectRange: (keys) => { runsUi.selecting = true; runsUi.sel.selectAll(keys); paintRunsList(); } });
 
 const selectedTargets = () => [...runsUi.sel.keys()].map((k) => runsUi.rowsByKey.get(k)).filter(Boolean).map(rowTarget);
@@ -36082,6 +37814,7 @@ async function runBulkAction(action, targets = selectedTargets()) {
     if ((action === 'archive' || action === 'delete') && out.done.length) {
       const gone = new Set(out.done.map((d) => d.id));
       dropParkedRuns((e) => gone.has(e.pipelineId));
+      for (const id of gone) toolPanel?.closeScope({ type: 'run', id });
     }
     reloadRunsHistory();
   } catch (e) {
@@ -36171,6 +37904,7 @@ async function groupFeatureMenuItems(anchor, row) {
       return r && r.ok ? { ok: true } : { ok: false, error: out.error || 'That did not work. Try again.' };
     },
     fail: (text) => notify({ tone: 'err', title: 'That did not work', detail: text }),
+    noReplan: !!document.querySelector('#group-detail .gpage-question[data-stop]:not([hidden])'),
   }, anchor);
 }
 async function openGroupMoreMenu(anchor, row) {
@@ -36206,7 +37940,8 @@ function openAddToGroup(anchor, items, rowKey) {
   const own = items.length === 1 ? groupOfRun(pids[0])?.id : '';
   const groups = (state.runGroups || []).filter((g) => g.id !== own).map((g) => {
     const it = runsGroupItem({ id: g.id, groupKind: g.kind, title: g.title, members: g.members });
-    return { id: g.id, title: g.title, model: groupModel({ kind: g.kind === 'feature' ? 'feature' : 'chain', title: g.title, members: it.members.map((x) => x.run) }) };
+    return { id: g.id, title: g.title, model: groupModel({ kind: g.kind === 'feature' ? 'feature' : 'chain', title: g.title, members: it.members.map((x) => x.run),
+      hold: (flagOn('shaperSmallRuns') && g.hold) || null }) };
   });
   const key = anchor.dataset.rowKey;
   const opener = () => shownEl(key ? el.runsList.querySelector(`.runs-more[data-row-key="${cssEscape(key)}"]`) : null)
@@ -36370,7 +38105,7 @@ function setRunsLayout(w) {
   const open = el.runsPane && el.runsPane.dataset.kind;
   if (want !== 'slide' || !inList || !open) return;
   const screen = open === 'live' ? el.runDetail : open === 'group' ? el.groupDetail : el.histDetail;
-  const back = screen && [...screen.querySelectorAll('.rd-back, .hd-back, .rd-to-run, .hd-to-run, .gpage-back')].find((b) => !b.hidden);
+  const back = screen && [...screen.querySelectorAll('.rd-back, .hd-back, .gpage-back')].find((b) => !b.hidden);
   if (back) back.focus({ preventScroll: true });
 }
 // showView calls this as the section becomes visible, before routing opens anything, so the
@@ -36458,7 +38193,8 @@ function keepPaneFocus(screen) {
 let runDetailState = { runId: '', screen: null };
 // Chat P4: the run panel's own state (see "Chat P4: the run panel" below). Declared here, beside the
 // screen state it shares, so it is initialised before anything that could paint a run screen runs.
-const crp = { open: false, kind: '', id: '', want: null, waiting: '', historySeen: false, closedHistory: false, opener: null, handOff: false, lastWidth: 0 };
+const crp = { open: false, kind: '', id: '', want: null, waiting: '', historySeen: false, closedHistory: false, opener: null, handOff: false, lastWidth: 0,
+  aside: null, tabId: '', inTab: false, leaving: false };   // aside: the frame, kept when the Run tab moves it; tabId: the chat's Run tab
 const crpHints = new Map();   // pipelineId -> projectKey, from openRunPanel refs: a saved run opens before History lists it
 
 // ── The remembered run (D6): a bare #runs reopens the run the pane showed last ──
@@ -36630,13 +38366,13 @@ installInputMode(document);
 
 function setRdMode(screen, mode, tab = '', { focus = true } = {}) {
   if (!screen) return;
-  const details = mode === 'details';
-  const changed = screen.dataset.mode !== (details ? 'details' : 'glance');
-  screen.dataset.mode = details ? 'details' : 'glance';
-  screen.querySelector('.rd-glance').hidden = details;
-  screen.querySelector('.rd-details').hidden = !details;
-  screen.querySelector('.rd-back').hidden = details;
-  screen.querySelector('.rd-to-run').hidden = !details;
+  // One level: the run page IS Details, and the run card is its Overview tab. The glance route opens Overview.
+  if (mode !== 'details' && !tab) tab = 'overview';
+  const details = true;
+  const changed = screen.dataset.mode !== 'details';
+  screen.dataset.mode = 'details';
+  screen.querySelector('.rd-details').hidden = false;
+  screen.querySelector('.rd-back').hidden = false;
   if (details) {
     const tabs = detailTabsOf(screen);
     // P5: a tab the bar has leaves nothing pending, so a later rebuild keeps the person's pick.
@@ -36648,14 +38384,14 @@ function setRdMode(screen, mode, tab = '', { focus = true } = {}) {
     // The graph laid out while its section sat in a hidden subtree measured 0px wide;
     // repaint it now that it is visible.
     const r = rdOpenRun();
+    if (r) rdSyncAgentsPlace(screen, rdCtx(r));   // D2 (D11): a deep link to the merged Agents tab lands on Overview
     if (r && changed) paintRdGraph(screen, r);
   }
   if (changed && el.runDetail) el.runDetail.scrollTop = 0;
   if (changed && focus) {
     // Side by side the glance's way back to the list is hidden (the list is in view), so
     // coming back from Details lands on the glance's title (tabindex="-1") instead.
-    const target = details ? screen.querySelector('.rd-to-run')
-      : runsLayout() === 'split' ? screen.querySelector('.rd-glance .rd-page-title') : screen.querySelector('.rd-back');
+    const target = runsLayout() === 'split' ? screen.querySelector('.rd-title') : screen.querySelector('.rd-back');
     if (target && !target.hidden) target.focus({ preventScroll: true });
   }
 }
@@ -36675,34 +38411,29 @@ function openRunDetail(runId, { instant = false, host: where = 'page' } = {}) {
   host.appendChild(screen);
   runDetailState = { runId, screen, host: panel ? 'panel' : 'page' };
   // The panel has no glance, so there is no page title to watch (the bar never repeats the name there).
-  if (panel) presentRunScreenInPanel(screen); else watchPageTitle(screen, 'rd');
+  if (panel) presentRunScreenInPanel(screen); else { barIntoHeader(screen); watchPageTitle(screen, 'rd'); }
+  toolPanel?.syncIcons();                   // the bar's tool icons (issue 1064)
 
   screen.querySelector('.rd-back').addEventListener('click', () => backToRunsList());
   // Glance <-> Details are routes, so the browser's own back and forward walk them.
   const toDetails = (tab = '') => { rdGoDetails(tab); };
-  const toRun = () => { if (runDetailState.host !== 'panel') location.hash = rdHash(runDetailState.runId); };
-  screen.querySelector('.rd-to-run').addEventListener('click', toRun);
-  // While a question waits, the status header ("? Waiting for you / Step: …") is a way to it.
-  const statusTop = screen.querySelector('.rd-now-top');
+  // While a question waits, the state line under the title and the card's status header are ways to it.
   const toQuestions = () => { if (screen.dataset.glance === 'ask') scrollToQuestions(screen); };
-  statusTop.addEventListener('click', toQuestions);
-  statusTop.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toQuestions(); }
-  });
+  for (const link of screen.querySelectorAll('.rd-header > .run-state-line, .rd-now-top')) {
+    link.addEventListener('click', toQuestions);
+    link.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toQuestions(); }
+    });
+  }
+  // The live graph is a way to the Workflow tab.
+  const livePanel = screen.querySelector('.rd-live');
+  livePanel.addEventListener('click', () => rdGoDetails('workflow'));
+  livePanel.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); rdGoDetails('workflow'); } });
   // A Now or Activity row opens its tab.
   screen.querySelector('.rd-sheet').addEventListener('click', (e) => {
     const row = e.target.closest && e.target.closest('[data-rd-tab]');
     if (row) toDetails(row.dataset.rdTab);
   });
-  // Live view: the switch flips the remembered choice; the panel is a way to Workflow.
-  const liveSwitch = screen.querySelector('.rd-live-switch');
-  const livePanel = screen.querySelector('.rd-live');
-  const onKey = (fn) => (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); fn(); } };
-  const flipLive = () => toggleLiveView(screen);
-  liveSwitch.addEventListener('click', flipLive);
-  liveSwitch.addEventListener('keydown', onKey(flipLive));
-  livePanel.addEventListener('click', () => toDetails('workflow'));
-  livePanel.addEventListener('keydown', onKey(() => toDetails('workflow')));
   // Keep the address in step with the open tab without adding a history entry per click.
   screen.querySelector('.rd-tabs').addEventListener('click', (e) => {
     const btn = e.target.closest && e.target.closest('.rd-tab');
@@ -36750,20 +38481,21 @@ function openRunDetail(runId, { instant = false, host: where = 'page' } = {}) {
   // CLICK time; the toggle carries the busy state, as for a plain Resume. Clones are painted after
   // setup, so one delegated listener on the menu.
   rdResumeMenu.addEventListener('click', (e) => {
-    const item = e.target.closest('.resume-on-saved, .resume-on-other:not([data-template]), .resume-with-model');
+    const item = e.target.closest('.resume-on-saved, .resume-on-other:not([data-template]), .resume-with-model, .resume-confirm-model');
     if (!item || !rdResumeMenu.contains(item)) return;
     e.stopPropagation();
     closeRdResumeMenu();
     const r = runs.get(runDetailState.runId);
     const pauseBtn = screen.querySelector('.rd-pause');
     if (!r || !pauseBtn || pauseBtn.disabled) return;
+    if (item.classList.contains('resume-confirm-model')) { resumeRunFromCard(r.runId, pauseBtn, { confirmModel: item.dataset.model }); return; }
     if (item.classList.contains('resume-with-model')) {
-      pickResumeModel(r.runEngine || 'claude', { reason: r.pauseReason, limitEngine: r.limitEngine })
+      pickResumeModel(r.runEngine || 'claude', { reason: r.pauseReason, limitEngine: r.limitEngine, limitScope: r.limitScope, limitModel: r.limitModel })
         .then((model) => { if (model) resumeRunFromCard(r.runId, pauseBtn, { model }); });
       return;
     }
     const engine = item.classList.contains('resume-on-other') ? item.dataset.engine : (r.runEngine || 'claude');
-    resumeRunOnEngine(r.runId, pauseBtn, engine);
+    resumeRunOnEngine(r.runId, pauseBtn, engine, { offer: item.classList.contains('resume-on-other') });
   });
   rdResumeLimit.addEventListener('click', (e) => {
     e.stopPropagation();
@@ -36845,7 +38577,7 @@ function openRunDetail(runId, { instant = false, host: where = 'page' } = {}) {
       away.push({ sep: true });
     }
     // Run after is the bar's own quick button; only a shaped run's bar folds it (D31), so only there does ⋯ carry it.
-    const extra = after && !after.hidden && levelAtLeast('advanced') && screen.querySelector('.rd-bar')?.hasAttribute('data-shaped')
+    const extra = after && !after.hidden && levelAtLeast('advanced') && screen.querySelector('.rd-bar-end')?.hasAttribute('data-shaped')
       ? [{ label: after.querySelector('.rd-btn-label').textContent, title: after.title, onSelect: () => after.click() }] : [];
     toggleMenu({ doc: document, anchor: e.currentTarget, items: runMoreItems(screen, { away, extra }), align: 'end', label: 'More for this run' });
   });
@@ -36928,7 +38660,7 @@ function closeRunDetail({ instant = false } = {}) {
 }
 
 // Run 3 (D2): the group page's shell in the Runs pane, the twin of openRunDetail / closeRunDetail.
-function openGroupPane(route, id, tab, { reentered = false } = {}) {
+function openGroupPane(route, id, tab, { reentered = false, at = '' } = {}) {
   const shell = el.groupShell;
   const host = el.groupDetail;
   if (!shell || !host) return;
@@ -36938,7 +38670,7 @@ function openGroupPane(route, id, tab, { reentered = false } = {}) {
   shell.classList.add('detail-open');
   syncRunsPane();
   rememberRun({ group: `${route}/${encodeURIComponent(id)}` });
-  void mountGroupPage(host, { route, id, tab, reentered });
+  void mountGroupPage(host, { route, id, tab, reentered, at });
   if (!wasOpen && runsLayout() === 'slide') queueMicrotask(() => host.querySelector('.gpage-back')?.focus({ preventScroll: true }));
 }
 function closeGroupPane({ instant = false } = {}) {
@@ -36988,38 +38720,39 @@ async function loadNightDecisions(r) {
 }
 
 function paintNightDecisions(screen, r) {
-  paintAwayAnswers(screen.querySelector('.rd-night-sec'), r.nightDecisions, rdGlanceRun(r).steps);
+  paintAwayNote(screen.querySelector('.rd-away-note'), r.nightDecisions, () => rdGoDetails('qa'));
 }
 
-/** The History run page's copy of the list: read once per run from the stored answers. */
-async function loadHdAwayAnswers(screen, pipelineId, steps = []) {
-  const sec = screen && screen.querySelector('.hd-night-sec');
-  if (!sec || !pipelineId || sec.dataset.for === pipelineId) return;
-  sec.dataset.for = pipelineId;
-  sec.hidden = true;
+/** The History run page's Away note: the stored answers, read once per run. Q&A lists each one with its reason. */
+async function loadHdAwayAnswers(screen, pipelineId) {
+  const note = screen && screen.querySelector('.rd-away-note');
+  if (!note || !pipelineId || note.dataset.for === pipelineId) return;
+  note.dataset.for = pipelineId;
+  note.hidden = true;
   try {
     const res = await fetch(`/api/night-decisions?pipelineId=${encodeURIComponent(pipelineId)}`);
     const data = res.ok ? await safeJson(res) : null;
-    if (sec.dataset.for !== pipelineId) return;                 // another run was opened meanwhile
-    paintAwayAnswers(sec, data && Array.isArray(data.decisions) ? data.decisions : [], steps);
-  } catch { /* the section stays hidden */ }
+    if (note.dataset.for !== pipelineId) return;                 // another run was opened meanwhile
+    paintAwayNote(note, data && Array.isArray(data.decisions) ? data.decisions : [], () => {
+      const tabs = detailTabsOf(screen);
+      if (!tabs || !tabs.cells.has('clarify')) return;
+      tabs.activate('clarify');
+      try { window.history.replaceState(null, '', `#${hdScreenHash('details', 'clarify')}`); } catch { /* sandboxed */ }
+    });
+  } catch { /* the note stays hidden */ }
 }
 
-/** The note at the top of the run's card (run page and History run page), painted from the same
- *  answers as the list below it, so the two never disagree: how many answers, how many to check,
- *  and a button down to the first one to check. Hidden when Away mode gave no answer. */
-function paintAwayNote(sec, counts) {
-  const note = sec.closest('.rd-glance')?.querySelector('.rd-away-note');
+/** The note at the top of the run card (run page and History run page): how many answers Away mode gave, how many to
+ *  check, and a hop to the Q&A tab, where each answer shows with its reason. Hidden when Away mode gave no answer. */
+function paintAwayNote(note, decisions, toQa) {
   if (!note) return;
-  const line = awayAnswersSummary(counts);
+  const line = awayAnswersSummary(awayAnswerCounts(Array.isArray(decisions) ? decisions : []));
   note.hidden = !line;
   if (!line) return;
-  note.classList.toggle('has-checks', counts.checks > 0);
-  note.querySelector('.rd-away-note-text').textContent = `Away mode: ${line}.`;
-  note.querySelector('.rd-away-jump').onclick = () => {
-    const to = sec.querySelector('.rd-na-row.is-check') || sec;
-    if (!sec.hidden) to.scrollIntoView({ behavior: 'smooth', block: 'center' });
-  };
+  note.classList.toggle('has-checks', awayAnswerCounts(decisions).checks > 0);
+  const text = note.querySelector('.rd-away-note-text');
+  if (text.textContent !== `Away mode: ${line}.`) text.textContent = `Away mode: ${line}.`;
+  note.querySelector('.rd-away-jump').onclick = toQa;
 }
 
 /** "Answered for you" into `sec` (run page and History run page): one group per ask, captioned with
@@ -37040,7 +38773,6 @@ function paintAwayAnswers(sec, decisions, steps = []) {
   sec.querySelector('.rd-night-count').textContent = (counts.answers
     ? ` · ${counts.answers} answer${counts.answers === 1 ? '' : 's'}${counts.checks ? `, ${counts.checks} to check` : ''}` : '')
     + (spent ? ` · ${spent}` : '');
-  paintAwayNote(sec, counts);
   const host = sec.querySelector('.rd-night-asks');
   const open = new Set([...host.querySelectorAll('.rd-na-row.open')].map((li) => li.dataset.key));
   const focused = document.activeElement && host.contains(document.activeElement) ? document.activeElement.closest('.rd-na-row') : null;
@@ -37053,7 +38785,7 @@ function paintAwayAnswers(sec, decisions, steps = []) {
     cap.className = 'rd-slabel';
     const at = d.at ? startedLabel(d.at).slice(0, 5) : '';
     // One review answers the whole ask, so its model and cost are the group's, never a row's.
-    cap.textContent = [kindShort(d.kind), at, ...awayAskCaption(d, {
+    cap.textContent = [askShort(d), at, ...awayAskCaption(d, {
       fmtUsd, modelLabel: (id) => modelById(id)?.label || id, fmtFloor: (v) => floorText(v, fmtUsd),
     })].filter(Boolean).join(' · ');
     const ul = document.createElement('ul');
@@ -37137,7 +38869,9 @@ function crpShowsRun() { return currentShownView === 'chat' && crp.open; }
 
 /** The panel's elements, its shell built on first use (null before the Chat page exists). */
 function crpEls() {
-  const aside = document.querySelector('[data-chat-panel]');
+  // The frame is moved into the tool panel's Run tab while it shows there (tool-run.mjs), so it is kept, not looked up.
+  if (!crp.aside || (!crp.aside.isConnected && !crp.inTab)) crp.aside = document.querySelector('[data-chat-panel]') || crp.aside;
+  const aside = crp.aside;
   if (!aside) return null;
   let root = aside.querySelector(':scope > .crp');
   if (!root) {
@@ -37161,12 +38895,12 @@ function crpEls() {
       });
     });
   }
-  return { aside, page: aside.closest('[data-chat-page]'), root, host: root.querySelector('.crp-host') };
+  return { aside, page: aside.closest('[data-chat-page]') || document.querySelector('[data-chat-page]'), root, host: root.querySelector('.crp-host') };
 }
 /** Where openRunDetail / openHistDetail mount a `host: 'panel'` screen (builds the shell). */
 function crpMountHost() { const els = crpEls(); return els ? els.host : null; }
 /** The panel's screen host when its shell exists — never builds it. */
-function crpBuiltHost() { return document.querySelector('[data-chat-panel] .crp-host'); }
+function crpBuiltHost() { return (crp.aside && crp.aside.querySelector('.crp-host')) || document.querySelector('[data-chat-panel] .crp-host'); }
 
 // The panel presentation of a run screen: Details only (no glance), with the panel's own Open full page
 // and Close at the end of its bar. The glance stays hidden, so the parts of it the panel needs move under
@@ -37212,9 +38946,12 @@ function crpOpenFrame(els) {
   crp.open = true;
   const a = document.activeElement;
   crp.opener = a && a !== document.body ? a : null;
-  els.aside.hidden = false;
   els.aside.setAttribute('aria-label', runPanel.PANEL_STRINGS.region);
   els.aside.tabIndex = -1;
+  // A chat with a thread shows its run in the tool panel's Run tab (tool-run.mjs, which un-hides the frame in the tab);
+  // a new chat (no thread yet) keeps the panel beside the conversation until its first send gives it one.
+  if (crpShowTab()) return;
+  els.aside.hidden = false;
   const page = els.page;
   crp.lastWidth = window.innerWidth || 0;
   if (page) {
@@ -37223,6 +38960,43 @@ function crpOpenFrame(els) {
   }
   crpSyncSheet();   // a full-screen sheet: the page behind it goes inert
   if (typeof els.aside.focus === 'function') els.aside.focus({ preventScroll: true });
+}
+
+// The tool panel's Run tab (tool-run.mjs): a run opened in a chat with a thread shows there, beside the chat, as one of
+// the panel's tabs. One Run tab per chat (the address names one run): it is opened, or picked again, with the run's title.
+function crpThreadId() { const t = crpThreadParam(); return t && t !== 'new' ? t : ''; }
+function crpTitle(id) {
+  const r = id ? (runs.get(id) || latestPipelineRun(id, { currentBoot: true })) : null;
+  if (r && r.title) return r.title;
+  const row = id ? ((state.historyAll || []).find((p) => p && p.id === id) || (state.historyArchived || []).find((p) => p && p.id === id)) : null;
+  return (row && row.title) || '';
+}
+function crpShowTab() {
+  const thread = crpThreadId();
+  if (!thread || !toolPanel || !toolPanel.registry.get('run')) return false;
+  crp.inTab = true;
+  const want = crp.want || {};
+  void toolPanel.openIn('run', { type: 'chat', id: thread }, { runId: want.id || '', tab: want.tab || '', title: crpTitle(want.id || '') }, { match: () => true })
+    .then((t) => { if (t && t.id) crp.tabId = t.id; });
+  return true;
+}
+/** The Run tab came on screen: focus moves into the run; picked again in the strip (the address had stepped back to the
+ *  chat), it routes to its run. */
+function crpTabShown(tab) {
+  crp.tabId = tab.id;
+  crp.inTab = true;
+  const id = tab.state && typeof tab.state.runId === 'string' ? tab.state.runId : '';
+  if (crp.open) { const els = crpEls(); if (els && typeof els.aside.focus === 'function') els.aside.focus({ preventScroll: true }); return; }
+  if (!id) return;
+  const hash = runPanel.chatPanelHash(crpThreadParam(), id, String(tab.state.tab || ''));
+  if (location.hash.slice(1) !== hash) location.hash = hash;
+}
+/** The Run tab left the screen (another tab, its ×, the panel hidden, another chat): the run screen closes and the
+ *  address steps back to the chat; the tab itself stays unless it was closed. */
+function crpTabLeft() {
+  if (crp.leaving || !crp.open) return;
+  crp.leaving = true;
+  try { closeChatRunPanelRoute({ restoreFocus: false }); } finally { crp.leaving = false; }
 }
 
 // Fold an open history column beside the panel and remember to bring it back on close (closeChatRunPanel: never
@@ -37321,6 +39095,7 @@ function crpShow(target, tab = '', { replace = false } = {}) {
   if (focusIn && !had.isConnected && typeof els.aside.focus === 'function') els.aside.focus({ preventScroll: true });
   crp.kind = target.kind;
   crp.id = id;
+  if (crp.inTab) crpShowTab();   // the Run tab follows the run it shows: its title and its address
   // A usage-limit pause's "Resume at" reads the resume tickets, which only the Runs views and Schedules load: Chat
   // boots without them, and a second resume for a run that already has one booked is refused. s2 (D2): the load also
   // ends the route's pending state, so the open run's head and route repaint with the landing branch.
@@ -37398,6 +39173,13 @@ function closeChatRunPanel({ restoreFocus = false } = {}) {
   const els = crpEls();
   crpUnmount(els);
   crp.open = false;
+  // Shown in the tool panel's Run tab: a close from the address (Back, Escape, leaving Chat) closes that tab too; a tab
+  // that left the screen itself (crpTabLeft) stays in the strip.
+  if (crp.inTab) {
+    const tabId = crp.tabId;
+    crp.inTab = false;
+    if (!crp.leaving && tabId && toolPanel) { crp.leaving = true; void Promise.resolve(toolPanel.closeTab(tabId)).finally(() => { crp.leaving = false; }); crp.tabId = ''; }
+  }
   crpSyncSheet();   // the page behind a sheet takes focus again, before the hand-back below
   if (els) {
     runPanel.setPanelNotice(els.root, '');
@@ -37547,9 +39329,10 @@ function chatRunPanelContext() {
 }
 
 // chatDeps.openRunPanel (CONTRACT §3/§6): ref = {runId?, pipelineId?, projectKey?, workspaceId?},
-// opts = {tab?}. A live run opens by its run id (a pipeline id finds its live run); anything else by its
-// pipeline id, whose project key is remembered so the saved run opens before History lists it.
-function openChatRunPanel(ref = {}, { tab = '' } = {}) {
+// opts = {tab?, threadId?}. A live run opens by its run id (a pipeline id finds its live run); anything else by its
+// pipeline id, whose project key is remembered so the saved run opens before History lists it. `threadId` opens the
+// panel beside that chat (the Chat home's run tile: the chat that follows the run); else beside the chat on screen.
+function openChatRunPanel(ref = {}, { tab = '', threadId = null } = {}) {
   // D23 first: a chat card's ref carries BOTH ids (run-card.mjs runRefOf), and its run id may be a superseded paused
   // copy or a run a restarted server no longer knows. The pipeline id names the current lineage.
   let id = '';
@@ -37576,7 +39359,7 @@ function openChatRunPanel(ref = {}, { tab = '' } = {}) {
     const t = crpResolve(id);
     if ((t.kind === 'saved' ? t.id : t.runId) === crp.id) return;
   }
-  const hash = runPanel.chatPanelHash(crpThreadParam(), id, String(tab || ''));
+  const hash = runPanel.chatPanelHash(threadId && CHAT_THREAD_RE.test(threadId) ? threadId : crpThreadParam(), id, String(tab || ''));
   if (location.hash.slice(1) === hash) { routeChatRunPanel(runPanel.panelSegments(hash.slice('chat/'.length))); return; }
   location.hash = hash;
 }
@@ -37609,7 +39392,7 @@ function crpSheetOn() {
 }
 function crpSyncSheet() {
   const held = (crp.inerted ||= []);
-  if (crp.open && crpSheetOn()) {
+  if (crp.open && !crp.inTab && crpSheetOn()) {   // the Run tab is the tool panel's: its own narrow sheet applies
     const had = document.activeElement;
     for (const n of document.querySelectorAll(CRP_BEHIND_SHEET)) {
       if (n.hasAttribute('inert')) continue;
@@ -37682,13 +39465,21 @@ function rdGlanceRun(r) {
     stepper: r.stepper && r.stepper.graph ? r.stepper : (st.stepper || r.stepper),
     totalCostUsd: r.totalCostUsd || st.totalCostUsd || 0,
     _savedActiveMs: typeof st.totalActiveMs === 'number' ? st.totalActiveMs : null,
+    ...(runElapsedMs(r) == null ? { elapsedMs: st.elapsedMs ?? null, elapsedSince: null } : {}),
   };
 }
 
-// Active time: the live ledger's sum, or the saved total when the ledger is gone.
-function rdActiveMs(r) {
-  const liveMs = liveTotalMs(r.steps, Date.now());
-  return liveMs || (typeof r._savedActiveMs === 'number' ? r._savedActiveMs : 0);
+// Agent time: the summed step time, from the live ledger, or the saved total when the ledger is gone.
+function rdAgentMs(r, now = Date.now()) {
+  return liveTotalMs(r.steps, now) || (typeof r._savedActiveMs === 'number' ? r._savedActiveMs : 0);
+}
+
+// The run time every headline shows: the engine's run clock (1 s per real second, parallel work
+// counted once), ticking only while the run works. A run without the figure reads its summed time.
+function rdElapsedMs(r, now = Date.now()) {
+  const live = (r.status === 'running' || r.status === 'starting') && r.pendingQuestion == null;
+  const ms = runElapsedMs(r, { now, live });
+  return ms != null ? ms : rdAgentMs(r, now);
 }
 
 /** Runs redesign slice 4: the raw run the run page's model reads. A live run object (makeRun) carries no `pr`: once
@@ -37718,6 +39509,7 @@ function paintRdStatus(screen, r) {
   const m = rdModel(r);
   const block = screen.querySelector('.rd-sheet .run-status');
   paintRdHead(screen, r, m);                                 // slice 3: the card head (status line, head buttons, route)
+  paintRunExecLine(block, runExecEnvSeg(r, { box: worcaBox(), label: execEnvLabel, titleWithArticle: execEnvTitleWithArticle }));   // where its agents run
   // The run page's bar takes over the removed .rd-prog's focus stop ("Run progress"): the D30 one-line wait state
   // shows only its stage words and gives it the focus ring.
   const bar = block && block.querySelector('.run-status-bar');
@@ -37754,6 +39546,7 @@ function paintRdMenuCarriers(screen, r) {
   const preset = screen.querySelector('.rd-save-preset');
   if (preset) void paintRunSavePreset(preset, r.pipelineId ? { ...(rec || {}), id: r.pipelineId } : null,
     () => screen.isConnected && runs.get(r.runId) === r);
+  paintRerunCarrier(screen.querySelector('.rd-rerun'), { id: r.pipelineId, title: r.title, status: r.status, live: !finished });
 }
 // What the live Archive's DELETE is addressed by: the History row, else the run itself. A finished run's row turns
 // terminal and the page hands off to the saved run (rdSavedRow) about as soon as History lists it, so waiting for the
@@ -37785,11 +39578,16 @@ function paintRdActions(screen, r, m = rdModel(r)) {
     own: { ...pauseResumeOwn(pause, st), stop },
     pool: [pause, stop],                                  // a "Pause" left from a run that has ended is hidden
     // Slice 2: Archive and Report live in the ⋯ (runMoreItems); slice 3: the head actions in the card head (run-head.mjs).
-    skip: [...MENU_ACTIONS, ...HEAD_ACTIONS],
+    // The full page draws the waiting question right under its header, on every tab: an Answer that only scrolls to it
+    // is noise there. The Chat panel keeps it.
+    // The Prototype ask is answered on the feature card only: the panel has no Answer for it either.
+    // Small runs C3 (D12): a stop's card draws its own primary on the page and in the panel: no bar Answer beside it.
+    skip: [...MENU_ACTIONS, ...HEAD_ACTIONS, ...(screen.dataset.presentation === 'panel' && !(r.pendingQuestion && (r.pendingQuestion.kind === 'prototype' || r.pendingQuestion.stop)) ? [] : ['answer'])],
     // The model reads pausing as paused, but chatRunControls.resume does nothing while the run is still live.
     disable: { 'ask-changes': "Ask for changes from the run's chat", ...(st === 'pausing' ? { resume: 'Pausing…' } : {}) },
     labels: { answer: answerLabelOf(screen.querySelector('.rd-questions')) },
-    plain: answerFieldOpen(screen.querySelector('.rd-questions')) ? ['answer'] : [],
+    // Small runs: the step's own button is the one primary (the chat card's `plain: … (oneNow && painted)`).
+    plain: answerFieldOpen(screen.querySelector('.rd-questions')) || smallRunsAsk(r.pendingQuestion) ? ['answer'] : [],
     onAction: (id, b) => runAction({ runId: r.runId, pipelineId: r.pipelineId, title: r.title, status: st, workspaceId: r.workspaceId || null }, id, b, m),
   });
   if (split) split.hidden = !!pause && pause.hidden;      // the split wrapper follows its button
@@ -37838,6 +39636,8 @@ function paintRdGlance(screen, r) {
   if (!glance) return;
   const terminal = RD_TERMINAL.includes(r.status);
   if (terminal) void rdLoadData(r);
+  paintRerunOf(glance.querySelector('.rd-kv [data-fact="rerun"]'), (r._rdData && r._rdData.data && r._rdData.data.state && r._rdData.data.state.rerunOf) || r._rerunOf);
+  syncFacts(glance.querySelector('.rd-kv'));
   // The headline reads the PR from History's rows, which reload on `pipelines-changed`
   // only while History is the open view: a run that just ended here has no row yet.
   // Ask for them once (the reload also starts the PR lookup; rdRepaintOpenGlance
@@ -37861,21 +39661,23 @@ function paintRdGlance(screen, r) {
   // Runs redesign slice 4 (D19): the one status block, the Group row and the model's actions. The run's own bar only:
   // the Group row says where the run sits, so no chain bar and no slice line (Known bug 9).
   const m = paintRdStatus(screen, live);
-  // Only while a question waits is the status header a control (see openRunDetail). A PR-driven Needs you has no
-  // question to jump to.
-  const statusTop = screen.querySelector('.rd-now-top');
+  // Only while a question waits are the header's state line and the card's status header controls (see openRunDetail).
+  // A PR-driven Needs you has no question to jump to.
   const asking = m.state === 'needs-you' && !m.prNeeds;
-  if (statusTop && statusTop.classList.contains('is-link') !== asking) {
-    statusTop.classList.toggle('is-link', asking);
-    if (asking) {
-      statusTop.setAttribute('role', 'button');
-      statusTop.tabIndex = 0;
-      statusTop.setAttribute('aria-label', 'Go to the questions');
-    } else {
-      statusTop.removeAttribute('role');
-      statusTop.removeAttribute('tabindex');
-      statusTop.removeAttribute('aria-label');
+  for (const link of screen.querySelectorAll('.rd-header > .run-state-line, .rd-now-top')) {
+    if (link.classList.contains('is-link') !== asking) {
+      link.classList.toggle('is-link', asking);
+      if (asking) {
+        link.setAttribute('role', 'button');
+        link.tabIndex = 0;
+      } else {
+        link.removeAttribute('role');
+        link.removeAttribute('tabindex');
+        link.removeAttribute('aria-label');
+      }
     }
+    // A label replaces what a screen reader reads, so the header line's keeps its state; refreshed on every paint.
+    if (asking) link.setAttribute('aria-label', [link.matches('.run-state-line') && link.dataset.text, 'Go to the questions'].filter(Boolean).join('. '));
   }
 
   // Time · Cost · Changes. The time ticks (`run-time`, rdTickHosts) only while steps
@@ -37888,8 +39690,8 @@ function paintRdGlance(screen, r) {
   const liveDiff = terminal ? null : rdDiffBadge(live);
   paintGlanceFacts(glance, {
     summary: folder ? null : summary, changes: terminal ? fc : null, diffHref: `#${rdHash(r.runId, 'details', 'diff')}`, liveFiles: liveDiff != null && liveDiff !== '' ? Number(liveDiff) : null,
-    activeMs: rdActiveMs(r), cost: engineReportsCost(r.runEngine) ? (r.totalCostUsd || 0) : null,
-    costNote: costSummaryText(runCostBreakdown(r.steps, r.totalCostUsd), fmtUsd),
+    activeMs: rdElapsedMs(r), agentMs: rdAgentMs(r), cost: runCostKnown(r.runEngine, r.runEngines) !== 'none' ? (r.totalCostUsd || 0) : null,
+    costNote: glanceCostNote(r, costSummaryText(runCostBreakdown(r.steps, r.totalCostUsd), fmtUsd)),
     ticking: (r.status === 'running' || r.status === 'starting') && r.pendingQuestion == null,
     costTags: costTagsFact(r.tags, r.projectDir, () => rdRepaintOpenGlance(r.pipelineId), r.workspaceId ? 'workspace' : 'project'),
   });
@@ -37898,18 +39700,9 @@ function paintRdGlance(screen, r) {
   paintMemberBars(screen, { pipelineId: live.pipelineId, status: live.status, members: rdFm });
   if ((folder || rdFm.length) && terminal) rdPaintTabBadges(screen, rdCtx(live));   // the saved counts land after the tabs were built (P5: a mixed run's Folder members too)
 
-  const trail = trailColumns(r);
-  paintRdLive(screen, live);
+  paintRdLive(screen, r);
   paintRdNowList(screen, r, copy.state);
-  paintRdResult(screen, r, { glance: copy.state, trailCount: trail.count });
-  // In Details the way back doubles as the cue that a question waits on the glance.
-  const back = screen.querySelector('.rd-to-run');
-  if (back) {
-    const ask = copy.state === 'ask';
-    back.classList.toggle('ask', ask);
-    back.querySelector('.rd-to-run-label').textContent = ask ? 'Answer' : 'Run';
-    back.setAttribute('aria-label', ask ? 'Back to the run to answer' : 'Back to the run');
-  }
+  paintRdResult(screen, r);
 }
 
 function rdSheetRow({ label, detail = '', value = '', tab = '', state = '', icon = null, since = '' }) {
@@ -37949,65 +39742,20 @@ function rdSrowValue(text) {
   return v;
 }
 
-// The glance's way into Details (there is no Details button): EVERY tab the run has and
-// the interface level shows, in the tab bar's order, under two headings — what the run
-// produced, then how it ran. Each row is named like its tab, carries its icon and
-// previews its content: `values[key]`, else the tab's own badge with a unit.
-const ACTIVITY_GROUPS = [
-  ['Results', ['overview', 'diff', 'changes', 'artifacts', 'actions']],
-  ['How it ran', ['workflow', 'qa', 'clarify', 'logs', 'sessions', 'agents']],
-];
-const ACTIVITY_UNITS = { diff: 'file', changes: 'file', qa: 'question', clarify: 'question', sessions: 'session', agents: 'agent' };
-function rdActivityGroups(screen, values = {}) {
-  const tabs = detailTabsOf(screen);
-  if (!tabs) return [];
-  const order = [...tabs.cells.keys()];
-  const out = [];
-  for (const [title, keys] of ACTIVITY_GROUPS) {
-    const rows = [];
-    for (const key of order) {
-      if (!keys.includes(key)) continue;
-      const cell = tabs.cells.get(key);
-      if (!levelAtLeast(cell.tab.level || 'simple')) continue;
-      let value = values[key] || '';
-      if (!value) {
-        const badge = cell.btn.querySelector('.rd-tab-badge, .hd-tab-badge');
-        const n = badge ? badge.textContent.trim() : '';
-        const unit = ACTIVITY_UNITS[key];
-        value = n && unit && /^\d+$/.test(n) ? `${n} ${unit}${n === '1' ? '' : 's'}` : n;
-      }
-      // The tab's own icon, cloned from its pill, so the row and the tab can never differ.
-      const icon = cell.btn.querySelector('svg');
-      const row = rdSheetRow({ label: cell.tab.label, value, tab: key, icon: icon ? icon.cloneNode(true) : null });
-      if (cell.tab.needsGit) row.dataset.needsGit = '';
-      rows.push(row);
-    }
-    if (rows.length) out.push(rdSheetGroup(title, rows));
-  }
-  return out;
-}
+// The run's tabs are the tab bar's: the card lists only the local copy's way out (Discard / Unlink), which
+// paintActionsRowValue fills while a checkout exists. Archive is blocked until it goes, so it is never hidden.
+function rdCheckoutGroup() { return rdSheetGroup('Local copy', []); }
 
-// The Results › Actions row says where the local copy stands. At Advanced it is the Actions tab's row (the tab owns
-// the controls), patched in place: the banner painters rerun on every History row, the activity groups only when
-// they rebuild. At Simple there is no Actions tab, so a plain row carries Discard / Unlink while a checkout exists:
-// Archive is blocked until it goes, so the way out may never be hidden. `carrier()` is the current History record.
-// `kept`: the plain row of a Results list the caller just rebuilt, reused while it still says the same (D14).
+// The Local copy row says where the local copy stands and carries Discard / Unlink while a checkout exists, at every
+// level (the Actions tab owns the rest of the controls). `carrier()` is the current History record. `kept`: the row of a
+// list the caller just rebuilt, reused while it still says the same (D14).
 const shortWhen = (iso) => whenLabel(iso, Date.now(), browserTimeZone());
 function paintActionsRowValue(screen, checkout, canTry, carrier, kept = null) {
-  const list = screen && screen.querySelector('.rd-result .rd-slist');   // the Results group comes first
+  const list = screen && screen.querySelector('.rd-result .rd-slist');
   if (!list) return;
   const text = checkoutRowValue(checkout, { when: shortWhen, canTry });
-  const tabRow = list.querySelector('.rd-srow[data-rd-tab="actions"]');
   let plain = list.querySelector('.rd-srow-checkout');
   if (!plain && kept) { list.appendChild(kept); plain = kept; }
-  if (tabRow) {
-    if (plain) plain.remove();
-    const v = tabRow.querySelector('.rd-srow-v');
-    if (!text) { if (v) v.remove(); return; }
-    if (!v) tabRow.appendChild(rdSrowValue(text));
-    else if (v.textContent !== text) v.textContent = text;
-    return;
-  }
   const members = (checkout && checkout.members) || [];
   if (!members.length) { if (plain) plain.remove(); return; }
   const sig = `${text}|${members.map((m) => `${m.projectKey}:${m.external === true}`).join(',')}`;
@@ -38056,12 +39804,20 @@ function paintRunKindChip(meta, mode) {
   if (chip) meta.appendChild(chip);
 }
 
+// The full page puts no controls above the run's title: the bar's controls (Run after, Pause/Resume, Stop, ⋯) end the
+// header's title row. The bar keeps Back (slide layout) and the breadcrumb. The Chat run panel keeps them in its bar.
+function barIntoHeader(screen) {
+  const end = screen.querySelector(':scope > :is(.rd-bar,.hd-bar) > .rd-bar-end');
+  const row = screen.querySelector('.rd-row1, .hd-row1');
+  if (end && row) row.appendChild(end);
+}
+
 // The bar repeats the run's name only once the page title has scrolled under it
 // (CSS: [data-title-out]). One observer per page kind; a new screen replaces the old.
 const pageTitleWatch = { rd: null, hd: null };
 function watchPageTitle(screen, kind) {
   if (pageTitleWatch[kind]) { pageTitleWatch[kind].disconnect(); pageTitleWatch[kind] = null; }
-  const h = screen && screen.querySelector('.rd-page-title');
+  const h = screen && screen.querySelector('.rd-title, .hd-title');   // the Details header's: the card's own title is hidden
   if (!h || typeof IntersectionObserver !== 'function') return;
   const io = new IntersectionObserver(([e]) => {
     if (!e) return;
@@ -38071,13 +39827,6 @@ function watchPageTitle(screen, kind) {
   }, { rootMargin: '-64px 0px 0px 0px' });
   io.observe(h);
   pageTitleWatch[kind] = io;
-}
-
-// The Overview row's preview: what the review made of the run.
-function activityOverviewValue(results) {
-  if (!results) return '';
-  const n = hdChecks(results).length;
-  return n ? `${n} to check` : 'Nothing flagged';
 }
 
 // The run's facts, each once and each labelled: Time · Cost · Changes. `ticking` hands
@@ -38108,7 +39857,7 @@ const costTagsFact = (tags, projectDir, onLoad, target = 'project') => {
   return (tags || []).length || missing.length ? { tags: tags || [], missing } : null;
 };
 
-function glanceTiles({ summary = null, liveFiles = null, activeMs = null, cost = null, costNote = '', ticking = false, changes = null, diffHref = '' } = {}) {
+function glanceTiles({ summary = null, liveFiles = null, activeMs = null, agentMs = null, cost = null, costNote = '', ticking = false, changes = null, diffHref = '' } = {}) {
   const tiles = document.createElement('div');
   tiles.className = 'rd-stats';
   const tile = (big, small, cls = '') => {
@@ -38122,6 +39871,12 @@ function glanceTiles({ summary = null, liveFiles = null, activeMs = null, cost =
     return t;
   };
   if (activeMs != null) tiles.append(tile(fmtDuration(activeMs) || '0s', 'time', ticking ? 'run-time' : ''));
+  // Agent time: the summed step time, only when parallel work made it larger than the run time.
+  if (activeMs != null && showAgentTime(agentMs, activeMs, fmtDuration)) {
+    const agent = tile(fmtDuration(agentMs), 'agent time', ticking ? 'run-agent-time' : '');
+    agent.title = 'Total time of all agents, parallel work added up';
+    tiles.append(agent);
+  }
   if (cost != null) tiles.append(tile(fmtUsd(cost), costNote || 'cost'));
   if (changes) tiles.append(tile(renderCountsNode(document, changes), 'files changed', 'fc-tile'));
   else if (summary) {
@@ -38177,9 +39932,10 @@ function paintGlanceFacts(glance, opts) {
   }
   syncFacts(screen.querySelector('.rd-kv'));
 }
-// Everything but the time (the first tile): a ticking row need not be rebuilt for it.
+// Everything but the ticking texts (the time, the first tile, and agent time): a ticking row need not
+// be rebuilt for them. Agent time keeps its PRESENCE, so the tile appearing or going still rebuilds.
 function sigRest(tiles) {
-  return tiles ? [...tiles.children].slice(1).map((t) => t.textContent).join('|') : '';
+  return tiles ? [...tiles.children].slice(1).map((t) => (t.querySelector('.run-agent-time') ? 'agent time' : t.textContent)).join('|') : '';
 }
 
 // The finished headline's PR input (glanceCopy): the PR's own state, or what is known.
@@ -38224,10 +39980,10 @@ const PR_CTA_LOOK = {
   view: { look: 'pr-view', icon: 'pull-request', label: VIEW_PR_LABEL },
   merged: { look: 'pr-merged', icon: 'merge', label: VIEW_PR_LABEL },
 };
-function paintPrCta(slot, { state = 'none', href = '', onClick = null, cls = '', label: own = '', title = '', disabled = false, menu = false, ws = false, quiet = false } = {}) {
+function paintPrCta(slot, { state = 'none', href = '', onClick = null, cls = '', label: own = '', title = '', tip = '', disabled = false, menu = false, ws = false, quiet = false } = {}) {
   if (!slot) return;
   slot._prClick = onClick;                         // read at click time: a repaint re-binds it
-  const sig = `${state}|${href}|${cls}|${own}|${title}|${disabled}|${menu}|${ws}|${quiet}`;
+  const sig = `${state}|${href}|${cls}|${own}|${title}|${tip}|${disabled}|${menu}|${ws}|${quiet}`;
   if (slot.dataset.sig === sig) return;
   const from = slot.dataset.state || 'none';
   slot.dataset.sig = sig;
@@ -38312,11 +40068,13 @@ function paintPrCta(slot, { state = 'none', href = '', onClick = null, cls = '',
   }
   slot.hidden = false;
   const wait = from === 'pending' && slot.querySelector('.rd-pr-wait');
-  if (!wait) { slot.replaceChildren(ctl); return; }
+  // Shaper slice 7 (D8a): a locked small-runs Create N PRs says why in a styled tip, the control's sibling in the slot.
+  if (!wait) { slot.replaceChildren(ctl); if (tip) withTip(ctl, tip, slot); return; }
   // The spinner stays where it turns (a moved node would restart its spin) and fades out.
   const fill = document.createElement('span');
   fill.className = ['rd-pr-fill', look].filter(Boolean).join(' ');
   wait.replaceWith(ctl);
+  if (tip) withTip(ctl, tip, slot);
   slot.prepend(fill);
   slot.classList.add('is-morph');
   done(() => {
@@ -38349,7 +40107,12 @@ function headFactsOf(screen, rec, { m, mode, gitChrome, folder, canTry, tryIt = 
     }
   }
   const source = (rec && rec.sourceBranch) || liveSource || '';
-  const group = routeGroupOf(groupHomeOf((rec && rec.id) || pipelineId), { sourceBranch: source, histOf });
+  const home = groupHomeOf((rec && rec.id) || pipelineId);
+  const group = routeGroupOf(home, { sourceBranch: source, histOf });
+  // Shaper small runs s5 (D10): a marked feature's member reads its head from the shared run status.
+  const sliceStatus = home && home.row && home.row.smallRuns && home.member && home.member.slice
+    ? memberStatusOf(home.row.members)(home.member) : null;
+  const prExempt = knownPrExempt((rec && rec.id) || pipelineId);
   return {
     m, mode, gitChrome, folder, canTry, tryIt, kept, level: currentLevel(),
     workspace: ws ? { members: histWsMembers(rec).map((x) => ({
@@ -38363,10 +40126,12 @@ function headFactsOf(screen, rec, { m, mode, gitChrome, folder, canTry, tryIt = 
     // s2: the route's own-branch row and its place in a feature or chain (read-only, from loaded data).
     branch: (rec && rec.branch) || liveBranch || '',
     group,
+    sliceStatus,
     groupPending: !group && routeGroupsPending(),   // D2: never guess the landing branch before the groups answer
     pr: own, prInput: glancePrInput(rec), prStatus, watch: (rec && rec.watch) || null,
+    prExempt,   // C5: a Verifier's route says why it opens no PR
     mock: !!(rec && rec.mock),
-    canCreatePr: !!rec && histPrEligible(rec) && !(own && open) && !recHasNoRemote(rec),
+    canCreatePr: !!rec && prExempt !== 'verify' && histPrEligible(rec) && !(own && open) && !recHasNoRemote(rec),
     noRemote: !!rec && recHasNoRemote(rec),
     push: !!rec && !!rec.sameAsSource && rec.target !== 'workspace' && rec.mergeBack?.merged === true && !!rec.sourceBranch,
     notMergedBack: !!rec && !!rec.sameAsSource && rec.mergeBack?.merged === false,
@@ -38383,11 +40148,16 @@ function routeGroupsPending() {
   return !state.runGroupsLoaded || !(schedulesView.isLoaded() || routeChainsSettled);
 }
 
-/** Slice 3: the card's status line, head buttons and route. `h`: the page's calls (headHandlers). */
+/** Slice 3: the card's status line, head buttons and route. `h`: the page's calls (headHandlers). The header's state
+ *  line and the card's status block are painted from one model: the line says the state and step, the card the rest. */
 function paintRunHead(screen, f, h) {
   const head = headModel(f);
   const block = screen.querySelector('.rd-sheet .run-status');
-  paintRunStatus(block, head.status ? { ...f.m, ...head.status, lineSaysState: false } : f.m);
+  const m = sliceHeadModel(head.status ? { ...f.m, ...head.status, lineSaysState: false } : f.m, f.sliceStatus);
+  paintRunStatus(block, m, { lead: false });
+  // `screen` is the saved page's glance: the header is the run screen's.
+  const line = screen.closest('.rd, .hd')?.querySelector('.run-state-line');
+  paintStateLine(line, m, { stageBar: stageBarOf(m) });
   const slot = screen.querySelector('.rd-head-acts .rd-pr-slot');
   const c = head.cta;
   if (!c) paintPrCta(slot, { state: 'none' });
@@ -38716,13 +40486,6 @@ function rdHistoryRecord(r) {
   return (state.historyAll || []).find((p) => p && p.id === r.pipelineId) || null;
 }
 
-// The Diff row's preview: read from the run, not the tab's badge (the badge is not
-// repainted when the saved results land after the tabs were built).
-function rdDiffRowValue(r) {
-  const n = rdDiffBadge(r);
-  return n ? `${n} file${n === '1' ? '' : 's'}` : '';
-}
-
 // The headline's file count, from results.json once it has loaded.
 function rdFilesChanged(r) {
   const s = r._rdData && r._rdData.data && r._rdData.data.results && r._rdData.data.results.summary;
@@ -38733,9 +40496,6 @@ function rdFilesChanged(r) {
 // state frame's branch.changes (P1a's folder member record).
 function rdFolderChanges(r) {
   const rec = rdHistoryRecord(r); const d = r._rdData && r._rdData.data; return (rec && rec.changes) || (d && d.state && d.state.changes) || (r.kind !== 'workspace-run' && r.branch && typeof r.branch === 'object' && r.branch.changes) || null;   // P5: a workspace's branch is its first member's mirror
-}
-function rdChangesRowValue(r) {
-  const c = changesCounts(rdFolderChanges(r)); return c && c.total ? filesWord(c.total) : '';
 }
 
 // The open PR's own state under its button (.rd-pr-status): its checks (passed, running,
@@ -38986,38 +40746,13 @@ function refreshRdPrStatus(projectKey, id, memberKey = '') {
     if (host._prLoading) host._prAgain = true;
     else void loadRdPrStatus(host, sc);
   }
-}
-
-/** Overview tab: one row per open pull request under the review verdict (a workspace run: one per
- *  member repo), each drawn by paintRdPrStatus. Rows are rebuilt only when the set of PRs changes. */
-function paintHdOvPrs(box, record) {
-  if (!box || !record) return;
-  const scopes = [];
-  if (record.target === 'workspace' && hasWsMembers(record)) {
-    for (const m of histWsMembers(record)) {
-      if (prLive(m.pr) && prStateOf(m.pr) === 'OPEN') scopes.push({ id: record.id, projectKey: record.projectKey, memberKey: m.memberKey, name: m.name || m.memberKey });
-    }
-  } else if (record.pr && typeof record.pr === 'object' && String(record.pr.state || '').toUpperCase() === 'OPEN' && record.pr.url) {
-    scopes.push({ id: record.id, projectKey: record.projectKey, name: '' });
-  }
-  const sig = JSON.stringify(scopes);
-  if (box.dataset.sig !== sig) {
-    box.dataset.sig = sig;
-    box.replaceChildren(...scopes.map((sc) => {
-      const row = document.createElement('div');
-      row.className = 'hd-ov-pr';
-      const label = document.createElement('span');
-      label.className = 'hd-ov-pr-label';
-      label.textContent = sc.name ? `Pull request · ${sc.name}` : 'Pull request';
-      const host = document.createElement('div');
-      host.className = 'rd-pr-status hd-ov-pr-status';
-      host.hidden = true;
-      row.append(label, host);
-      return row;
-    }));
-  }
-  const hosts = box.querySelectorAll('.hd-ov-pr-status');
-  scopes.forEach(({ name, ...scope }, i) => paintRdPrStatus(hosts[i], scope));
+  // A workspace member's status has no host of its own: the open run page's head reads it (ensurePrStatus from
+  // headFactsOf), so repaint that head and it reads the dropped entry again.
+  if (!memberKey) return;
+  const hd = histDetailState;
+  if (hd && hd.screen && hd.screen.isConnected && hd.data && hd.record && hd.record.id === id) paintHdHead(hd.screen, hdCurrentRecord(hd.record), hd.data);
+  const rd = runDetailState && runDetailState.screen && runDetailState.screen.isConnected ? runs.get(runDetailState.runId) : null;
+  if (rd && rd.pipelineId === id) paintRdHead(runDetailState.screen, rd);
 }
 
 /** Slice 3: the live page's card head (paintRunHead), from History's row once a finished run has one. Create PR hands
@@ -39051,40 +40786,16 @@ function paintRdHead(screen, r, m = rdModel(r)) {
 // Time · Cost · Changes in every state).
 // Numbers come from results.json. Rebuilt only when its content changes (a replaced row
 // loses :hover).
-function paintRdResult(screen, r, { glance = 'run', trailCount = 0 } = {}) {
+function paintRdResult(screen, r) {
   const host = screen.querySelector('.rd-result');
   if (!host) return;
   paintRdMenuCarriers(screen, r);                        // slice 2: the ⋯ Archive's gate reads this row's checkout facts
-  const terminal = RD_TERMINAL.includes(r.status);
-  const steps = trailCount ? `${trailCount} step${trailCount === 1 ? '' : 's'}` : '';
-  if (!terminal) {
-    // Cheap to build, compared by text: the badges (live diff, artifacts, agents) move.
-    const groups = rdActivityGroups(screen, { workflow: steps, diff: rdDiffRowValue(r), changes: rdChangesRowValue(r) });
-    const sig = `live|${currentLevel()}|${groups.map((g) => g.textContent).join('|')}`;
-    if (host.dataset.key === sig) return;
-    host.dataset.key = sig;
-    host.replaceChildren(...groups);
-    host.hidden = !groups.length;
-    return;
-  }
+  if (!RD_TERMINAL.includes(r.status)) { host.hidden = true; return; }   // a live run has no local copy yet
   host.hidden = false;
-  const data = r._rdData && r._rdData.data;
-  const sig = [r.status, glance, data ? 1 : 0, r.totalCostUsd, steps, currentLevel(), rdChangesRowValue(r)].join('|');
-  if (host.dataset.key === sig) return;
-  host.dataset.key = sig;
-  const keptRow = host.querySelector('.rd-srow-checkout');
-  const keptFocus = keptRow && keptRow.contains(document.activeElement) ? document.activeElement : null;
-  host.replaceChildren();
-
-  const results = data && data.results;
+  if (!host.querySelector('.rd-slist')) host.replaceChildren(rdCheckoutGroup());
   const rec = r.pipelineId ? rdHistoryRecord(r) : null;
-  const co = hdCheckoutFor(rec);
   const kept = !(r._retainedDiscarded || r._retainedApplied) && ((rec && rec.retainedWork) || rdRetainedFor(r));
-  const canTry = !!(rec && rec.branch) && !kept;
-  host.append(...rdActivityGroups(screen, { overview: activityOverviewValue(results), workflow: steps, diff: rdDiffRowValue(r), changes: rdChangesRowValue(r),
-    actions: checkoutRowValue(co, { when: shortWhen, canTry }) }));
-  paintActionsRowValue(screen, co, canTry, () => rdNoticeCarrier(r), keptRow);
-  if (keptFocus && keptFocus.isConnected) keptFocus.focus();   // detaching the row dropped its focus
+  paintActionsRowValue(screen, hdCheckoutFor(rec), !!(rec && rec.branch) && !kept, () => rdNoticeCarrier(r));
 }
 
 // The heading over a waiting question on the glance: what is asked, by which step. It
@@ -39112,12 +40823,6 @@ function paintShaperWait(screen, r) {
   const wait = shaperWait(r, true);
   if (wait) glance.dataset.shaperWait = wait;
   else delete glance.dataset.shaperWait;
-  // The Chat panel moved .rd-questions into its own head (presentRunScreenInPanel): leave it there.
-  if (host.parentElement !== glance) return;
-  const now = glance.querySelector(':scope > .rd-now');
-  const night = glance.querySelector(':scope > .rd-night-sec');
-  if (wait && now && host.previousElementSibling !== now) now.after(host);
-  else if (!wait && night && host.nextElementSibling !== night) night.before(host);
 }
 
 function paintRdQuestions(screen, r) {
@@ -39154,6 +40859,15 @@ function paintRdQuestions(screen, r) {
   // handle.relayout()). Inside a hidden host clientWidth is 0, so the flow would lay
   // out at the 702 default and the ResizeObserver would re-lay it a frame later — a
   // visible flash on top of the wr-rise entry. The card path already un-hides first.
+  // C1 (R-ux-2): with no ask open, the step area draws the Prototype step's working moment (the Chat card's paint).
+  const proto = pq ? null : rdPrototypeWork(r);
+  if (proto && panel) {
+    host.hidden = false;
+    const h0 = host.querySelector('.rd-ask-head');
+    if (h0) h0.textContent = '';
+    paintPrototypeWork(panel, r, proto);
+    return;
+  }
   host.hidden = pq == null;                    // drives the wr-rise entry
   const head = host.querySelector('.rd-ask-head');
   // A step card carries its own head (title + chip): the run page's heading stays empty for it (shaper-cards D16).
@@ -39177,6 +40891,8 @@ function paintRdQuestions(screen, r) {
     // `if (r._answering) return;` and die silently. Re-apply from the model.
     if (r._answering) setPanelBusy(r, true);
   }
+  paintQpanelDeadline(r, host);           // the E2B release time follows state frames, not the rebuild key
+
 }
 
 // Live twin of hdRetainedFor. A run model has no authoritative `retainedWork`
@@ -39267,6 +40983,23 @@ function paintRdBanners(screen, r) {
     banners.prepend(b);
   }
 
+  // ---- files from the sandbox to review before running them here (docs/e2b.md) ----
+  const rv = Array.isArray(r.execEnvReview) ? r.execEnvReview.filter((x) => x && typeof x.path === 'string') : [];
+  const rvKey = rv.map((x) => x.path).join('\n');
+  const oldRv = banners.querySelector('.exec-review-banner');
+  if (oldRv && oldRv.dataset.key !== rvKey) oldRv.remove();
+  if (rv.length && !banners.querySelector('.exec-review-banner')) {
+    const b = document.createElement('div');
+    b.className = 'net-wait-banner exec-review-banner';
+    b.dataset.key = rvKey;
+    const head = document.createElement('p');
+    head.textContent = `The ${execEnvTitle(r.execEnv)} sandbox changed files that run on this machine when someone uses them. Review them before running them here:`;
+    const ul = document.createElement('ul');
+    for (const x of rv) { const li = document.createElement('li'); li.textContent = `${x.path}: ${x.why || ''}`; ul.append(li); }
+    b.append(head, ul);
+    banners.append(b);
+  }
+
   // ---- the worktree notice (retained work) and the Actions row ----
   paintRdWorktreeNotice(screen, r);
 }
@@ -39335,103 +41068,6 @@ function paintRdGraph(screen, r) {
   const host = screen.querySelector('.rd-graph .run-flow');
   if (!host) return;
   paintGraphFor(host, r.stepper, isGraphRun(r) ? runDecorFor(r, 'monitor') : null, r.steps);
-}
-
-// ---- Live view: the glance's running step(s), centred in a fogged graph beside the card ----
-// (below it on a narrow page). The choice is remembered per browser and offered only while
-// the run is not over. Entering: the left column slides aside (flipGlance), the graph
-// mounts at its final size, then the panel fades in (style.css `.rd-live.is-in`).
-// Leaving runs the other way round, and the graph is dropped only once the panel is gone.
-const LIVE_VIEW_KEY = 'worca-cc.run.liveView';
-/** The exit's fallback when no transitionend comes: past style.css's longest `.rd-live` exit. */
-const LIVE_EXIT_MS = 500;
-const LIVE_EXITS = new WeakMap();   // .rd-live -> { timer, onEnd } while it animates out
-// On unless switched off: a new user (nothing stored) sees it, and '0' keeps it off.
-// Where storage is blocked the choice lives in memory, so the switch still works.
-let liveViewMemo = null;
-function liveViewWanted() {
-  try { return localStorage.getItem(LIVE_VIEW_KEY) !== '0'; } catch { return liveViewMemo !== '0'; }
-}
-function reducedMotion() {
-  try { return typeof window.matchMedia === 'function' && window.matchMedia('(prefers-reduced-motion: reduce)').matches; } catch { return false; }
-}
-function toggleLiveView(screen) {
-  const on = !liveViewWanted();
-  liveViewMemo = on ? '1' : '0';
-  try { localStorage.setItem(LIVE_VIEW_KEY, liveViewMemo); } catch { /* private mode */ }
-  const r = rdOpenRun();
-  if (r) paintRdLive(screen, r);
-}
-
-function paintRdLive(screen, r) {
-  const row = screen.querySelector('.rd-live-row');
-  const panel = screen.querySelector('.rd-live');
-  if (!row || !panel) return;
-  const offered = !RD_TERMINAL.includes(r.status) && isGraphRun(r);
-  const wanted = liveViewWanted();
-  row.hidden = !offered;
-  const sw = row.querySelector('.rd-live-switch');
-  sw.classList.toggle('on', wanted);
-  sw.setAttribute('aria-checked', String(wanted));
-  if (offered && wanted) liveEnter(screen, r); else liveExit(screen);
-}
-
-function liveEnter(screen, r) {
-  const glance = screen.querySelector('.rd-glance');
-  const panel = screen.querySelector('.rd-live');
-  cancelLiveExit(panel);                   // back on mid-exit: the same graph carries on
-  if (panel.hidden) flipGlance(glance, () => { glance.dataset.live = 'on'; panel.hidden = false; });
-  paintGraphFor(panel.querySelector('.run-flow'), r.stepper, runDecorFor(r, 'focus'), r.steps);
-  if (!panel.classList.contains('is-in')) {
-    void panel.offsetWidth;                // commit the out state, so the class change transitions
-    panel.classList.add('is-in');
-  }
-}
-
-function liveExit(screen) {
-  const panel = screen.querySelector('.rd-live');
-  if (!panel || panel.hidden || LIVE_EXITS.has(panel)) return;
-  panel.classList.remove('is-in');
-  if (reducedMotion()) { finishLiveExit(screen); return; }
-  // Opacity is the exit's last transition in both layouts; the card's own ones bubble here too.
-  const onEnd = (e) => { if (e.target === panel && (!e.propertyName || e.propertyName === 'opacity')) finishLiveExit(screen); };
-  panel.addEventListener('transitionend', onEnd);
-  LIVE_EXITS.set(panel, { timer: setTimeout(() => finishLiveExit(screen), LIVE_EXIT_MS), onEnd });
-}
-
-function cancelLiveExit(panel) {
-  const x = LIVE_EXITS.get(panel);
-  if (!x) return;
-  clearTimeout(x.timer);
-  panel.removeEventListener('transitionend', x.onEnd);
-  LIVE_EXITS.delete(panel);
-}
-
-function finishLiveExit(screen) {
-  const glance = screen.querySelector('.rd-glance');
-  const panel = screen.querySelector('.rd-live');
-  cancelLiveExit(panel);
-  destroyGraphMounts(panel);
-  flipGlance(glance, () => { delete glance.dataset.live; panel.hidden = true; });
-}
-
-/** Slide the glance's left column (title + card) to where a layout change puts it: measure,
- *  change, then play each from its old place (FLIP). A slide still running is measured where
- *  it is on screen, so a quick second toggle turns it round without a jump. */
-function flipGlance(glance, change) {
-  const items = [...glance.querySelectorAll(':scope > .rd-now, :scope > .rd-sheet')];
-  const animate = !reducedMotion() && items.every((n) => typeof n.animate === 'function');
-  const before = animate ? items.map((n) => n.getBoundingClientRect()) : null;
-  if (animate) for (const n of items) for (const a of (n.getAnimations ? n.getAnimations() : [])) a.cancel();
-  change();
-  if (!animate) return;
-  items.forEach((n, i) => {
-    const after = n.getBoundingClientRect();
-    const dx = before[i].left - after.left, dy = before[i].top - after.top;
-    if (Math.abs(dx) < 0.5 && Math.abs(dy) < 0.5) return;
-    n.animate([{ transform: `translate(${dx}px, ${dy}px)` }, { transform: 'none' }],
-      { duration: 420, easing: 'cubic-bezier(.2,.7,.3,1)' });
-  });
 }
 
 // A bold-mono '·' separator, the twin of hdDot().
@@ -39522,7 +41158,9 @@ function paintRdHeader(screen, r) {
   // Run tags (#718): read-only chips after the person chip, replaced on every paint.
   for (const c of screen.querySelectorAll('.rd-page-meta .tag-chip')) c.remove();   // s2: the chips moved to the Cost tags row
   paintRunLabels(screen.querySelector('.rd-glance .rd-kv [data-fact="labels"] > .rd-kv-v'), { pipelineId: r.pipelineId || '', labels: r.labels, onSaved: (l) => { r.labels = l; } });
-  void paintRunPrAuto(screen.querySelector('.rd-glance .rd-kv [data-fact="pr-auto"]'), r.pipelineId, r.status, () => screen.isConnected && runs.get(r.runId) === r);
+  const rdExempt = knownPrExempt(r.pipelineId);
+  void paintRunPrAuto(screen.querySelector('.rd-glance .rd-kv [data-fact="pr-auto"]'), r.pipelineId, r.status, () => screen.isConnected && runs.get(r.runId) === r)
+    .then(() => { if (!rdExempt && knownPrExempt(r.pipelineId) && screen.isConnected && runs.get(r.runId) === r) paintRdHead(screen, r); });   // C5: the route reads it
   paintRunKindChip(screen.querySelector('.rd-page-meta'), workModeOf(r));
   syncFacts(screen.querySelector('.rd-glance .rd-kv'));
 
@@ -39544,13 +41182,16 @@ function paintRdHeader(screen, r) {
     // its tick targets with `querySelectorAll('.run-time')`. Without this class
     // the header elapsed freezes at its paint value and only the Overview stat
     // card ticks.
-    ['rd-dur run-time', fmtDuration(liveTotalMs(r.steps, Date.now())), true],
+    ['rd-dur run-time', fmtDuration(rdElapsedMs(r)), true],
     // Model bridge (model-bridge-design.md §8.6): a run that went through the
     // bridge shows its request count beside the dollars, so a "$0" reads as a
     // unit mismatch (Copilot bills requests), not as free.
     ['rd-cost', runCostText(r, r.totalCostUsd).text + (freeRequestsSuffix(r.steps) || bridgeRequestsSuffix(r.steps)), true],
     ['rd-step', stepText, false],
   ];
+  // Where its agents execute (run-sandbox-note.mjs): a backend, its slot wait or first-use image build, or Local's "not sandboxed".
+  const execSeg = runExecEnvSeg(r, { box: worcaBox(), label: execEnvLabel, titleWithArticle: execEnvTitleWithArticle });
+  if (execSeg) segs.push(execSeg);
   // Rebuilt only when what it says changed. Every frame of every run repaints this header, and a
   // <button> rebuilt between a press and its release loses the click (the two land on different
   // nodes). The elapsed segment changes on every frame, so it is written in place instead (the
@@ -39569,16 +41210,16 @@ function paintRdHeader(screen, r) {
   if (rebuild) segs.forEach(([cls, txt, strong]) => {
     if (!txt) return;
     if (meta.childNodes.length) meta.appendChild(rdDot());
-    const seg = document.createElement('span');
+    const seg = cls.startsWith('rd-exec-env') ? execEnvSegNode(document, execSeg) : document.createElement('span');
     seg.className = cls + (strong ? ' strong' : '');
     seg.textContent = txt;
     if (cls === 'rd-cost' && freeRequestsSuffix(r.steps)) seg.title = estTitle(r.totalCostUsd || 0) + ' Free requests: calls this run made to OpenRouter :free models (every call, tool-loop continuations too), out of the day\'s free allowance.';
     else if (cls === 'rd-cost') seg.title = estTitle(r.totalCostUsd || 0) + (bridgeRequestsSuffix(r.steps) ? ' Requests: calls this run initiated through the model bridge (Copilot bills premium requests, not tokens); tool-loop continuations are not counted.' : '');
-    if (cls === 'rd-cost' && !engineReportsCost(r.runEngine)) seg.title = runCostText(r, r.totalCostUsd).title;   // the unknown cost wins
+    if (cls === 'rd-cost' && runCostKnown(r.runEngine, r.runEngines) !== 'all') seg.title = runCostText(r, r.totalCostUsd).title;   // the unknown cost wins
     meta.appendChild(seg);
   });
   paintCostBreakdown(screen.querySelector('.rd-header'), meta.querySelector('.rd-cost'), runCostBreakdown(r.steps, r.totalCostUsd), costFocus,
-    { agentsUnknown: !engineReportsCost(r.runEngine) });
+    { agentsUnknown: runCostKnown(r.runEngine, r.runEngines) !== 'all' });
 
   // Branch row.
   if (gitOn() && isGitRun(r)) {
@@ -39618,7 +41259,7 @@ function paintRdHeader(screen, r) {
   // Run 3 (D13): every run page's bar is the primary action, Run after, Stop and ⋯ (D31's fold, for every run now; CSS
   // hides Away mode and the terminal, and ⋯ drives them; a shaped run's bar folds Run after too).
   const shapedBar = isShapingRun(r);
-  screen.querySelector('.rd-bar')?.toggleAttribute('data-shaped', shapedBar);
+  screen.querySelector('.rd-bar-end')?.toggleAttribute('data-shaped', shapedBar);
   const barMore = screen.querySelector('.rd-bar-more');
   if (barMore) barMore.hidden = false;
   paintRdMenuCarriers(screen, r);
@@ -39652,7 +41293,15 @@ function paintRdHeader(screen, r) {
   // label and disabled state exactly as the busy path set them.
   const lbl = pauseBtn.querySelector('.rd-btn-label');
   const busy = !lbl;
-  if (lbl) lbl.textContent = paused ? 'Resume' : 'Pause';
+  // Slice 8 (d8-6): a paused shape run's Resume names the run it would wait for (paintResumeAfter).
+  if (lbl && paused && flagOn('shaperSmallRuns') && r.pipelineId) {
+    paintResumeAfter(lbl, r.pipelineId, () => {
+      const cur = runDetailState.screen === screen ? runs.get(runDetailState.runId) : null;
+      if (cur && cur.pipelineId === r.pipelineId) paintRdHeader(screen, cur);
+    });
+  } else if (lbl) lbl.textContent = paused ? 'Resume' : 'Pause';
+  // Slice 16 (D10): More ways to resume says the run waits for its turn, from the same slice info.
+  paintMenuTurn(screen.querySelector('.rd-resume-menu'), lbl && paused ? heldTurnOf(r.pipelineId) : null);
   // A total-budget pause is 403'd by the server until the window resets or the
   // limit is raised, so Resume is disabled up front.
   const totalBlocked = paused && r.pauseReason === 'cost_total' && budgetState.budget?.blocked;
@@ -39685,6 +41334,7 @@ function paintRdHeader(screen, r) {
   const resumeAt = screen.querySelector('.rd-resume-at');
   if (resumeMore) {
     resumeMore.hidden = terminal || !paused || !r.pipelineId;
+    keepVisible(resumeMore, !resumeMore.hidden && pauseNeedsModelMenu({ reason: r.pauseReason, limitScope: r.limitScope }));
     if (resumeMore.hidden) {
       const menu = screen.querySelector('.rd-resume-menu');
       if (menu) menu.hidden = true;
@@ -39696,7 +41346,8 @@ function paintRdHeader(screen, r) {
     resumeAt.disabled = refused;
     resumeAt.title = refused ? 'This run paused on a cost cap. Continuing past it is a live decision and cannot be scheduled.' : '';
   }
-  paintResumeEngineItems(screen.querySelector('.rd-resume-menu'), r.runEngine, { reason: r.pauseReason, limitEngine: r.limitEngine });
+  paintResumeEngineItems(screen.querySelector('.rd-resume-menu'), r.runEngine, { reason: r.pauseReason, limitEngine: r.limitEngine,
+    modelConfirm: r.modelConfirm, limitScope: r.limitScope, limitModel: r.limitModel, mixed: Array.isArray(r.runEngines) });
   paintRdLimitItem(screen, r);
 
   // Away mode switch: any run that is not over (a paused run stores it in its resume point).
@@ -39741,6 +41392,10 @@ function runsNeedsInput() {
     history: Array.isArray(state.historyAll) ? state.historyAll : [],
     active: liveRuns().map((r) => ({ runId: r.runId })),
     designs: flagOn('design') ? designActivity.items() : [],
+    // Slice 7 (owner direction): a feature held for your confirmation counts in the Runs badge, flag on only.
+    // Activity's lists and count read needsYouItems / activityCounts: they leave out a run held for its turn (slice 16)
+    // and ignore the held-for-confirmation groups.
+    groups: flagOn('shaperSmallRuns') ? state.runGroups || [] : [],
   };
 }
 function runsNeedsCount() {
@@ -39842,25 +41497,49 @@ function paintScheduleCounts(c) {
 // and PATH — never written here); this block only paints it and runs guides.
 // A guide is transient state: a reload clears it, the shelf re-summons it.
 // ---------------------------------------------------------------------------
-const gs = { status: null, settled: false, guide: null, spot: null, seq: 0, navigating: false, welcomeShown: false, setupShown: false, refreshTimer: 0, poll: 0, startedRunId: "",
-  // Connect Claude Code › Check again: claudeChecking while it asks, claudeChecked the line every press leaves.
-  claudeChecking: false, claudeChecked: '' };
+const gs = { status: null, settled: false, guide: null, spot: null, seq: 0, navigating: false, welcomeShown: false, setupShown: false, refreshTimer: 0, poll: 0, startedRunId: "" };
 let gsPillHost = null;
 let gsWelcomeUnbind = null;
 let setupDialog = null;
+/** The ready screen's facts, in three calls: Setup is finished, the Claude sign-in is read fresh, then the level view.
+ *  Null when the first or the last call fails; the screen is then a plain one. */
+async function finishSetup() {
+  if (!(await setOnboardingPrefs({ setupFinished: true }))) return null;
+  await loadOnboarding({ recheck: true });
+  let view;
+  try { view = await fetchWorcaLevel(); } catch (e) { console.warn(`setup: could not read your level: ${e.message}`); return null; }
+  if (!view || typeof view !== 'object') return null;
+  const held = view.level?.index ?? 0;
+  const lv = view.celebration?.index === 1 ? view.celebration : null;
+  const next = (Array.isArray(view.ladder) ? view.ladder : []).find((l) => l.index === (lv ? 2 : held + 1));
+  return {
+    earned: !!lv, held,
+    level: lv ? { index: lv.index, name: lv.name, avatar: lv.avatar, hue: lv.hue } : null,
+    missing: Array.isArray(view.setup?.missing) ? view.setup.missing : [],
+    nextName: lv ? (view.nextLevel?.name ?? null) : null,
+    nextNeeds: lv && next ? next.items.filter((i) => !i.done).map((i) => i.label) : [],
+  };
+}
 /** The setup assistant (D18). A second open while one is up moves it to `step` instead. */
 function openSetup({ entry = 'rerun', step = 'check', team = null, teamHash = null } = {}) {
   if (setupDialog) { setupDialog.goTo(step); return; }
   setMobileNavOpen(false);
-  setupDialog = openSetupAssistant({ doc: document, entry, step, team, onClose: (how, { applied = false } = {}) => {
+  const deps = { finishSetup, levelIndex: () => (worca.state.view ? (worca.state.view.level?.index ?? 0) : null) };
+  setupDialog = openSetupAssistant({ doc: document, entry, step, team, deps, onClose: (how, { applied = false, next, readyShown = false, finishing = false } = {}) => {
     setupDialog = null;
+    if (next) location.hash = next;
     queueMicrotask(worca.maybeDialog);   // after the branch below has shown (or not shown) the first-run welcome
     // A7: a first start always continues to the welcome; a finished re-run that applied something ends on the
     // doors, and a Finish with nothing applied goes back to the page; a fix-it run (entry 'fix') returns to
     // the page it came from (product-1-2).
-    if (entry === 'first') showWelcome();
+    // A first start that reached the ready screen (or is finishing) never gets the welcome on top of it, now or on a later
+    // visit to #new: the welcome is marked seen (D-11, R-po-3).
+    if (entry === 'first') {
+      if (readyShown || finishing) { gs.welcomeShown = true; void setOnboardingPrefs({ welcomeSeen: true }); }
+      else showWelcome();
+    }
     else if (entry === 'rerun' && how === 'done' && applied) showWelcome({ force: true });
-    // T15: Apply then Continue, or Finish when nothing differs. Set up later / Escape keep the notice.
+    // T15: Apply then Continue, or Finish when nothing differs. Skip all / Escape keep the notice.
     else if (entry === 'team' && how === 'done' && team && teamHash) { markTeamSeen(team, teamHash); void paintTeamNotice(); }
   } });
 }
@@ -39914,7 +41593,34 @@ async function loadOnboarding({ recheck = false } = {}) {
   gs.status = data;
   paintOnboarding();
   maybeWelcome();
+  void maybeRoleDefaultsNotice();
   return { ok: true };
+}
+
+/** #1450, shown once: an existing install with an empty Claude Code (or Codex) role learns that its steps now run on
+ *  Worca's defaults instead of the CLI's own. Never over the welcome or the setup assistant, never on a fresh install
+ *  (the assistant preselects the defaults there). A warn toast that stays until closed; roleDefaultsNoticeSeen is
+ *  recorded when it shows. */
+const ROLE_DEFAULTS_NOTICE = "Steps with no model now run on Worca's defaults (Opus 5.5 / Sonnet 5.5 / Haiku 5.5) instead of Claude Code's own default. Pick your own on the Models page, or choose 'Let Claude Code decide'.";
+async function maybeRoleDefaultsNotice() {
+  const s = gs.status;
+  if (!s || s.roleDefaultsNoticeSeen === true || s.fresh === true || gs.roleNoticeShown || setupDialog) return;
+  const welcome = document.getElementById('welcome-modal');
+  if (welcome && !welcome.classList.contains('hidden')) return;
+  let settings = null;
+  try { const res = await fetch('/api/settings'); settings = res.ok ? await safeJson(res) : null; } catch { settings = null; }
+  const defaults = settings && settings.roleDefaults && typeof settings.roleDefaults === 'object' ? settings.roleDefaults : null;
+  if (!defaults || gs.roleNoticeShown) return;
+  const roles = settings.modelRoles && typeof settings.modelRoles === 'object' ? settings.modelRoles : {};
+  const empty = ['claude', 'codex'].some((e) => defaults[e] && Object.keys(defaults[e]).some((r) => {
+    const pick = roles[e]?.[r];
+    return !(pick && (pick.model || pick.cliDecides === true));
+  }));
+  if (!empty) return;
+  gs.roleNoticeShown = true;
+  void setOnboardingPrefs({ roleDefaultsNoticeSeen: true });
+  notify({ tone: 'warn', title: 'Steps now run on Worca’s defaults', detail: ROLE_DEFAULTS_NOTICE, key: 'role-defaults',
+    action: { label: 'Open Models', run: () => { location.hash = 'models/jobs'; } } });
 }
 /** Coalesce the change broadcasts (a finished run fires several) into one refetch. */
 function scheduleOnboardingRefresh() {
@@ -39926,11 +41632,12 @@ function paintOnboarding() {
   paintShelf();
   const pill = gsEnsurePillHost();
   if (pill) {
-    renderGettingStartedPill(pill, gs.status, () => showView('getting-started'));
+    renderGettingStartedPill(pill, gs.status, () => showView('getting-started'), worca.state.view);
     pill.querySelector('.gs-pill')?.classList.toggle('active', currentShownView === 'getting-started');
   }
   paintGsSettings();
   paintClaudeSetupStatus();
+  howItWorks.paintMarks();
 }
 /** The shelf lives on its own page and is painted on entry (the reveal plays then)
  *  and on every status change while the page is open; a hidden checklist still
@@ -39942,7 +41649,7 @@ function paintShelf({ entering = false } = {}) {
   if (entering) host.replaceChildren();
   const appearing = entering || !host.firstElementChild;
   renderGettingStarted(host, { ...gs.status, hidden: false }, {
-    onStep: startGuide,
+    onStep: (id) => (id === 'setup' ? openSetup({ entry: 'first' }) : startGuide(id)),
     onHide: () => setOnboardingPrefs({ hidden: !gs.status.hidden }),
     hideLabel: gs.status.hidden ? 'Show in sidebar' : 'Hide from sidebar',
     animate: appearing,
@@ -39971,16 +41678,14 @@ function paintGsSettings() {
   if (!btn || !gs.status) return;
   const { done, total } = { done: doneCount(gs.status), total: GETTING_STARTED_STEPS.length };
   btn.textContent = gs.status.hidden ? 'Show again' : 'Open checklist';
-  setGsSettingsMsg(gs.status.hidden
-    ? `Hidden from the sidebar · ${done} of ${total} done`
-    : `In the sidebar · ${done} of ${total} done`);
+  const pillText = gsPillText(gs.status, worca.state.view);
+  setGsSettingsMsg(`${gs.status.hidden ? 'Hidden from the sidebar' : 'In the sidebar'} · ${done} of ${total} done${pillText ? ` · ${pillText}` : ''}`);
 }
 // Settings › General › Setup assistant: Run setup (AC-4.4).
 document.getElementById('setupRunAgain')?.addEventListener('click', () => openSetup({ entry: 'rerun' }));
 document.getElementById('gsShowAgain')?.addEventListener('click', async () => {
-  if (gs.status && gs.status.hidden) {
-    if (!(await setOnboardingPrefs({ hidden: false }))) return;
-  }
+  // Show again also brings every How it works mark back (one POST, so a refusal leaves both as they were).
+  if (!(await setOnboardingPrefs({ guidesReset: true, ...(gs.status && gs.status.hidden ? { hidden: false } : {}) }))) return;
   showView('getting-started');
 });
 
@@ -40021,58 +41726,98 @@ function showWelcome({ force = false } = {}) {
   modal.querySelector('[data-door]')?.focus?.();
 }
 
-// ── Connect Claude Code (the one step with no control to ring) ──────────────
+// ── Connect <engine>: one setup dialog for every chat engine (ui/public/engine-setup.mjs) ─────────────────
+// Claude's is also Getting started's "claude" step (the one step with no control to ring): its status is the onboarding
+// payload's, and Check again re-reads GET /api/onboarding. Every other engine's is GET /api/engines/<engine>/setup:
+// installed here (a few stat()s), then its readiness. `engine` is the engine shown, `status` that engine's answer,
+// `checked` the line every press of Check again leaves, `asking` the engine a check is out for.
+const setupDlg = { engine: null, status: null, checked: '', asking: null };
+/** The Claude status box (signed in, signed out and where it looked, not found); also repaints the wizards' signed-out
+ *  lines, which are stale once the CLI checks out, whatever the dialog shows. */
 function paintClaudeSetupStatus() {
-  const box = document.getElementById('claude-setup-status');
-  if (!box || !gs.status) return;
-  const c = gs.status.claude || {};
+  if (!gs.status) return;
   const ok = !!gs.status.steps.claude;
-  const bin = c.bin || 'claude';
-  box.className = `ob-claude-status ${ok ? 'ok' : 'err'}`;
-  if (ok) box.textContent = c.auth === 'signed-in' ? `Found ${bin}, installed and signed in. You're set.` : `Found ${bin}. You're set.`;
-  else if (c.auth === 'signed-out') box.textContent = `Found ${bin}, installed but not signed in yet. Run claude in a terminal, type /login, then check again.`;
-  else box.textContent = c.hint || `"${bin}" is not on the PATH of the Worca server. Install it, then check again (restart the UI if PATH changed).`;
-  // Signed out: the folder the CLI read. A server with another HOME reads another sign-in than the terminal.
-  if (!ok && c.auth === 'signed-out' && c.configDirectory) box.append(lineEl('ob-claude-where', claudeCheckedWhere(c.configDirectory)));
-  if (gs.claudeChecked) box.append(lineEl('ob-claude-checked', gs.claudeChecked));
-  // The wizards' signed-out lines are stale once the CLI checks out.
   if (ok) for (const restore of [...claudeSignedOutHints.values()]) restore();
+  if (setupDlg.engine === 'claude') paintEngineSetupStatus();
 }
-function openClaudeSetup() {
-  const modal = document.getElementById('claude-setup-modal');
-  if (!modal) return;
-  paintClaudeSetupStatus();
+function paintEngineSetupStatus() {
+  const box = document.getElementById('engine-setup-status');
+  if (!box || !setupDlg.engine) return;
+  if (setupDlg.engine === 'claude') {
+    if (!gs.status) return;
+    const c = gs.status.claude || {};
+    const ok = !!gs.status.steps.claude;
+    const bin = c.bin || 'claude';
+    box.className = `ob-setup-status ${ok ? 'ok' : 'err'}`;
+    if (ok) box.textContent = c.auth === 'signed-in' ? `Found ${bin}, installed and signed in. You're set.` : `Found ${bin}. You're set.`;
+    else if (c.auth === 'signed-out') box.textContent = `Found ${bin}, installed but not signed in yet. Run claude in a terminal, type /login, then check again.`;
+    else box.textContent = c.hint || `"${bin}" is not on the PATH of the Worca server. Install it, then check again (restart the UI if PATH changed).`;
+    // Signed out: the folder the CLI read. A server with another HOME reads another sign-in than the terminal.
+    if (!ok && c.auth === 'signed-out' && c.configDirectory) box.append(lineEl('ob-setup-where', claudeCheckedWhere(c.configDirectory)));
+  } else {
+    const line = setupStatusLine(setupDlg.engine, setupDlg.status);
+    box.className = `ob-setup-status${line.ok === null ? '' : line.ok ? ' ok' : ' err'}`;
+    box.textContent = line.text;
+  }
+  if (setupDlg.checked) box.append(lineEl('ob-setup-checked', setupDlg.checked));
+}
+/** Open the setup dialog on `engine` (a chat engine; anything else opens nothing). */
+function openEngineSetup(engine = 'claude') {
+  const modal = document.getElementById('engine-setup-modal');
+  if (!modal || !engineSetup(engine)) return;
+  setupDlg.engine = engine;
+  setupDlg.status = null;
+  // A fresh open starts with no "Checked just now" line.
+  setupDlg.checked = '';
+  const title = document.getElementById('engine-setup-title');
+  if (title) title.textContent = setupTitle(engine);
+  renderEngineSetup(document, document.getElementById('engine-setup-guide'), engine);
+  paintSetupDocsLink(document.getElementById('engine-setup-docs'), engine);
+  paintEngineSetupStatus();
   modal.classList.remove('hidden');
-  claudeSetupGuard?.opened();
-  document.getElementById('claude-setup-check')?.focus?.();
-  // The page's status may predate a sign-in (or a transient signed-out probe):
-  // ask again on open instead of repeating it. A fresh open starts with no "Checked just now" line.
-  gs.claudeChecked = '';
-  recheckClaudeSetup({ manual: false });
+  engineSetupGuard?.opened();
+  document.getElementById('engine-setup-check')?.focus?.();
+  // The page's answer may predate an install or a sign-in (or a transient signed-out probe): ask again on open.
+  void recheckEngineSetup({ manual: false });
 }
 function lineEl(cls, text) { const n = document.createElement('span'); n.className = cls; n.textContent = text; return n; }
-/** Check again: "Checking…" and disabled while it asks; then a line every time (`manual`: the button, not the open). */
-async function recheckClaudeSetup({ manual = true } = {}) {
-  if (gs.claudeChecking) return;
-  const btn = document.getElementById('claude-setup-check');
-  gs.claudeChecking = true;
+/** GET /api/engines/<engine>/setup into setupDlg.status (`recheck`: Check again, past the readiness cache). */
+async function loadEngineSetup(engine, { recheck = false } = {}) {
+  let data;
+  try {
+    const res = await fetch(`/api/engines/${encodeURIComponent(engine)}/setup${recheck ? '?recheck=1' : ''}`);
+    data = await safeJson(res);
+    if (!res.ok) return { ok: false, error: data?.error || `HTTP ${res.status}` };
+  } catch (e) { return { ok: false, error: e?.message || 'network error' }; }
+  if (setupDlg.engine === engine) setupDlg.status = data;
+  return { ok: true };
+}
+/** Check again: "Checking…" and disabled while it asks; then a line every time (`manual`: the button, not the open).
+ *  An answer for an engine the dialog no longer shows paints nothing. */
+async function recheckEngineSetup({ manual = true } = {}) {
+  const engine = setupDlg.engine;
+  if (!engine || setupDlg.asking === engine) return;
+  const btn = document.getElementById('engine-setup-check');
+  setupDlg.asking = engine;
   if (btn) { btn.disabled = true; btn.textContent = 'Checking…'; }
   let r = { ok: false, error: 'network error' };
-  try { r = await loadOnboarding({ recheck: true }); } finally {
-    gs.claudeChecking = false;
-    if (btn) { btn.disabled = false; btn.textContent = 'Check again'; }
+  try { r = engine === 'claude' ? await loadOnboarding({ recheck: true }) : await loadEngineSetup(engine, { recheck: manual }); } finally {
+    if (setupDlg.asking === engine) setupDlg.asking = null;
+    if (btn && setupDlg.engine === engine) { btn.disabled = false; btn.textContent = 'Check again'; }
   }
+  if (setupDlg.engine !== engine) return;
   const c = gs.status?.claude || {};
-  if (!r.ok) gs.claudeChecked = `Couldn't check just now: ${r.error}`;
-  else if (manual) gs.claudeChecked = gs.status?.steps?.claude ? 'Checked just now: signed in.' : c.auth ? 'Checked just now: still not signed in.' : 'Checked just now: still not found.';
-  paintClaudeSetupStatus();
+  if (!r.ok) setupDlg.checked = `Couldn't check just now: ${r.error}`;
+  else if (manual && engine === 'claude') setupDlg.checked = gs.status?.steps?.claude ? 'Checked just now: signed in.' : c.auth ? 'Checked just now: still not signed in.' : 'Checked just now: still not found.';
+  else if (manual) setupDlg.checked = setupCheckedLine(setupDlg.status);
+  paintEngineSetupStatus();
 }
-function closeClaudeSetup() { document.getElementById('claude-setup-modal')?.classList.add('hidden'); }
+function closeEngineSetup() { document.getElementById('engine-setup-modal')?.classList.add('hidden'); }
 // Read-only status: a backdrop click or Escape closes it.
-const claudeSetupEl = document.getElementById('claude-setup-modal');
-const claudeSetupGuard = claudeSetupEl ? guardModal(claudeSetupEl, { kind: 'viewer', close: () => closeClaudeSetup() }) : null;
-document.getElementById('claude-setup-close')?.addEventListener('click', closeClaudeSetup);
-document.getElementById('claude-setup-check')?.addEventListener('click', () => { void recheckClaudeSetup(); });
+const engineSetupEl = document.getElementById('engine-setup-modal');
+const engineSetupGuard = engineSetupEl ? guardModal(engineSetupEl, { kind: 'viewer', close: () => closeEngineSetup() }) : null;
+document.getElementById('engine-setup-close')?.addEventListener('click', closeEngineSetup);
+document.getElementById('engine-setup-check')?.addEventListener('click', () => { void recheckEngineSetup(); });
 
 // ── Guides ──────────────────────────────────────────────────────────────────
 // Each hop is derived from REAL UI state at the moment it is needed (which view
@@ -40082,12 +41827,14 @@ document.getElementById('claude-setup-check')?.addEventListener('click', () => {
 // so they learn where things live. `final` hops end the guide on the click.
 const onView = (v) => currentShownView === v;
 /** Ring the sidebar entry for `view` (on a phone gsPhoneNavHop rings the menu button first);
- *  New run has no sidebar entry, so its hop rings the top bar's #topnav-new (on every width).
+ *  New run has no sidebar entry: NEW_RUN rings the Runs row, then the Runs page's #runs-new.
  *  A view the user is already on is never a stop: the hop passes on arrival, without a ring. */
 const NAV = (view, text, also = []) => ({
   id: `nav:${view}`, nav: view, views: [view, ...also], text,   // `also`: views reached from it that count as "there" (a wizard)
-  target: [view === 'new' ? '#topnav-new' : `.nav button[data-nav="${view}"]`],
+  target: [view === 'new' ? '#runs-new' : `.nav button[data-nav="${view}"]`],
 });
+/** The way to New run: the Runs row (passed on Runs or New run), then the Runs page's New run button. */
+const NEW_RUN = (text) => [NAV('runs', 'Runs live here.', ['new']), NAV('new', text)];
 const noProjectPicked = () => {
   const sel = document.getElementById('projectSelect');
   const targetIsProject = !!document.querySelector('#target-seg [data-target="project"].on');
@@ -40141,7 +41888,7 @@ const gsDialogUp = (id) => { const m = document.getElementById(id); return !!(m 
 const gsMenuUp = (id) => { const m = document.getElementById(id); return !!(m && !m.hidden); };
 /** The run just started, on its own page (beginRun opens it): the closing stops of every tour
  *  that starts one — what it is doing, its numbers, a waiting question (only while one waits),
- *  then the rows that open each part of it. `first` is the tour's own line for the first stop.
+ *  then the tabs that open each part of it. `first` is the tour's own line for the first stop.
  *  On the Runs list instead (the user went back), one stop on the run's row. */
 const gsRunPageHops = (first) => {
   // The run Start just began (beginRun notes it) when it is on the list; the first row otherwise.
@@ -40151,16 +41898,16 @@ const gsRunPageHops = (first) => {
     return [{ id: 'card', info: true, nextLabel: 'Done', target: card,
       text: 'This is your run. Open it to follow what it is doing; a question it needs answered shows there too. When it finishes, its row says how it ended.' }];
   }
-  const on = (sel) => [`#run-detail .rd[data-mode="glance"] ${sel}`, ...card];
-  const asking = !!document.querySelector('#run-detail .rd[data-mode="glance"] .rd-questions:not([hidden])');
+  const on = (sel) => [`#run-detail .rd ${sel}`, ...card];
+  const asking = !!document.querySelector('#run-detail .rd .rd-questions:not([hidden])');
   return [
-    { id: 'card', info: true, target: on('.rd-now-top'), text: first },
-    { id: 'facts', info: true, target: on('.rd-facts'),
+    { id: 'card', info: true, target: ['#run-detail .rd .rd-header .run-state-line', ...on('.rd-glance .rd-now-top')], text: first },
+    { id: 'facts', info: true, target: on('.rd-glance .rd-facts'),
       text: 'Time, cost and the files it has changed so far, kept current while it works.' },
     asking ? { id: 'ask', info: true, target: on('.rd-questions .rd-ask-head'),
-      text: 'A question from the run lands here, below its panel. Answer, then Submit, and it carries on. The status line at the top leads here too.' } : null,
-    { id: 'rows', info: true, nextLabel: 'Done', target: on('.rd-result'),
-      text: 'Each row opens a part of the run: its Overview, the Diff of the changes so far, the Workflow and more. When it finishes, its row says how it ended.' },
+      text: 'A question from the run lands here, above its tabs. Answer, then Submit, and it carries on. The status line leads here too.' } : null,
+    { id: 'rows', info: true, nextLabel: 'Done', target: on('.rd-tabs'),
+      text: 'Each tab opens a part of the run: this Overview, the Diff of the changes so far, the Workflow and more. When it finishes, its card says how it ended.' },
   ].filter(Boolean);
 };
 // Test hook, added here: the object at the top of the file is built while this const is
@@ -40173,7 +41920,7 @@ function gsRunHops(g, mock) {
   const mockOn = () => !!(el.mock && el.mock.checked);   // the switch sits beside Start run at every mode
   const formErr = () => (document.getElementById('form-msg')?.textContent || '').trim();
   return [
-    NAV('new', 'Every run starts here.'),
+    ...NEW_RUN('Every run starts here.'),
     // P3: a run without a project has no project to pick (its select is hidden).
     state.runTarget === 'none' ? null : { id: 'project', target: '#projectSelect', lift: ['.select-wrap'], met: () => !noProjectPicked(),
       text: 'Pick the project the run happens in.',
@@ -40364,7 +42111,7 @@ function gsHops(step, g) {
           text: 'Or ask the chat: it adds and rewires steps, tunes models, and drafts new agents and scripts. It works on this canvas, while you watch.' },
         { id: 'back', target: '#wfv-back', lift: ['.wfv-float', '.wfv-stage'], met: () => currentView() !== 'workflows',
           text: 'Leave the editor. Runs start from New run.' },
-        NAV('new', 'Now start a run with the workflow that fits your task. Every run starts here.'),
+        ...NEW_RUN('Now start a run with the workflow that fits your task. Every run starts here.'),
         // The pick is saved per project (PATCH /api/config), so a project has to be picked first.
         state.runTarget === 'none' ? null : { id: 'project', target: '#projectSelect', lift: ['.select-wrap'], met: () => !noProjectPicked(),
           text: 'Pick the project the run happens in. The workflow you choose is remembered for it.',
@@ -40506,6 +42253,7 @@ function endGuide() {
   gs.guide = null;
   clearInterval(gs.poll); gs.poll = 0;
   for (const t of GS_WATCH_EVENTS) document.removeEventListener(t, gsOnPageChange, true);
+  queueMicrotask(worca.maybeDialog);   // a guide that ended frees a waiting level dialog (unless a new guide already lit)
 }
 // A guide's next hop is a pure function of the page and of what this run has passed, so
 // ANY interaction the user makes (typing the prompt, flipping Mock, a nav click) can move
@@ -40565,7 +42313,7 @@ function gsScrollTop() {
 // mode lowered while a tour runs.)
 async function startGuide(step) {
   // A real run needs a model: signed out, show the sign-in steps first. Once per page, since an install on routed models has none to do.
-  if (step === 'realRun' && gs.status?.claude?.auth === 'signed-out' && !gs.claudeAsked) { gs.claudeAsked = true; openClaudeSetup(); return; }
+  if (step === 'realRun' && gs.status?.claude?.auth === 'signed-out' && !gs.claudeAsked) { gs.claudeAsked = true; openEngineSetup('claude'); return; }
   const def = GETTING_STARTED_STEPS.find((s) => s.id === step);
   const need = def && def.level;
   if (need && !levelAtLeast(need)) {
@@ -40587,7 +42335,7 @@ async function startGuide(step) {
  *  same guide carries over, so a replay explains every stop again. */
 function runGuideFor(step) {
   endGuide();
-  if (step === 'claude') { openClaudeSetup(); return; }
+  if (step === 'claude') { openEngineSetup('claude'); return; }
   gs.guide = { step, seq: ++gs.seq, hop: null, target: null, final: false, started: false, passed: new Set(), touched: false, view: currentShownView };
   for (const t of GS_WATCH_EVENTS) document.addEventListener(t, gsOnPageChange, true);
   // Some outcomes arrive after the click's own tick (a workflow loading onto the
@@ -40640,6 +42388,30 @@ void paintTeamNotice();
 
 const views = $$('.view');
 // Settings lives in the account menu (#acct-settings) and lights like a nav row while it is open.
+// ── How it works: the per-area explainers (ui/public/how-it-works/). Created once the Getting started
+// block above exists: it reads and writes gs.status and its Show me starts a Getting started tour.
+// An explainer never writes into #gsSettingsMsg (setOnboardingPrefs does), so it has its own quiet POST.
+async function postGuidePrefs(patch) {
+  try {
+    const res = await fetch('/api/onboarding', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(patch) });
+    const data = await safeJson(res);
+    if (!res.ok || !data || !data.steps) { console.error('how-it-works: the server refused the update', res.status); return null; }
+    gs.status = data;
+    paintOnboarding();
+    return data;
+  } catch (err) {
+    console.error('how-it-works: the update did not reach the server', err);
+    return null;
+  }
+}
+const howItWorks = createHowItWorks({
+  doc: document,
+  getStatus: () => gs.status,
+  setStatus: (status) => { gs.status = status; },
+  postPrefs: postGuidePrefs,
+  startTour: startGuide,
+});
+howItWorks.mount();
 const navLinks = $$('.nav button[data-nav], #acct-settings');
 // workflows took over composer, agents, scripts and agent-create (see MOVED_ROUTES); workspaces + workspace-create are appended.
 // workspace-create is in the array (so deep-links resolve) but has no nav link.
@@ -40732,6 +42504,7 @@ const levelListeners = [];
 function onLevelChange(fn) { levelListeners.push(fn); }
 document.addEventListener('worca:level', () => {
   paintLevelBanner();
+  paintModeBanner();             // a suggestion at or below the new mode is no longer due
   paintSideEdges();              // rows came or went
   for (const fn of levelListeners) { try { fn(currentLevel()); } catch (e) { console.warn('[worca] level repaint failed', e); } }
 });
@@ -40819,6 +42592,7 @@ if (typeof window !== 'undefined') {
 let currentSettingsTab = null;
 
 function showView(name, param = '') {
+  if (name !== 'new' || !newPipelinePrefill) state.pinWorkflowId = null;   // U-T4: Run it once's pin lasts only for that New run (a hand-off sets it again)
   // Runs redesign slice 4 (D16): #feature/ID is the group page; a bare #feature goes to Chat.
   if (name === 'feature' && !param) return showView('chat', '');
   if (name === 'group' && !param) return showView('runs', '');
@@ -40832,6 +42606,14 @@ function showView(name, param = '') {
   if (name === 'requirements' && !flagOn('requirements')) return showView('chat', '');
   // Design too: a deep link while the design flag is off lands on Chat.
   if (name === 'design' && !flagOn('design')) return showView('chat', '');
+  // A bare #design is the design start with every design shown. The address is swapped, as #running's below, so Back
+  // does not land on #design and come back here; the nested call finds the hash already right and pushes nothing.
+  if (name === 'design' && !param) {
+    if (/^#design\/?$/.test(location.hash)) {
+      try { window.history.replaceState(null, '', '#chat/new/design/all'); } catch { /* sandboxed */ }
+    }
+    return showView('chat', 'new/design/all');
+  }
   // A bare #running / #history is the Runs list now (both lists merged into it). Replace the
   // entry rather than letting the hash sync below PUSH #runs: Back would land on #history
   // again, normalize again, and never get past it.
@@ -40898,8 +42680,9 @@ function showView(name, param = '') {
   // bubble lives on <body>, so nothing hides it with the page.
   if (ADDON_VIEWS.includes(currentShownView) && name !== currentShownView) {
     hideInfoTip();
-    // Connectors' pickers and forms open in #plugin-modal, which lives outside the page.
-    if (currentShownView === 'connectors') closePluginModal();
+    // Connectors' pickers, forms and confirms open in the shared Marketplace layers, which live outside the page.
+    if (currentShownView === 'connectors') closePluginModal();   // the requirements strip opens #plugin-modal from this page
+    if (currentShownView === 'connectors' && connectorLayers) { connectorLayers.modal.close(); connectorLayers.sheet.close(); }
   }
   // Moving between the three Runs routes swaps the pane at once; going back to the bare
   // list (#runs) slides the detail away in the narrow layout and hands focus back to its
@@ -40935,7 +42718,8 @@ function showView(name, param = '') {
     param = settingsParamFor(tab, sub);
   }
   const prevView = currentShownView;
-  if (prevView === 'new' && name !== 'new') setFormMsg('');
+  if (prevView === 'new' && name !== 'new') { setFormMsg(''); clearRerun(); newFormVisit++; }
+  if (name !== 'new') newPipelinePrefill = null;   // a prefill (a Rerun, an Ask handoff) is for the New run it opened, not a later visit
   // The schedule sheet and the Start menu are body-level overlays of the view that opened them.
   if (prevView !== name) { closeScheduleSheet(); closeStartMenu(); }
   currentShownView = name;
@@ -40944,7 +42728,7 @@ function showView(name, param = '') {
   // The guide re-derives its hop on a tick, so it is told here — before a view's
   // own loader runs — and never misses a switch because a loader threw.
   onboardingViewChanged(name);
-  if (terminalPane) terminalPane.onContextChange();
+  if (toolPanel) toolPanel.onContextChange();
 
   // Focus selection lives only while on the Running view.
   state.selectedRunId = (name === 'running') ? runDetailParts(param).runId : '';
@@ -40961,13 +42745,9 @@ function showView(name, param = '') {
   refreshAllCounts();        // every view switch re-reads the authoritative counts
 
   views.forEach((v) => v.classList.toggle('hidden', v.dataset.view !== viewSection(name)));
-  navLinks.forEach((b) => {
-    const on = b.dataset.nav === viewSection(name);
-    b.classList.toggle('active', on);
-    if (on) b.setAttribute('aria-current', 'page');
-    else b.removeAttribute('aria-current');
-  });
-  paintTopnavTitle(name);
+  paintNav(name, param);
+  // The design start is the sidebar's Design: its How it works is the Design guide.
+  howItWorks.syncRoute(navSectionOf(name, param) === 'design' ? 'design' : name);
   setMobileNavOpen(false);   // any route (a drawer tap, back/forward, a deep link) puts the drawer away
   // Any route puts the Actions flyout away (a click inside it already did).
   sideActionsFlyout?.close();
@@ -41007,9 +42787,11 @@ function showView(name, param = '') {
     } else if (name === 'history') {
       routeHistoryDetail(param, { instant: entering });
     } else if (name === 'feature' || name === 'group') {
-      const [rawId, tab = 'runs'] = String(param).split('/');
+      const [rawId, tab = 'runs', third] = String(param).split('/');
+      // Shaper slice 7 (D6): only #feature/ID/requirements/ship reveals the Ship card; any other third segment is ignored.
+      const at = name === 'feature' && tab === 'requirements' && third === 'ship' ? 'ship' : '';
       // Coming back from another view: the hidden page skipped frames, so the Overview's Shaper view repaints (D14).
-      openGroupPane(name, decodeURIComponent(rawId), tab, { reentered: prevView !== 'feature' && prevView !== 'group' });
+      openGroupPane(name, decodeURIComponent(rawId), tab, { reentered: prevView !== 'feature' && prevView !== 'group', at });
     }
     paintRunsList();
     // §5a.9: the one-time What's new note above the list (idempotent; gone for good after Got it).
@@ -41092,10 +42874,12 @@ function showView(name, param = '') {
       });
     }
   }
+  worca.onRouteChange();   // a level dialog waiting for a result route (Runner) or a settled route
   if (prevView !== name) worca.onViewShown(name);   // once per navigation, not per repaint: Statistics, Team metrics and Team policy feed the level
   if (name === 'profile') worca.showProfile(document.getElementById('profile-level-host'), () => currentShownView === 'profile');   // #profile/level
   if (name === 'new') {
     loadTaskSources(); applyBudgetToNewView(); refreshMentionHighlights();
+    restoreNewRunAttach();
     paintNewRunAwayHint();
     if (!state.awayMode) void fetchAwayMode().then((d) => { if (d) { state.awayMode = d; paintNewRunAwayHint(); } });
     schedulePolicyLine();                    // team policy notes for the current target (board 8)
@@ -41138,7 +42922,7 @@ function paintSearchPlaceholder() {
 }
 // Paint one Settings tab and run its loader. Called from showView ONLY, so every
 // entry point (tab click, hash, deep link, legacy redirect, boot, a direct
-// showView call such as goAddModel) goes through exactly one render.
+// showView call such as addModelOn) goes through exactly one render.
 // `param` is already canonical: '' | '<tab>' | 'guardrails/<id>'.
 function showSettingsTab(param = '') {
   const [tab, sub] = parseSettingsParam(param);
@@ -41168,6 +42952,7 @@ function showSettingsTab(param = '') {
   if (tab === 'presets') void loadPresetsView();
   if (tab === 'automations') void loadAutomationsView();
   if (tab === 'ask') void paintAskMcpBlock(document.getElementById('ask-mcp-host'), { api: mcpApi });
+  if (tab === 'ask') chatRoleRow.refresh();
   if (tab === 'guardrails') loadGuardrailsView(sub);
   if (tab === 'memory') loadMemoryTab(sub);
   if (tab === 'experimental') loadFlagsTab(sub);
@@ -41357,7 +43142,7 @@ async function showConnectors(param) {
   const { server } = parseMcpParam(param);
   if (!server || currentView() !== 'connectors' || parseHash()[1] !== param) return;
   const host = views.find((v) => v.dataset.view === 'connectors');
-  const row = host && [...host.querySelectorAll('.mcp-server-row[data-server]')].find((n) => n.dataset.server === server);
+  const row = host && [...host.querySelectorAll('.cx-row[data-server]')].find((n) => n.dataset.server === server);
   if (row) markFound(row, row.querySelector('button'));
 }
 
@@ -41373,19 +43158,21 @@ async function mcpApi(method, path, body) {
   }
 }
 let mcpViewCtl = null;
+let connectorLayers = null;
 function mcpTab() {
   if (!mcpViewCtl) {
+    // The page's pickers, forms and confirms are the Marketplace layers (connectors-layers.mjs), not #plugin-modal:
+    // `shows(node)`: is this node still in the open dialog? A flow whose answer lands after the dialog's own Close, a
+    // tab switch or another dialog opens nothing (skill-import.mjs). `afterClose(fn)`: the dialog's own Close (or
+    // Escape) runs fn once, as the open step's Cancel (an Import preview's or an Update's staged copy is discarded).
+    connectorLayers = createConnectorLayers({ doc: document, win: window });
     mcpViewCtl = createMcpView({
       host: document.querySelector('[data-view="connectors"]'),
       api: mcpApi,
       navigate: (hash) => { if (location.hash.slice(1) !== hash) location.hash = hash; },
-      confirm: confirmModal,
-      // `shows(node)`: is this node still in the open dialog? A flow whose answer lands after the dialog's own Close, a
-      // tab switch or another dialog opens nothing (skill-import.mjs). `afterClose(fn)`: the dialog's own Close (or
-      // Escape) runs fn once, as the open step's Cancel (an Import preview's or an Update's staged copy is discarded).
-      modal: { open: pluginModal, close: closePluginModal, onClose: onPluginModalDismiss,
-        shows: (node) => !el.pluginModal.classList.contains('hidden') && el.pluginModalBody.contains(node),
-        afterClose: (fn) => { pluginModalAfterClose = fn; } },
+      confirm: connectorLayers.confirm,
+      modal: connectorLayers.modal,
+      sheet: connectorLayers.sheet,
       notify: (o) => notify(o),
     });
   }
@@ -41412,29 +43199,67 @@ onLevelChange(() => paintHiddenSettings());
 onLevelChange(() => repaintOpenRunGroupLine());               // the Group row's "Add to group…" is Advanced (D18)
 onLevelChange(() => scheduleGroupPagePaint());                // the group page's Logs tab is Expert
 onLevelChange(() => paintShelf());
-onLevelChange(() => reselectHiddenDetailTabs());
+onLevelChange(() => { reselectHiddenDetailTabs(); relayoutDetailTabs(); });
 onLevelChange(() => {                                       // node decorations are expert detail
   for (const host of $$('.run-flow.gv-host')) { const slot = GRAPH_MOUNTS.get(host); if (slot && slot.m.repaint) slot.m.repaint(); }
 });                          // tiles above the mode wear their level
-onGitFlip((on) => { paintFormWorkMode(); reselectHiddenDetailTabs(); refreshHdFromRow(); { const hs = histDetailState; if (hs && hs.screen && hs.data && hs.record) void paintHdPublish(hs.screen, hs.record, hs.data); } { const r = rdOpenRun(); if (r && runDetailState && runDetailState.screen) repaintRunDetail(r); } const v = currentView(); if (on && (v === 'projects' || v === 'workspaces')) void refreshSyncChips(); if (!on && v === 'workspaces') for (const item of document.querySelectorAll('.ws-item[data-workspace-id]')) paintWsSyncItem(item); if (on && v === 'new' && state.runTarget !== 'workspace') void refreshBranches(selectedProjectPath()); if (!on && projAddMode === 'clone' && !cloneFollow) setProjAddMode('folder'); if (!on && projFilter !== 'all') { projFilter = 'all'; paintProjFilters(); } });
+onGitFlip((on) => { paintFormWorkMode(); reselectHiddenDetailTabs(); relayoutDetailTabs(); refreshHdFromRow(); { const hs = histDetailState; if (hs && hs.screen && hs.data && hs.record) void paintHdPublish(hs.screen, hs.record, hs.data); } { const r = rdOpenRun(); if (r && runDetailState && runDetailState.screen) repaintRunDetail(r); } const v = currentView(); if (on && (v === 'projects' || v === 'workspaces')) void refreshSyncChips(); if (!on && v === 'workspaces') for (const item of document.querySelectorAll('.ws-item[data-workspace-id]')) paintWsSyncItem(item); if (on && v === 'new' && state.runTarget !== 'workspace') void refreshBranches(selectedProjectPath()); if (!on && projAddMode === 'clone' && !cloneFollow) setProjAddMode('folder'); if (!on && projFilter !== 'all') { projFilter = 'all'; paintProjFilters(); } });
 for (const t of ['input', 'change', 'click']) {
   document.getElementById('run-form')?.addEventListener(t, () => setTimeout(paintHiddenSettings, 0));
+}
+
+/** The sidebar row a route lights. A design lives on the Chat page but is the sidebar's Design: a new design's start
+ *  (#chat/new/design) and a chat whose design is on screen light Design and title the page Design, not Chat. */
+function navSectionOf(name, param) {
+  if (name !== 'chat') return viewSection(name);
+  const p = String(param || '');
+  if (/^new\/design(?:\/|$)/.test(p)) return 'design';
+  const thread = p.split('/')[0];
+  // A design chat still loading reads its chats-list row, so Design stays lit from one design chat to the next.
+  return thread && (designStudio?.threadId === thread || askPanel?.designChatLoading(thread)) ? 'design' : 'chat';
+}
+function paintNav(name, param) {
+  const navSection = navSectionOf(name, param);
+  askPanel?.setListDesigns(name === 'chat' && navSection === 'design');   // beside Design, the chats list holds design chats only
+  navLinks.forEach((b) => {
+    const on = b.dataset.nav === navSection;
+    b.classList.toggle('active', on);
+    if (on) b.setAttribute('aria-current', 'page');
+    else b.removeAttribute('aria-current');
+  });
+  paintTopnavTitle(navSection === 'design' ? 'design' : name);
+}
+/** A design chat's design mounted or left after the route painted (the chat loads first): light the row again. */
+function repaintChatNav() {
+  if (currentShownView === 'chat') paintNav('chat', parseHash()[1]);
 }
 
 // Nav clicks only update the hash; the single hashchange listener drives
 // showView so each navigation runs it exactly once (no double /api/runs fetch).
 navLinks.forEach((b) =>
   b.addEventListener('click', () => {
-    const name = b.dataset.nav;
+    const name = b.dataset.hash || b.dataset.nav;   // data-hash: a row that opens a route of another page (Design: a new design chat)
     // If hash already equals target, no hashchange fires — call showView directly.
-    if (location.hash.slice(1) === name) showView(name);
+    if (location.hash.slice(1) === name) showView(...splitRoute(name));
     else location.hash = name;
   })
 );
-// New run (#topnav-new): the top bar's way to the #new page (the sidebar has no row for it). It
+// New run (#runs-new, the Runs page head): the way to the #new page (the sidebar has no row for it). It
 // routes exactly like a nav row — hash-first, and a direct showView when the hash already says
 // #new — but carries no data-nav, so the router never lights it as the open page.
-$('#topnav-new')?.addEventListener('click', () => {
+{
+  const b = document.createElement('button');
+  b.type = 'button';
+  b.className = 'btn btn-sm btn-primary runs-new';
+  b.id = 'runs-new';
+  b.dataset.minLevel = 'simple';
+  b.innerHTML = iconSvg('run', 14);
+  b.append('New');
+  b.setAttribute('aria-label', 'New run');
+  b.title = 'New run';
+  $('#runs-new-slot')?.replaceChildren(b);
+}
+$('#runs-new')?.addEventListener('click', () => {
   if (location.hash.slice(1) === 'new') showView('new');
   else location.hash = 'new';
 });
@@ -41454,6 +43279,8 @@ activityMenu = $('#topnav-activity') ? createActivityMenu({
     history: (Array.isArray(state.historyAll) ? state.historyAll : []).filter(Boolean).map(runsHistItem),
     active: liveRuns().sort(cmpTabRuns).map(runsLiveItem),
     designs: flagOn('design') ? designActivity.items() : [],
+    // Slice 16: a run held for its turn is not in Needs you, as on the Runs badge (flag on only).
+    groups: flagOn('shaperSmallRuns') ? state.runGroups || [] : [],
   }),
   loadSchedules: async () => {
     await withWorkspaces();                              // a workspace's ticket names its workspace
@@ -41546,12 +43373,14 @@ function timerTick() {
     const hosts = rdTickHosts(r);
     if (!hosts.length) continue;
     const now = Date.now();
-    const elapsed = fmtDuration(liveTotalMs(r.steps, now));
+    const elapsed = fmtDuration(rdElapsedMs(r, now));
+    const agent = fmtDuration(rdAgentMs(r, now));
     const durs = durByNode(r.steps, now, true);
     for (const host of hosts) {
       // querySelectorAll, not querySelector: the detail screen carries the header
       // elapsed AND the Overview ELAPSED stat card, both tagged `.run-time`.
       for (const timeEl of host.querySelectorAll('.run-time')) timeEl.textContent = elapsed;
+      for (const timeEl of host.querySelectorAll('.run-agent-time')) timeEl.textContent = agent;
       // The glance's step times (its status line and Now rows), each from when it started.
       for (const el of host.querySelectorAll('[data-since]')) {
         const t = new Date(el.dataset.since).getTime();
@@ -41588,7 +43417,18 @@ function enterChatView(param = '', prevView = null) {
   let threadId = CHAT_THREAD_RE.test(head) ? head : null;
   // Home's own address is #chat: a typo'd or stale chat id, and a bare #chat/new (the worca logo), land there.
   // Every swap below also moves the Workflows view's Back target (showView recorded the address before the swap).
-  if (head && !threadId && (head !== 'new' || parts[1] !== 'run')) {
+  // #chat/new/design (the sidebar's Design): a new design chat; #chat/new/design/all shows every design. Any other tail
+  // (a hand-typed address) is the plain start, and the address says so: Show all designs and a tile that cannot be read
+  // act on the start's own two addresses only (designStartRoute, openDesignChat).
+  const designStart = head === 'new' && parts[1] === 'design' && flagOn('design');
+  const designAll = designStart && parts.length === 3 && parts[2] === 'all';
+  const designParam = designAll ? 'new/design/all' : 'new/design';
+  if (designStart && String(param) !== designParam) {
+    try { window.history.replaceState(null, '', `#chat/${designParam}`); } catch { /* sandboxed */ }
+    wfvReturn = `chat/${designParam}`;
+    parts.length = designAll ? 3 : 2;
+  }
+  if (head && !threadId && !designStart && (head !== 'new' || parts[1] !== 'run')) {
     try { window.history.replaceState(null, '', '#chat'); } catch { /* sandboxed */ }
     wfvReturn = 'chat';
     parts.length = 0;
@@ -41608,6 +43448,7 @@ function enterChatView(param = '', prevView = null) {
     }
   }
   askPanel?.open({ threadId });
+  if (designStart) askPanel?.startDesign({ all: designAll });
   // The New run link's entry: consumed on ANY Chat entry, so a stale one (home never reached) can't arm a later visit.
   if (pendingShapeEntry) {
     const { text } = pendingShapeEntry;
@@ -41621,13 +43462,14 @@ function enterChatView(param = '', prevView = null) {
 /** The panel moved to another chat (a History row, New chat, a first send, a deleted chat): the address follows —
  *  pushed, so Back returns to the previous chat, or swapped (`replace`: a first send, a chat that is gone). Only
  *  while Chat shows; the echo (hashchange → enterChatView → open) is a no-op for the chat already shown. */
-function chatRoute(threadId, { replace = false } = {}) {
+function chatRoute(threadId, { replace = false, design = false } = {}) {
   if (currentShownView !== 'chat') return;
   // A swapped address keeps an open run panel's tail (P4): #chat/new/run/<id>/logs → #chat/<id>/run/<id>/logs.
   const [, cur] = parseHash();
   const parts = String(cur || '').split('/');
   const tail = replace && parts[1] === 'run' ? `/${parts.slice(1).join('/')}` : '';
-  const target = threadId ? `chat/${threadId}${tail}` : (tail ? `chat/new${tail}` : 'chat');
+  // design: a new design's start (the chats list's New beside Design), as the sidebar's Design opens it.
+  const target = design ? 'chat/new/design' : threadId ? `chat/${threadId}${tail}` : (tail ? `chat/new${tail}` : 'chat');
   if (location.hash.slice(1) === target) return;
   if (replace) {
     try { window.history.replaceState(null, '', `#${target}`); } catch { /* sandboxed */ }
@@ -41878,6 +43720,23 @@ function getPageContext() {
   if (dir) { ctx.projectDir = dir; ctx.projectSource = 'fallback'; }
   return ctx;
 }
+/** The tool panel's page context (issue 1064): getPageContext plus what it needs and the Chat page does not carry.
+ *  On Chat the scope is the chat itself (its id and pinned project), never the run in its panel. A live project run
+ *  names only its folder: the project key comes from the run (historyKeyForRun). */
+function toolPageContext() {
+  const ctx = getPageContext();
+  if (ctx.view === 'chat') {
+    const sc = askPanel?.scope?.() || null;
+    const chatId = askPanel?.threadId?.() || null;
+    return { view: 'chat', chatId, chatProjectKey: sc && sc.pinned && sc.projectKey ? sc.projectKey : null, chatDesign: !!chatId && designStudio?.threadId === chatId };
+  }
+  if (ctx.view === 'running' && ctx.runId && !ctx.projectKey && !ctx.workspaceId) {
+    const r = runs.get(ctx.runId);
+    const key = r ? historyKeyForRun(r) : '';
+    if (key) ctx.projectKey = key;
+  }
+  return ctx;
+}
 /** Ask worca beside the page: the composer's chips for the page on screen (ask-page-chips.mjs), named with what this
  *  tab knows — the live run's or the open saved run's title and status, the project's or the workspace's name. */
 function getPageChips() {
@@ -41926,8 +43785,10 @@ async function openWorkflowFromAsk(workflowId, { reveal = false } = {}) {
 async function applyAskPrefill() {
   const p = newPipelinePrefill;
   if (!p) return;
+  const visit = newFormVisit;   // a rerun hold belongs to this visit of the form only
   newPipelinePrefill = null;
-  setRunTarget(p.target === 'workspace' ? 'workspace' : p.target === 'none' ? 'none' : 'project');
+  state.pinWorkflowId = p.pinWorkflow ? p.workflowId : null;
+  const targetLoad = setRunTarget(p.target === 'workspace' ? 'workspace' : p.target === 'none' ? 'none' : 'project');
   // The card's engine pick (none: the defaults the project change loads decide). Touched, so they keep off it.
   if (p.engine) { state.engineTouched = true; setRunEngine(p.engine); }
   // pick the source from the prefill (a Markdown handoff, else the prompt) — the three-step reset of the segment handler
@@ -41953,12 +43814,16 @@ async function applyAskPrefill() {
   } else if (p.target === 'none') {
     // AWAITED for the same reason as below: setRunTarget('none') started an un-awaited onProjectChanged() whose loadConfig('') tail would reset the workflow picker.
     await onProjectChanged();
-  } else if (p.projectDir) {
-    const idx = state.projects.findIndex((x) => x && x.path === p.projectDir);
+  } else if (p.projectDir || p.rerun) {
+    // A rerun whose project is gone has no projectDir: the target is left empty (index 0), never the last project.
+    const idx = p.projectDir ? state.projects.findIndex((x) => x && x.path === p.projectDir) : -1;
     if (idx >= 0) el.projectSelect.selectedIndex = idx + 1; // +1 past the placeholder
+    else if (p.rerun) el.projectSelect.selectedIndex = 0;
     // AWAITED: onProjectChanged → loadConfig → loadWorkflowsInto/loadGuardrailsInto — un-awaited, that tail lands after our own awaits and resets both pickers.
     await onProjectChanged();
-  }
+  } else if (p.pinWorkflow) await targetLoad;   // U-T4: its config tail must land before the chosen workflow is set
+  // The card's Runs in pick, AFTER the target change (it clears the touched flag); touched, so the defaults keep off it.
+  if (p.execEnv) { state.execEnvTouched = true; setRunExecEnv(p.execEnv); }
   el.prompt.value = src === 'prompt' ? (p.prompt || '') : '';
   if (el.promptMarkdown) el.promptMarkdown.value = src === 'markdown' ? p.promptMarkdown : el.promptMarkdown.value;
   refreshMentionHighlights();
@@ -42008,6 +43873,7 @@ async function applyAskPrefill() {
     }
   }
   if (p.sameAsSource && el.sameAsSource) { el.sameAsSource.checked = true; paintSameAsSource(); }
+  if (p.rerun) await applyRerun(p.rerun, visit);
 }
 
 // ---- Run presets (#712, docs/run-presets.md) --------------------------------
@@ -42015,14 +43881,27 @@ async function applyAskPrefill() {
 // loop budgets, human-in-the-loop and the workflow edit state.preset.setup (holdInPreset) instead of the
 // project config, and the submit handler sends the overlay + humanInLoop + presetId lane.
 
-/** The one-line reason Start is disabled by a broken preset reference, or ''. */
-function presetBlockReason() {
-  return state.preset && state.preset.broken.length ? state.preset.broken[0].message : '';
+/** The setup the form holds for this run: the applied preset's, else the rerun's (a rerun has no id and shows no chip).
+ *  A rerun with no recorded setup holds none: the form keeps the target's own defaults. */
+function activeSetup() {
+  return state.preset || (state.rerun && !state.rerun.unrecorded ? state.rerun : null);
 }
 
-/** The applied preset's Human in the loop, or null when no preset sets it. */
+/** What the target check judges and Start waits on: the active setup, or a rerun whose setup was not recorded (its target still counts). */
+function checkedHold() {
+  return state.preset || state.rerun;
+}
+
+/** The one-line reason Start is disabled by a broken preset (or rerun) reference, or ''. */
+function presetBlockReason() {
+  const held = checkedHold();
+  return held && held.broken.length ? held.broken[0].message : '';
+}
+
+/** The held setup's Human in the loop, or null when none sets it. */
 function presetHumanInLoop() {
-  return state.preset && typeof state.preset.setup.humanInLoop === 'boolean' ? state.preset.setup.humanInLoop : null;
+  const held = activeSetup();
+  return held && typeof held.setup.humanInLoop === 'boolean' ? held.setup.humanInLoop : null;
 }
 
 /**
@@ -42030,12 +43909,18 @@ function presetHumanInLoop() {
  * the pickers, put the preset's workflow, engine and guardrails back, then check the preset for this target.
  */
 async function reapplyPresetAfter(cfgLoad) {
-  const p = state.preset;
+  const p = activeSetup();
+  if (!p && state.rerun) {   // no recorded setup: nothing to put back, only the target is checked again
+    const r = state.rerun;
+    await cfgLoad;
+    if (state.rerun === r && !state.preset) await runPresetCheck();
+    return;
+  }
   if (!p || p.applying) return;
   p.applying = true;
   try {
     await cfgLoad;
-    if (state.preset !== p) return;
+    if (activeSetup() !== p) return;
     state.engineTouched = true;   // the target change reset it; the late project defaults must not swap the engine
     setRunEngine(p.setup.engine || 'claude');
     await loadWorkflowsInto(p.setup.workflowId || 'wf_default');
@@ -42044,7 +43929,7 @@ async function reapplyPresetAfter(cfgLoad) {
   } finally {
     p.applying = false;
   }
-  if (state.preset !== p) return;
+  if (activeSetup() !== p) return;
   paintPresetChip();
   await runPresetCheck();
   paintHiddenSettings();
@@ -42125,7 +44010,7 @@ function presetMenuItems() {
 
 // A broken item the form has replaced since the check (#712 8.6): its reference is no longer what this run uses.
 function presetItemReplaced(item) {
-  const s = state.preset.setup;
+  const s = activeSetup().setup;
   if (item.item === 'guardrails') return state.guardrailsId !== item.ref && state.guardrailSets.some((g) => g.id === state.guardrailsId);
   if (item.item === 'model') {
     const m = s.overlay?.nodes?.[item.ref]?.model;
@@ -42140,28 +44025,31 @@ function presetItemReplaced(item) {
 
 function paintPresetBroken() {
   if (!el.presetBroken) return;
-  if (!state.preset) { el.presetBroken.replaceChildren(); return; }
-  el.presetBroken.replaceChildren(renderBrokenCard(document, state.preset.broken, {
-    onReset: (b) => void resetPresetItem(b), canEditScope: levelAtLeast('advanced') }));
+  const held = checkedHold();
+  if (!held) { el.presetBroken.replaceChildren(); return; }
+  el.presetBroken.replaceChildren(renderBrokenCard(document, held.broken, {
+    onReset: (b) => void resetPresetItem(b), canEditScope: levelAtLeast('advanced'),
+    ...(state.preset ? {} : { title: 'Something in the earlier run no longer works', scopeHint: 'Pick another project to continue.' }) }));
 }
 
 /** "Reset to project default": drop the pick, repaint the form from what is left, and check again. */
 async function resetPresetItem(item) {
-  if (!state.preset) return;
-  const next = resetItem(state.preset.setup, item, {
+  const held = activeSetup();
+  if (!held) return;
+  const next = resetItem(held.setup, item, {
     projectWorkflowId: state.config.activeWorkflowId || 'wf_default',
     defaultEngine: state.runDefaults?.engine?.value || 'claude',
   });
-  state.preset.setup = next;
-  state.preset.modified = true;
-  state.preset.applying = true;
+  held.setup = next;
+  held.modified = true;
+  held.applying = true;
   try {
     if (item.item === 'guardrails') await loadGuardrailsInto('permissive');
     else if (item.item === 'engine') setRunEngine(next.engine);
     else if (item.item === 'workflow') await loadWorkflowsInto(next.workflowId);
     else await renderWorkflowConfig(state.workflowId);
   } finally {
-    if (state.preset) state.preset.applying = false;
+    held.applying = false;
   }
   paintPresetChip();
   await runPresetCheck();
@@ -42170,14 +44058,20 @@ async function resetPresetItem(item) {
 
 /** Post the pick-time check for the form's target; a modified preset keeps only the items it has not replaced. */
 async function runPresetCheck() {
-  const p = state.preset;
+  const p = checkedHold();
   if (!p) return;
   if (p.modified) { p.broken = p.broken.filter((b) => !presetItemReplaced(b)); paintPresetBroken(); applyBudgetToNewView(); }
-  const target = state.runTarget === 'workspace' ? { workspaceId: (el.workspaceSelect && el.workspaceSelect.value) || '' } : { projectDir: selectedProjectPath() };
-  const r = await mcpApi('POST', `/api/presets/${encodeURIComponent(p.id)}/check`, target);
-  if (state.preset !== p) return;   // another pick (or No preset) since
+  const isRerun = p === state.rerun;
+  if (isRerun && !p.runId) return;   // the earlier run is gone (a refused start): nothing left to check it against
+  const target = state.runTarget === 'workspace' ? { workspaceId: (el.workspaceSelect && el.workspaceSelect.value) || '' }
+    : isRerun && state.runTarget === 'none' ? { noProject: true } : { projectDir: selectedProjectPath() };
+  // A rerun that holds none of the earlier run's picks (none recorded, or a preset replaced them): only the target is judged.
+  if (isRerun && p.unrecorded) target.targetOnly = true;
+  // A rerun checks its own setup against the form's target (the earlier run's id, not a preset's).
+  const r = await mcpApi('POST', isRerun ? `/api/pipelines/${encodeURIComponent(p.runId)}/rerun/check` : `/api/presets/${encodeURIComponent(p.id)}/check`, target);
+  if (checkedHold() !== p) return;   // another pick (or No preset) since
   if (!r.ok || !Array.isArray(r.data?.broken)) {
-    setFormMsg(`Could not check the preset: ${(r.data && r.data.error) || `HTTP ${r.status}`}`, 'err');
+    setFormMsg(`Could not check the ${p === state.rerun ? 'earlier run' : 'preset'}: ${(r.data && r.data.error) || `HTTP ${r.status}`}`, 'err');
     return;
   }
   // The server checks the STORED preset; the form's replacements count too (the start check reads the body).
@@ -42194,8 +44088,9 @@ function schedulePresetCheck() {
 
 /** A form change the preset stores but no holder owns (guardrails, engine): the preset is modified. */
 function notePresetChange() {
-  if (!state.preset || state.preset.applying) return;
-  state.preset.modified = true;
+  const held = activeSetup();
+  if (!held || held.applying) return;
+  held.modified = true;
   paintPresetChip();
   schedulePresetCheck();
 }
@@ -42214,10 +44109,48 @@ function applyRunTagsFromPreset(tags) {
   paintRunTagDimsWarn();
 }
 
+/**
+ * The part of a setup that is the form's own fields: engine, workflow, guardrails, Sets opt-outs, mock, Away mark, sync,
+ * source branches, tags and PR choice, then the Agents rows. The target must already be applied. It makes no check: the
+ * caller (a preset pick, or a rerun) owns that.
+ */
+async function applySetupToForm(s) {
+  // onProjectChanged reset engineTouched and started loadRunDefaults un-awaited; touching it here
+  // stops that late answer from swapping in the project's default engine.
+  state.engineTouched = true;
+  setRunEngine(s.engine || 'claude');
+  await loadWorkflowsInto(s.workflowId || 'wf_default');
+  await loadGuardrailsInto(s.guardrailsId || 'permissive');   // keeps a missing set in preset mode
+  state.mcpOptOut = [...(s.mcpOptOut || [])];
+  renderMcpRuns();
+  el.mock.checked = !!s.mock;
+  if (el.nightMode) el.nightMode.checked = !!s.nightMode;
+  state.sync.autoSync = typeof s.syncBeforeStart === 'boolean' ? s.syncBeforeStart : null;
+  if (state.runTarget === 'workspace') {
+    // the per-member selects are rebuilt asynchronously on the change above (as applyAskPrefill waits for them)
+    const byKey = s.sourceBranchByKey || {};
+    for (const sel of el.wsSourceBranches ? el.wsSourceBranches.querySelectorAll('select.ws-src-select') : []) {
+      const want = byKey[sel.dataset.projectKey];
+      if (!want) continue;
+      for (let i = 0; i < 20 && sel.options.length <= 1; i++) await new Promise((r) => setTimeout(r, 25));
+      setSelectValueAdding(sel, want);
+    }
+  } else if (s.sourceBranch && el.sourceBranch) {
+    await refreshBranches(selectedProjectPath());
+    setSelectValueAdding(el.sourceBranch, s.sourceBranch);
+  }
+  if (Array.isArray(s.tags)) applyRunTagsFromPreset(s.tags);
+  runPrFields().apply(s.pr);
+  applyPresetSwitches();
+  await renderWorkflowConfig(state.workflowId);
+}
+
 async function applyPreset(id) {
   const p = state.presets.find((x) => x.id === id);
   if (!p) { leavePresetMode(); return; }
   state.preset = { id: p.id, name: p.name, scope: p.scope, setup: structuredClone(p.setup), modified: false, applying: true, broken: [] };
+  // A preset picked on a rerun form replaces the earlier run's picks; the link (runId) stays, and "No preset" must not bring them back.
+  if (state.rerun) Object.assign(state.rerun, { setup: {}, unrecorded: true, broken: [], modified: false });
   if (el.presetSelect) el.presetSelect.value = p.id;
   paintPresetChip();
   const s = state.preset.setup;
@@ -42237,34 +44170,7 @@ async function applyPreset(id) {
       if (idx >= 0) el.projectSelect.selectedIndex = idx + 1;   // +1: past the placeholder option
       await onProjectChanged();
     }
-    // onProjectChanged reset engineTouched and started loadRunDefaults un-awaited; touching it here
-    // stops that late answer from swapping in the project's default engine.
-    state.engineTouched = true;
-    setRunEngine(s.engine || 'claude');
-    await loadWorkflowsInto(s.workflowId || 'wf_default');
-    await loadGuardrailsInto(s.guardrailsId || 'permissive');   // keeps a missing set in preset mode
-    state.mcpOptOut = [...(s.mcpOptOut || [])];
-    renderMcpRuns();
-    el.mock.checked = !!s.mock;
-    if (el.nightMode) el.nightMode.checked = !!s.nightMode;
-    state.sync.autoSync = typeof s.syncBeforeStart === 'boolean' ? s.syncBeforeStart : null;
-    if (state.runTarget === 'workspace') {
-      // the per-member selects are rebuilt asynchronously on the change above (as applyAskPrefill waits for them)
-      const byKey = s.sourceBranchByKey || {};
-      for (const sel of el.wsSourceBranches ? el.wsSourceBranches.querySelectorAll('select.ws-src-select') : []) {
-        const want = byKey[sel.dataset.projectKey];
-        if (!want) continue;
-        for (let i = 0; i < 20 && sel.options.length <= 1; i++) await new Promise((r) => setTimeout(r, 25));
-        setSelectValueAdding(sel, want);
-      }
-    } else if (s.sourceBranch && el.sourceBranch) {
-      await refreshBranches(selectedProjectPath());
-      setSelectValueAdding(el.sourceBranch, s.sourceBranch);
-    }
-    if (Array.isArray(s.tags)) applyRunTagsFromPreset(s.tags);
-    runPrFields().apply(s.pr);
-    applyPresetSwitches();
-    await renderWorkflowConfig(state.workflowId);
+    await applySetupToForm(s);
   } finally {
     if (state.preset && state.preset.id === p.id) state.preset.applying = false;
   }
@@ -42278,6 +44184,80 @@ async function usePresetOnNewRun(id) {
   location.hash = '#new';
   await applyPreset(id);
   el.prompt.focus();
+}
+
+// ---- Rerun (docs/runs.md) --------------------------------------------------
+// ⋯ › Rerun on an ended run opens the New run form filled from it; nothing is created until the form is started.
+// The form holds the earlier run's setup in state.rerun (activeSetup), which reads like a preset's but has no id, no
+// chip and nothing to update: submit sends `rerunOf` and the same run-only lane.
+
+/** One attached file of the earlier run as a Blob, or null when it could not be fetched. */
+async function fetchRerunFile(pipelineId, name) {
+  try {
+    const res = await fetch(`/api/runs/${encodeURIComponent(pipelineId)}/artifact-raw/extras/${encodeURIComponent(name)}?download=1`);
+    return res.ok ? await res.blob() : null;
+  } catch { return null; }
+}
+
+let rerunSeq = 0;
+async function rerunRun(pipelineId, label = '') {
+  const tok = ++rerunSeq;   // a later Rerun click supersedes this one
+  const hash = location.hash;
+  const r = await mcpApi('GET', `/api/pipelines/${encodeURIComponent(pipelineId)}/rerun`);
+  if (tok !== rerunSeq) return;
+  if (!r.ok || !r.data || typeof r.data.prompt !== 'string') {
+    notify({ tone: 'err', title: "Couldn't load the earlier run", detail: (r.data && (r.data.message || r.data.error)) || '', key: 'rerun-load' });
+    return;
+  }
+  // Fetched together; the size budget is then spent in the run's own order, as the files were attached.
+  const wanted = (r.data.extras || []).filter((e) => e.available);
+  const blobs = await Promise.all(wanted.map((e) => fetchRerunFile(pipelineId, e.name)));
+  const files = [];
+  let room = EXTRAS_MAX_BYTES;
+  for (const [i, e] of wanted.entries()) {
+    const blob = blobs[i];
+    if (!blob || blob.size > room) { files.push({ name: e.name }); continue; }
+    room -= blob.size;
+    files.push({ name: e.name, dataBase64: await fileToBase64(blob) });
+  }
+  if (tok !== rerunSeq || location.hash !== hash) return;   // superseded, or the person went elsewhere meanwhile
+  if (state.preset) leavePresetMode();   // a preset applied earlier must not leak its presetId into this run
+  openNewPipeline(rerunPrefill({ ...r.data, runId: pipelineId, label }, files));
+}
+
+function paintRerunNotes(lines) {
+  if (!el.rerunNotes) return;
+  el.rerunNotes.replaceChildren(...lines.map((l) => Object.assign(document.createElement('div'), { textContent: l })));
+  el.rerunNotes.hidden = !lines.length;
+}
+
+/** The tail of applyAskPrefill for a rerun: hold the earlier run's setup, put it on the form, show what needs attention. */
+async function applyRerun(r, visit) {
+  // Left while the prefill loaded (showView's clearRerun ran before there was a hold): this visit holds no rerun.
+  if (visit !== newFormVisit || currentShownView !== 'new') return;
+  const held = { runId: r.runId, label: r.label, setup: structuredClone(r.setup || {}), unrecorded: !r.setup, broken: [...r.broken], modified: false, applying: true };
+  state.rerun = held;
+  try {
+    if (r.setup) await applySetupToForm(held.setup);
+  } finally {
+    held.applying = false;
+  }
+  if (state.rerun !== held) return;   // the form was left meanwhile
+  paintPresetBroken();
+  paintRerunNotes(rerunNotes({ missing: r.missing, extrasLost: r.extrasLost, setupMissing: !r.setup, restored: r.restored, lost: r.lost }));
+  applyBudgetToNewView();
+  paintHiddenSettings();
+}
+
+/** The form is no longer a rerun (left, or started): a plain New run sends no rerunOf and holds no rerun picks. */
+function clearRerun() {
+  if (!state.rerun) return;
+  state.rerun = null;
+  paintPresetBroken();
+  paintRerunNotes([]);
+  applyBudgetToNewView();
+  void renderWorkflowConfig(state.workflowId);
+  paintHiddenSettings();
 }
 
 /** "Run on the source branch" follows the applied preset, again after each start (clearTask unchecks it, #688). */
@@ -42315,7 +44295,7 @@ async function loadPresets() {
 function presetSetupFromForm(draft, scopeKind) {
   return {
     ...setupFromBody(draft, { scope: scopeKind }),
-    ...(state.preset ? { overlay: state.preset.setup.overlay, humanInLoop: state.preset.setup.humanInLoop } : {}),
+    ...(activeSetup() ? { overlay: activeSetup().setup.overlay, humanInLoop: activeSetup().setup.humanInLoop } : {}),
   };
 }
 const presetBasis = (draft) => (draft.workspaceId ? { workspaceId: draft.workspaceId } : { projectDir: draft.projectDir });
@@ -42760,7 +44740,10 @@ function scopeChatTo(project) {
   if (project && project.key) askPanel?.setScope?.({ pinned: true, projectKey: project.key, label: project.name });
 }
 registerScopeSwitchCard();
+registerEnvironmentCard();   // the environment card: a project's spec, build or sandbox settings (docs/environment-spec.md)
 registerQuestionCard();   // freeform chat D5: the ask_question card (Open in worca parity)
+// A chat's design cards (rounds, design questions, sound): drawn by the design open beside the chat (designChatHost).
+const designChatCards = registerDesignChatCards({ doc: document, studio: () => designStudio?.studio || null });
 // The chat files card (show_files) and its built-in file renderers, registered before the chat mounts too.
 registerFilesCard();
 
@@ -42768,7 +44751,7 @@ registerFilesCard();
 // A send from the home arms the hero → dock glide (chatHome.armFlip). The home itself mounts right after the page
 // (mountChatHome, below P1's mount); every function it uses is a hoisted declaration in this block.
 let chatHome = null;
-// The home's and the intent chip's timers: app.js's own setInterval / setTimeout — the page's in a browser; Node's under
+// The home's, the intent chip's and the Guide check's timers: app.js's own setInterval / setTimeout — the page's in a browser; Node's under
 // the jsdom tests, unref'd like _timerTick, since a jsdom window's interval would keep a test process alive for ever.
 const chatHomeTimers = {
   setInterval: (fn, ms) => { const t = setInterval(fn, ms); if (t && typeof t.unref === 'function') t.unref(); return t; },
@@ -42776,7 +44759,10 @@ const chatHomeTimers = {
   setTimeout: (fn, ms) => { const t = setTimeout(fn, ms); if (t && typeof t.unref === 'function') t.unref(); return t; },
   clearTimeout: (t) => clearTimeout(t),
 };
-const chatIntent = installIntentAddon({ win: chatHomeTimers, onSend: () => { chatHome?.armFlip(); } });
+const chatIntent = installIntentAddon({ onSend: () => { chatHome?.armFlip(); } });
+const chatRole = installRolePicker({ intent: chatIntent });
+installGuideLine({ intent: chatIntent, role: () => chatRole.role(), onRoleChange: (fn) => chatRole.onChange(fn), timers: chatHomeTimers });
+const chatRoleRow = mountRoleSetting(document.getElementById('chatRoleHost'), chatRole, { doc: document });
 
 // ── Chat home (worca Chat P6) ──────────────────────────────────────────────────────────────────────────────
 // The hero, quick actions, Needs you / Running / Recent chats / Workflows and the promos, inside the Chat page's
@@ -42798,6 +44784,8 @@ function mountChatHome() {
       workflows: chatHomeWorkflows,
       flags: chatHomeFlags,
       threadForRun: async (ref) => (await featureThreadFor(ref)) || findFollowingThread((...args) => fetch(...args), ref),
+      homeForRun: featureHomeFor,                                         // slice 7 (D11): with a chat-less feature's id
+      openFeature: (id) => { location.hash = groupHrefOf({ groupKind: 'feature', groupId: id }); },
       openThread: (id) => openChat({ threadId: id }),
       openRunPanel: (ref, opts) => chatDeps.openRunPanel(ref, opts),     // P4 swaps chatDeps.openRunPanel for the panel
       setIntent: (id, opts) => chatIntent.set(id, opts),
@@ -42944,8 +44932,8 @@ function chatHomeHistTile(p) {
     pauseReason: p.pauseReason || null, pendingQuestion: null, live: false, terminal: false,
     // Bundle QA 2: what runModel reads to say why a finished run needs you — its PR, a stopped Watch PR, member PRs.
     pr: p.pr && typeof p.pr === 'object' ? p.pr : null, watch: p.watch || null, memberPrs: memberPrsOf(p),
-    elapsedMs: Number(p.totalActiveMs) || 0,
-    costUsd: engineReportsCost(p.runEngine) && Number.isFinite(Number(p.totalCostUsd)) ? Number(p.totalCostUsd) : null,   // null: cost unknown (Cursor), as askRunSnapshot
+    elapsedMs: runHeadlineMs(p) || 0,
+    costUsd: runCostKnown(p.runEngine, p.runEngines) !== 'none' && Number.isFinite(Number(p.totalCostUsd)) ? Number(p.totalCostUsd) : null,   // null: cost unknown (Cursor), as askRunSnapshot
     progress: null, active: [], stepper: null, decor: null,
   };
 }
@@ -43004,10 +44992,11 @@ function chatPrefill(text) {
 // only when Chat first shows (or on a hello for an open chat).
 askPanel = createAskPanel({
   doc: document,
+  designChat: designChatHost,   // a design chat's dock and a new design's start (docs/design.md, "In the chat")
   win: window,
   fetch: (...args) => fetch(...args),
   // Shared terminal (#574): a click on a command card's folder shows its tab in the pane below (Ask's own commands never do).
-  showTerminal: (sessionId) => terminalPane?.showSession(sessionId),
+  showTerminal: (sessionId) => toolPanel?.showSession(sessionId),
   sendWs: (obj) => {
     const ws = state.ws;
     if (ws && state.wsReady) {
@@ -43020,7 +45009,13 @@ askPanel = createAskPanel({
   openNewPipeline: (prefill) => { askSide?.uncover(); openNewPipeline(prefill); },
   openComposer: (id) => { openWorkflowFromAsk(id, { reveal: true }); },
   composerActions: askComposerActions(),        // Ask's draft and graph cards: the Workflows chat's actions (ask-composer-cards.mjs)
-  openClaudeSetup: () => { openClaudeSetup(); },
+  // Connect <engine> (engine-setup.mjs): the picker's rows for an engine not installed here, a signed-out Claude's notice.
+  openEngineSetup: (engine) => { openEngineSetup(engine); },
+  // The picker's "More harnesses": the Models view with Add model on that harness. OpenCode lists its own models, so
+  // it opens at that list; every other sign-in opens at step 1 with the harness picked.
+  openAddModel: (engine) => { askSide?.uncover(); addModelOn(engine); },
+  // The run card's model pickers read readiness (status words, broker locks) from the same cache as the resume menus.
+  engineRows: readyEngineRows,
   loadMarkdown: loadAskMarkdown,
   hljsLoader: diffHljsLoader,
   storage: localStorage,
@@ -43036,6 +45031,8 @@ askPanel = createAskPanel({
   summariseCommands: () => chatSummariesPref,
   // Ask worca beside the page: the page on screen as chips and as a new side chat's scope, and the column's head buttons.
   getPageChips,
+  onToolScope: (hint) => toolPanel?.onContextChange(hint),         // a chat switch or a scope change moves no hash; hint.created: a new chat's id
+  onChatsClosed: (ids) => { for (const id of ids || [null]) toolPanel?.closeScope({ type: 'chat', id }); },   // null: every chat (a history clear)
   getPageScope,
   sideActions: {
     hide: () => askSide?.hide(),
@@ -43058,7 +45055,7 @@ if ($('#ask-side') && $('#topnav-ask')) {
     storage: localStorage,
     aside: $('#ask-side'),
     button: $('#topnav-ask'),
-    getTermW: () => (terminalPane?.isOpen() ? (parseInt(document.body?.style.getPropertyValue('--term-w'), 10) || 460) : 0),
+    getTermW: () => (toolPanel?.isOpen() ? (parseInt(document.body?.style.getPropertyValue('--term-w'), 10) || 460) : 0),
     onShow: ({ focus, button }) => {
       const host = $('#ask-side [data-ask-side-host]');
       if (host && askPanel.root.parentNode !== host) host.appendChild(askPanel.root);
@@ -43103,9 +45100,12 @@ if ($('#ask-side') && $('#topnav-ask')) {
 Promise.resolve().then(() => fetch('/api/settings')).then((r) => safeJson(r)).then((d) => {
   setChatSummariesPref(d && d.chat);
   paintKeepAwakeRow(!(d && d.keepAwake === false));
+  setChatLinksPref(!(d && d.chatLinksInPanel === false));
+  setPreviewPortGate(d);
+  if (setWorcaBox(d && d.box)) paintRunExecEnv();   // New run's "not sandboxed" note needs the box
   paintMemoryModelLink(d);
   paintScreensaver(d && d.screensaver);
-}).catch(() => { /* keep: on */ });
+}).catch(() => { setChatLinksPref(true); /* null (not read yet) already counts as on; this marks the setting read */ });
 onFlagChange('commandSummaries', () => { askPanel?.refreshCommandCards(); repaintJobs(); });
 // One delegated handler for every Summaries / Raw switch (Logs tab, History Logs, both drawers, Chat's run
 // panel): they are cloned on every build, so per-node listeners would be lost on each rebuild.
@@ -43170,28 +45170,204 @@ window.addEventListener('focus', () => { void refreshVersionStatus(); });
   window.addEventListener('focus', () => { loadCredentials().then((d) => { if (d) repaintPickers(); }); });
 }
 
-// Terminal pane (issue #573): a JS-built body-level pane on the right, like the Ask dock above. No
-// network until it is opened (or was left open); xterm.js loads on first open, and opening it on a run
-// or a project starts (or reattaches) that page's shell.
-terminalPane = createTerminalPane({
+// Tool panel (issue 1064): the terminal pane's column, now with tabs. Terminal, Files and Changes register here; slice
+// 2's Browser registers the same way (toolKinds.register) and its header icon slot lights up. No network until the panel
+// is first opened (or was left open); xterm.js loads with the first terminal tab.
+terminalTool = createTerminalTool({
   doc: document,
   win: window,
   fetch: (...args) => fetch(...args),
-  // false while /ws is down: the pane shows it is reconnecting instead of dropping keys silently.
+  // false while /ws is down: the terminal shows it is reconnecting instead of dropping keys silently.
   sendWs: (obj) => {
     const ws = state.ws;
     if (!ws || !state.wsReady) return false;
     try { ws.send(JSON.stringify(obj)); return true; } catch { return false; }
   },
-  getPageContext,
   confirm: confirmModal,
-  storage: localStorage,
+  onSessions: (list) => toolPanel?.syncSessions(list),
 });
-document.body.appendChild(terminalPane.root);
-// Its openers are the run and project pages' header buttons (.term-opener); a page cloned later (the
-// project page) syncs its own, see openProjDetail.
-document.addEventListener('click', (e) => { if (e.target.closest?.('.term-opener')) terminalPane?.toggle(); });
-terminalPane.syncOpeners();
+const toolKinds = createToolRegistry();
+toolKinds.register(terminalTool.kind);
+designKind = createDesignKind({ doc: document, studioFor: (tid) => (designStudio && designStudio.threadId && designStudio.threadId === tid ? designStudio.studio : null) });
+toolKinds.register(designKind);
+toolKinds.register(createRunKind({ frame: () => crpEls()?.aside || null, onShown: crpTabShown, onLeft: crpTabLeft }));   // a run opened in a chat
+toolKinds.register(createFilesKind({ doc: document, fetch: (...args) => fetch(...args),
+  previewDeps: () => ({ ...artifactViewerDeps(), hljsLoader: diffHljsLoader }) }));
+// Changes is turned off (see the import above): not registered, so no icon, + row, shortcut or tab.
+// toolKinds.register(createChangesKind({ doc: document, fetch: (...args) => fetch(...args), renderDiff: (host, out, opts) => paintDiffGrid(host, out, opts) }));
+const frameVerdicts = createFrameVerdicts({ fetch: (...args) => fetch(...args), storage: (() => { try { return window.sessionStorage; } catch { return null; } })() });
+toolKinds.register(createBrowserKind({ doc: document, win: window, fetch: (...args) => fetch(...args), storage: localStorage,
+  services: () => state.actionsRunning || [],
+  onServices: (fn) => { runningActionsListeners.add(fn); return () => runningActionsListeners.delete(fn); },
+  onPick: (files, o) => toolPickToChat(files, o),
+  frameCheck: (url, tab) => frameVerdicts.check(url, { threadId: tab?.scope?.type === 'chat' ? tab.scope.id : null }),
+  frameRefused: (origin) => frameVerdicts.refused(origin) }));
+const toolModel = createTabModel({ storage: localStorage, onChange: () => toolMirror?.schedule(), knownKind: (k) => !!toolKinds.get(k) });   // a kept tab of a turned-off kind (Changes) is dropped
+toolMirror = createTabMirror({ win: window, fetch: (...args) => fetch(...args), model: toolModel });
+// The tool panel's Overview (issue 1064): what a run, chat or project shows with no tab selected. Its sections live in
+// tool-overview-sources.mjs; each dep is one line here.
+const overviewDeps = {
+  fetch: (...args) => fetch(...args),
+  get askPanel() { return askPanel; },
+  runStore: askRunStore,
+  projectOf: (key) => { const p = projectByKey(key); return p ? { name: p.name || projectName(p.path), path: p.path } : null; },
+  workspaceOf: (id) => { const w = workspaceById(id); return w ? { name: w.name } : null; },
+  actionsRunning: () => state.actionsRunning || [],
+  onActions: (fn) => { runningActionsListeners.add(fn); return () => runningActionsListeners.delete(fn); },
+  stopAction: (s) => stopActionInstance(s),
+  openService: (s) => openServiceInBrowser(s),
+  showSession: (id) => toolPanel?.showSession(id),
+  go: (hash) => { window.location.hash = hash; },
+  openInPanel: (o) => chatDeps.openInPanel(o),
+  openFiles: (o) => chatDeps.openFiles(o),
+  openOutFile: (threadId, path) => openChatFile({ threadId, path, root: 'out' }),
+  openDesign: (designId) => { location.hash = `#design/${encodeURIComponent(designId)}`; },   // a design opens as its design chat
+  openRunArtifact: (ref, artifact) => openRunArtifactPopup(ref, artifact),
+  historyRows: (key) => projectHistoryRows(key),
+  historyRow: (pipelineId) => (state.historyAll || []).find((r) => r && r.id === pipelineId) || null,
+  liveRunsOf: (key) => [...runs.values()].filter((r) => isLive(r) && historyKeyForRun(r) === key).map((r) => askRunStore.get(r.runId)).filter(Boolean),
+  resolveRefs: (keys) => resolveRefKeys({ fetch: (...args) => fetch(...args), keys }),
+  now: () => Date.now(),
+};
+const toolOverview = createOverview({ doc: document, win: window, source: (v) => overviewSourceFor(v, overviewDeps) });
+toolPanel = createToolPanel({
+  doc: document,
+  win: window,
+  registry: toolKinds,
+  model: toolModel,
+  mirror: toolMirror,
+  getPageContext: toolPageContext,
+  refreshSessions: () => terminalTool.refreshInfo(),
+  suggest: (view) => toolSuggestions(view),
+  overview: toolOverview,
+});
+toolMirror.schedule();   // the first sync: this browser's chat and project tabs as they were left
+runningActionsListeners.add(() => toolPanel?.refreshNewPage());
+document.body.appendChild(toolPanel.root);
+// The project page's header button (.term-opener) toggles the terminal; the chat and run headers hold the icon strip.
+document.addEventListener('click', (e) => { if (e.target.closest?.('.term-opener')) toolPanel?.toggleKind('terminal'); });
+// An Actions service's Open link (the run's Actions tab, the Overview strip) opens in a Browser tab of the tool panel
+// (issue 1064). A modified or middle click keeps the browser's own new tab, and so does a link in a dialog (Create PR's
+// Try it first: the panel sits under it), a link to another site, or one whose tab would have nowhere to go.
+document.addEventListener('click', (e) => {
+  const a = e.target.closest?.('a.act-open');
+  if (!a || !toolPanel || e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+  if (a.closest('.viewer-modal, dialog[open], [aria-modal="true"]')) return;
+  const url = a.getAttribute('href');
+  if (classifyUrl(url).kind !== 'local') return;   // an Action's openUrl on another site keeps its own tab (most refuse frames)
+  const s = (state.actionsRunning || []).find((x) => x.url === url);
+  const v = toolPanel.view();
+  if (!s && (v.blocked || (!v.side && !v.project))) return;   // its tab would have nowhere to go: the browser's own
+  e.preventDefault();
+  openServiceInBrowser(s || { url });
+});
+// Chat links (issue 1064 §2–§4): web links in the chat's answers open in a Browser tab of the chat, file links (buttons
+// built by ask-file-links.mjs) in a Files tab. The tab goes into the chat's tab group: on another page (the side column)
+// it shows in that page's panel as a guest. The panel opens if closed (the full-screen sheet when narrow).
+function chatToolScope(threadId) { return typeof threadId === 'string' && threadId ? { type: 'chat', id: threadId } : null; }
+function openChatFile({ threadId, path, type, line, endLine, root, member }) {
+  const scope = chatToolScope(threadId);
+  if (!scope || !toolPanel || typeof path !== 'string') return;
+  const dir = type === 'dir';
+  const state = { ...(dir ? { path, file: undefined, line: undefined, endLine: undefined } : { file: path, line: line || undefined, endLine: endLine || undefined }),
+    root: root || undefined, member: member || undefined, att: undefined };
+  void toolPanel.openIn('files', scope, state, { match: (t) => !t.state.att && (dir ? t.state.path === path && !t.state.file : t.state.file === path)
+    && (t.state.root || null) === (root || null) && (t.state.member || null) === (member || null) });
+}
+function openChatUrl(url) {
+  const scope = chatToolScope(askPanel?.threadId?.());
+  if (!scope || !toolPanel) return false;
+  void toolPanel.openIn('browser', scope, { url }, { match: (t) => sameAddress(t.state.url, url) });
+  return true;
+}
+function setPreviewPortGate(data) {
+  const gate = (data && data.actionsGate) || {};
+  const a = (data && data.actions) || {};
+  const n = (v) => (Number.isInteger(v) ? v : null);
+  const next = { range: !!gate.previewPortsLocked || gate.previewPorts === 'range', low: n(a.portLow), high: n(a.portHigh) };
+  const changed = next.range !== previewPortGate.range || next.low !== previewPortGate.low || next.high !== previewPortGate.high;
+  previewPortGate = next;
+  if (changed && chatLinksOn()) askPanel?.refreshAnswers?.();   // a loopback link's accessible name may change
+}
+/** May the preview proxy show this loopback port? (worca's own port never gets here: it is worca's own origin.) */
+function previewPortAllowed(port) {
+  const g = previewPortGate;
+  if (!g.range) return true;
+  if (g.low != null && g.high != null && port >= g.low && port <= g.high) return true;
+  return (state.actionsRunning || []).some((s) => Object.values(s.ports || {}).includes(port));
+}
+/** The fields every chat link decision shares (the click and the accessible name). */
+function chatLinkContext(href) {
+  return { href, origin: window.location.origin, enabled: chatLinksOn(), refused: (o) => frameVerdicts.refused(o), portAllowed: previewPortAllowed };
+}
+chatDeps.linksInPanel = () => chatLinksOn();
+onFlagChange('toolPanel', () => askPanel?.refreshAnswers?.());
+chatDeps.linksRead = () => chatLinksPref !== null;
+chatDeps.linkHint = (href) => linkHint(chatLinkContext(href));
+chatDeps.openFileLink = (t) => openChatFile(t);
+// The composer's context meter on the Chat page (issue 1064 D5): the panel's Overview with Context open (false: the popover).
+chatDeps.openOverview = ({ threadId, section }) => toolPanel?.showOverview({ scope: chatToolScope(threadId), expand: section }) === true;
+chatDeps.openInPanel = ({ threadId, item }) => {
+  const scope = chatToolScope(threadId);
+  if (!scope || !toolPanel || !item?.attId) return;
+  void toolPanel.openIn('files', scope, { att: item.attId, attName: item.name, attBytes: item.bytes, attKind: filePreviewOf(item) },
+    { match: (t) => t.state.att === item.attId });
+};
+document.addEventListener('click', (e) => {
+  const a = e.target.closest?.('a[href]');
+  if (!a || e.defaultPrevented || !askPanel || !toolPanel || !askPanel.root.contains(a) || !a.closest('.ask-md')) return;
+  const d = linkDecision({ ...chatLinkContext(a.getAttribute('href')), button: e.button, meta: e.metaKey, ctrl: e.ctrlKey,
+    shift: e.shiftKey, alt: e.altKey });
+  if (d.action === 'native') {
+    // the browser opens it (target=_blank) inside this click; a refused preview port says why it did not go to the panel
+    if (d.notice === 'port') notify({ tone: 'info', title: `Port ${d.port} is not previewed here`, detail: 'It opened in a new browser tab.' });
+    return;
+  }
+  e.preventDefault();
+  if (d.action === 'inapp') { askSide?.uncover?.(); window.location.hash = d.hash; return; }
+  if (d.action === 'panel' && !openChatUrl(d.url)) window.open(d.url, '_blank', 'noopener,noreferrer');
+});
+toolPanel.syncIcons();
+
+/** The tool panel scope of a running Actions instance: its run (a workspace run by its workspace). */
+function actionScope(s) {
+  if (!s || typeof s.runId !== 'string' || !s.runId) return null;
+  return s.workspaceId ? { type: 'run', id: s.runId, workspaceId: s.workspaceId } : { type: 'run', id: s.runId, projectKey: s.member || undefined };
+}
+/** Pick element (issue 1064 slice 3): the picked element's files go into the chat composer (D8) — the chat on screen,
+ *  else the side column's (openChat), else the Chat page. A failed screenshot still sends the selector, and says why. */
+function toolPickToChat(files, { note = '' } = {}) {
+  if (!askPanel || !Array.isArray(files) || !files.length) return;
+  if (currentView() !== 'chat') openChat();
+  void askPanel.addFiles(files);
+  if (note) notify({ tone: 'warn', title: 'Pick element', detail: note });
+}
+/** A service's address in a new Browser tab: in the page's own run, chat or project, else in the service's run. */
+function openServiceInBrowser(s) {
+  if (!s?.url) return;
+  toolPanel?.openKind('browser', { url: s.url }, { scope: actionScope(s) });
+}
+/** The + page's Suggested rows (issue 1064): the view's running services, recent addresses, and the project's repo on
+ *  GitHub (from its sync chip; GitHub refuses frames, so that row opens a window of its own). */
+function toolSuggestions(view) {
+  const pk = view?.project || view?.side?.projectKey || null;
+  const runId = view?.side?.type === 'run' ? view.side.id : null;
+  const items = [];
+  const mine = (state.actionsRunning || []).filter((s) => s && s.kind === 'service' && s.url && (s.runId === runId || (!!pk && s.member === pk)));
+  for (const s of mine.slice(0, 5)) {
+    items.push({ label: withPort(s.label || s.actionId, s), detail: s.runTitle || s.url, icon: 'globe', open: () => openServiceInBrowser(s) });
+  }
+  const shown = new Set(mine.slice(0, 5).map((s) => classifyUrl(s.url).url || s.url));   // recent addresses are stored normalised
+  for (const url of readRecentUrls(localStorage).filter((u) => !shown.has(u)).slice(0, 5)) {
+    items.push({ label: url, detail: 'Recent', icon: 'globe', open: () => toolPanel?.openKind('browser', { url }) });
+  }
+  const remote = pk ? state.syncChips?.[pk]?.remoteLabel : null;
+  if (typeof remote === 'string' && /^github\.com\/[\w.-]+\/[\w.-]+$/.test(remote)) {
+    items.push({ label: `${remote.slice('github.com/'.length)} on GitHub`, detail: 'Opens in a new window', icon: 'external',
+      open: () => window.open(`https://${remote}`, '_blank', 'noopener,noreferrer') });
+  }
+  return items;
+}
 
 // ---------------------------------------------------------------------------
 // Export to Claude Code — modal wiring. Turns a saved v2 workflow into a runnable
@@ -43230,6 +45406,8 @@ async function exportApply(id, opts) { return exportCall(id, opts); }
 // plan invalidation, close and open; a Preview answer that lands after a bump is for a dialog that no longer exists.
 const exportModalState = { item: null, format: 'json', destination: 'global', pluginDest: 'folder', targets: null, skipped: [], targetsLoad: null, busy: false, conflicts: [], planned: false, seq: 0 };
 const exportModalHidden = () => { const m = document.getElementById('export-modal'); return !m || m.classList.contains('hidden'); };
+const exportUse = createExportUse({ doc: document, readVersions: (id) => gvApi.versionsRead(id), modalHidden: exportModalHidden,   // D17: the Version field
+  guard: () => exportGuard, syncButtons: () => exportSyncMarketplaceButtons() });
 // Set by bindExportModal. A form: a backdrop click never closes it; Escape asks once a choice changed; while
 // a Preview or an Export is out, Cancel and Escape wait for its answer.
 let exportGuard = null;
@@ -43247,6 +45425,7 @@ function openExportModal(item) {
   exportModalState.skipped = [];
   exportModalState.conflicts = [];
   exportModalState.planned = false;
+  exportUse.open(item);
   document.getElementById('export-draft').checked = false;   // draft is opt-in per export, never remembered
   exportSetBusy(false);
   document.getElementById('export-slug').value = '';
@@ -43262,11 +45441,13 @@ function openExportModal(item) {
   exportSyncSlugPreview();
   modal.classList.remove('hidden');
   exportGuard?.opened();
+  exportUse.opened(item.id);
 }
 function closeExportModal() {
   const modal = document.getElementById('export-modal');
   if (modal) modal.classList.add('hidden');
   exportModalState.seq++;                                 // a Preview still in flight has no dialog to land in
+  exportUse.close();
   exportSetDone(false);
 }
 /** Swap the form for the result view (or back). The dialog stays open so the
@@ -43343,6 +45524,7 @@ function exportSyncFormat() {
   const apply = document.getElementById('export-apply-btn');
   apply.textContent = json ? 'Download' : market ? CREATE_PR_LABEL : 'Export';
   apply.disabled = false;
+  exportUse.hold();
   const name = exportModalState.item ? exportModalState.item.name : '';
   document.getElementById('export-subtitle').textContent = json
     ? `Download "${name}" as a JSON file another Worca user can import.`
@@ -43402,9 +45584,10 @@ async function exportFetchTargets() {
   } catch (err) { return { error: err && err.message ? err.message : String(err) }; }
 }
 function exportSyncMarketplaceButtons(n = (exportModalState.targets || []).length) {
-  if (!exportIsMarketplace()) return;
+  if (!exportIsMarketplace()) { exportUse.hold(); return; }
   syncMarketplaceButtons({ plan: document.getElementById('export-plan-btn'), apply: document.getElementById('export-apply-btn') },
     { busy: exportModalState.busy, targets: n });
+  exportUse.hold();
 }
 /** A Preview or an Export starts (`busy`) or ends: Cancel is off while it runs (the guard holds Escape too). For a
  *  marketplace request both action buttons are off as well, then back by the dialog's rule
@@ -43414,7 +45597,7 @@ function exportSyncMarketplaceButtons(n = (exportModalState.targets || []).lengt
 function exportSetBusy(busy) {
   exportModalState.busy = busy;
   document.getElementById('export-cancel').disabled = busy;
-  for (const id of ['export-plugin-name', 'export-marketplace', 'export-draft']) document.getElementById(id).disabled = busy;
+  for (const id of ['export-plugin-name', 'export-marketplace', 'export-draft', 'export-use']) document.getElementById(id).disabled = busy;
   if (busy) {
     if (!exportIsMarketplace()) return;
     document.getElementById('export-plan-btn').disabled = true;
@@ -43451,7 +45634,8 @@ function exportSyncSlugPreview() {
   const el = document.getElementById('export-slug-preview');
   el.textContent = valid ? `Command: ${preview}` : 'Invalid slug (letters, digits, . _ - only)';
 }
-function exportBuildOpts() {
+function exportBuildOpts() { return exportUse.withUse(exportBuildFormatOpts()); }   // + `use` while the Version field shows (D17)
+function exportBuildFormatOpts() {
   const dest = exportModalState.destination;
   if (exportModalState.format === 'plugin') {
     if (exportModalState.pluginDest === 'marketplace') {
@@ -43538,6 +45722,7 @@ function exportUpdateApplyEnabled() {
   const resolutions = exportGatherResolutions();
   const allResolved = exportModalState.conflicts.every((cf) => resolutions[cf.path]);
   document.getElementById('export-apply-btn').disabled = !allResolved;
+  exportUse.hold();
 }
 // A plan is keyed to the slug/destination/include-agents/folder in effect when Plan ran.
 // If any of those change afterward, the shown plan (and its gathered resolutions) no longer
@@ -43575,6 +45760,7 @@ function bindExportModal() {
   document.getElementById('export-plugin-name').addEventListener('input', () => { exportSyncPluginNamePreview(); exportInvalidatePlan(); });
   document.getElementById('export-folder').addEventListener('input', () => { if (exportModalState.format === 'plugin') exportSyncPluginNamePreview(); });
   document.getElementById('export-keep-version').addEventListener('change', exportInvalidatePlan);
+  exportUse.bind(exportInvalidatePlan);   // the Version field (D17)
   // Browse…: the native OS folder dialog (the server opens it — a web page never
   // learns an absolute path from its own file picker), exactly like Add Project;
   // the in-app browser is the fallback when the native one is unsupported.
@@ -43595,6 +45781,7 @@ function bindExportModal() {
   // marketplace, a switched destination, a close) and the inputs still build the body that was sent. A
   // marketplace plan has no `created` list, so rendering it after a switch to Local folder would also throw.
   document.getElementById('export-plan-btn').addEventListener('click', async () => {
+    if (exportUse.loading()) return;                       // a synthetic click reaches a disabled button too
     const market = exportIsMarketplace();
     const nameProblem = market ? marketplaceNameProblem(exportPluginName()) : '';
     if (nameProblem) { exportSay(nameProblem, true); return; }
@@ -43625,10 +45812,11 @@ function bindExportModal() {
   // itself first; a conflict (only the skill format can raise one) stops it and is
   // shown for per-file resolution — nothing is ever written past an unresolved one.
   document.getElementById('export-apply-btn').addEventListener('click', async () => {
+    if (exportUse.loading()) return;                       // the default version is not known yet (D17)
     if (exportModalState.format === 'json') {
       // A plain download of the stored graph — the server sets Content-Disposition.
       const a = document.createElement('a');
-      a.href = `/api/workflows/${encodeURIComponent(exportModalState.item.id)}/json`;
+      a.href = exportUse.jsonUrl(`/api/workflows/${encodeURIComponent(exportModalState.item.id)}/json`);   // or of the version picked (D17)
       a.setAttribute('download', '');
       document.body.appendChild(a);
       a.click();
@@ -43664,17 +45852,17 @@ function bindExportModal() {
     }
     exportSetBusy(true);
     exportSay('Exporting…');
+    const opts = exportBuildOpts();                        // ONE body per click: the dry run and the write agree
     try {
       if (!exportModalState.planned) {
-        const plan = await exportPlan(exportModalState.item.id, exportBuildOpts());
+        const plan = await exportPlan(exportModalState.item.id, opts);
         if ((plan.conflicts || []).length) {
           exportRenderPlan(plan);
           exportSay('Resolve each conflict below, then Export.');
           return;
         }
       }
-      const opts = { ...exportBuildOpts(), resolutions: exportGatherResolutions() };
-      const applied = await exportApply(exportModalState.item.id, opts);
+      const applied = await exportApply(exportModalState.item.id, { ...opts, resolutions: exportGatherResolutions() });
       // A conflict Apply left UNWRITTEN (e.g. a TOCTOU conflict between Plan and Apply that
       // had no resolution and fell to the blanket skip) is a stale partial export — re-render
       // the fresh plan so the user can resolve it, and keep the modal open.

@@ -128,7 +128,7 @@ test('grep: each search worker loads only the reader and its small imports, not 
   const askDir = dirname(fileURLToPath(new URL('../src/core/ask/grep-worker.mjs', import.meta.url)));
   visit(join(askDir, 'grep-worker.mjs'));
   const rel = [...seen].map((f) => f.slice(dirname(askDir).length + 1).split('\\').join('/')).sort();
-  assert.deepEqual(rel, ['ask/deny-rules.mjs', 'ask/file-reader.mjs', 'ask/grep-worker.mjs', 'ask/redact.mjs', 'chat/redact.mjs']);
+  assert.deepEqual(rel, ['ask/deny-rules.mjs', 'ask/file-reader.mjs', 'ask/grep-worker.mjs', 'ask/redact.mjs', 'chat/redact.mjs', 'secrets/files.mjs']);
 });
 
 test('grep: the turn ending stops a running search', async () => {
@@ -145,7 +145,7 @@ test('grep: the turn ending stops a running search', async () => {
 });
 
 test('glob: paths relative to the folder; denied paths never listed; an absolute pattern refused', () => {
-  const names = reader.glob({ pattern: '**/*' }).paths.map((p) => p.slice(wt.length + 1)).sort();
+  const names = reader.glob({ pattern: '**/*' }).paths.map((p) => p.slice(wt.length + 1).replaceAll('\\', '/')).sort();
   assert.deepEqual(names, ['bin.dat', 'src/a.mjs', 'src/b.txt']);
   assert.throws(() => reader.glob({ pattern: '/etc/*' }), /relative to path/);
 });

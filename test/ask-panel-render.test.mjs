@@ -231,6 +231,9 @@ test('ask-panel-render: opening an activity body while the transcript is pinned 
   ctx.flush();
   assert.equal(body.hidden, true, 'closed');
   assert.equal(jump.hidden, true, 'back at the end: pinned again');
+  t.dispatchEvent(new ctx.window.Event('wheel', { bubbles: true }));   // a toggle's own write is the baseline: its
+  t.dispatchEvent(new ctx.window.Event('scroll'));                     // scroll event does not misread direction
+  assert.equal(jump.hidden, true, 'still pinned');
   t.scrollTop = 600;                                            // a turn landing grows the column: the pin follows it
   ctx.flush();
   assert.equal(t.scrollTop, 1000);
@@ -241,6 +244,8 @@ test('ask-panel-render: opening an activity body while the transcript is pinned 
   assert.equal(body.hidden, false);
   assert.equal(head.getBoundingClientRect().top, 550, 'the head is back where it was clicked');
   assert.equal(t.scrollTop, 330);
+  userScroll(ctx, t, 320);                                      // up from the toggle's write
+  assert.equal(jump.hidden, false, 'still unpinned');
 });
 
 test('ask-panel-render: a tool row is a dot, the tool name, its args (never cut at 60 chars; CSS clamps two lines) and the duration; the full text is its hover', async () => {
@@ -328,10 +333,10 @@ test('ask-panel-render: a finished answer turns its refs into chips with one POS
   const listeners = new Set();
   let live = null;
   const runStore = { get: () => null, byPipeline: (pid) => (pid === '1a2b3c4d' ? live : null), subscribe: (fn) => { listeners.add(fn); return () => listeners.delete(fn); } };
-  const text = 'Merged https://github.com/SinishaDjukic/worca-cc/pull/777 in [the run](#history/worca-cc-ace1a602/1a2b3c4d); `owner/repo#5` stays code.';
+  const text = 'Merged https://github.com/worca-org/worca/pull/777 in [the run](#history/worca-cc-ace1a602/1a2b3c4d); `owner/repo#5` stays code.';
   const snap = snapBody([userRow('askm_00000001', 1, 'see owner/repo#6'), asstRow('askm_00000002', 2, { text })]);
   const answers = {
-    'gh:SinishaDjukic/worca-cc#777': { ok: true, kind: 'pr', title: 'fix(promo-kit): startApp.stop()', state: 'merged' },
+    'gh:worca-org/worca#777': { ok: true, kind: 'pr', title: 'fix(promo-kit): startApp.stop()', state: 'merged' },
     'run:1a2b3c4d': { ok: true, kind: 'run', id: '1a2b3c4d', runId: null, title: 'Chips plan', status: 'running', home: 'worca-cc-ace1a602' },
   };
   const posts = [];
@@ -348,10 +353,10 @@ test('ask-panel-render: a finished answer turns its refs into chips with one POS
   await ctx.tick();                       // the batched POSTs answer
   const answer = ctx.doc.querySelector('.ask-msg-assistant .ask-answer');
   const [pr, run] = answer.querySelectorAll('a.ask-ref-chip');
-  assert.deepEqual(posts.map((p) => p.sort()), [['run:1a2b3c4d'], ['gh:SinishaDjukic/worca-cc#777']], 'worca refs and forge refs: one request each');
-  assert.equal(pr.getAttribute('href'), 'https://github.com/SinishaDjukic/worca-cc/pull/777');
+  assert.deepEqual(posts.map((p) => p.sort()), [['run:1a2b3c4d'], ['gh:worca-org/worca#777']], 'worca refs and forge refs: one request each');
+  assert.equal(pr.getAttribute('href'), 'https://github.com/worca-org/worca/pull/777');
   assert.deepEqual([...pr.querySelectorAll('.ask-ref-label, .ask-ref-title, .ask-ref-pill')].map((n) => n.textContent),
-    ['SinishaDjukic/worca-cc#777', 'fix(promo-kit): startApp.stop()', 'Merged']);
+    ['worca-org/worca#777', 'fix(promo-kit): startApp.stop()', 'Merged']);
   assert.equal(run.getAttribute('href'), '#history/worca-cc-ace1a602/1a2b3c4d');
   assert.equal(run.querySelector('.ask-ref-pill').textContent, 'Running');
   assert.equal(answer.querySelector('code').textContent, 'owner/repo#5', 'inline code is never a chip');
@@ -406,7 +411,7 @@ test('ask-panel-render: in-app links — a notice href and the signed-out Claude
         asstRow('askm_00000001', 1, { status: 'error', text: '', blocks: [], errorMessage: 'claude exited with code 1: Not logged in · Please run /login', errorCode: 'claude-signed-out' }),
       ]);
       let opened = 0;
-      const ctx = makePanel({ fetchHandler: handlerFor(snap), deps: { openClaudeSetup: () => { opened += 1; } } });
+      const ctx = makePanel({ fetchHandler: handlerFor(snap), deps: { openEngineSetup: (e) => { opened += e === 'claude' ? 1 : 100; } } });
       await openThread(ctx);
       const line = ctx.doc.querySelector('.ask-error-line');
       assert.equal(line.textContent, "Claude Code isn't signed in. Sign in…");
@@ -465,6 +470,27 @@ test('ask-panel-render: a classified notice renders the human line (raw detail e
       assert.ok(ctx.doc.querySelector('.ask-notice'));
       assert.equal(ctx.doc.querySelector('.ask-error-action'), null);
       assert.equal(ctx.doc.querySelector('.ask-error-line'), null);
+    } },
+    { name: 'ask-panel-render: a Claude Code that is not installed: the notice links Connect Claude Code', run: async () => {
+      const why = 'Claude Code is not installed: /nowhere/claude was not found. Install it, or set WORCA_CLAUDE_BIN to its path.';
+      const snap = snapBody([
+        asstRow('askm_00000001', 1, {
+          status: 'error',
+          blocks: [{ kind: 'notice', text: why, errorClass: 'network', claudeSetup: true, detail: 'spawn /nowhere/claude ENOENT' }],
+        }),
+      ]);
+      let opened = 0;
+      const ctx = makePanel({ fetchHandler: handlerFor(snap), deps: { openEngineSetup: (e) => { opened += e === 'claude' ? 1 : 100; } } });
+      await openThread(ctx);
+      const notice = ctx.doc.querySelector('.ask-notice');
+      assert.equal(notice.querySelector(':scope > span').textContent, why);
+      const link = notice.querySelector('[data-ask-claude-setup]');
+      assert.equal(link.textContent, 'Set up…');
+      link.click();
+      assert.equal(opened, 1, 'the link opens Connect Claude Code');
+      const bare = makePanel({ fetchHandler: handlerFor(snap) });
+      await openThread(bare);
+      assert.equal(bare.doc.querySelector('[data-ask-claude-setup]'), null, 'no host to open it: the notice keeps its words alone');
     } },
   ]);
 });
@@ -555,6 +581,35 @@ test('ask-panel-render: a stored files card replays on thread open, inline, and 
     _resetChatExtensions();
     _resetFileRenderers();
   }
+});
+
+/** A PDF files card replayed on thread open with these chatDeps; → where the name click went. */
+async function pdfNameClick(chatDeps) {
+  registerFilesCard();
+  try {
+    const item = { attId: 'att_00000001', name: 'report.pdf', kind: 'pdf', mime: 'application/pdf', bytes: 120 };
+    const snap = snapBody([asstRow('askm_00000001', 1, { text: 'Here.', blocks: [{ kind: 'card', id: 'card_00000001', state: 'shown', card: { type: 'files', title: 'report.pdf', items: [item] } }] })]);
+    const ctx = makePanel({ fetchHandler: handlerFor(snap), deps: { chatDeps } });
+    await openThread(ctx);
+    ctx.doc.querySelector('.ask-msg-assistant .ask-filescard .ask-filescard-name').click();
+  } finally {
+    _resetChatExtensions();
+    _resetFileRenderers();
+  }
+}
+
+test('ask-panel-render: a PDF card name opens the panel when the host has openInPanel and no linksInPanel dep', async () => {
+  const panel = [];
+  const popup = [];
+  await pdfNameClick({ openInPanel: (o) => panel.push(o.item.attId), openFiles: (o) => popup.push(o.index) });
+  assert.deepEqual(panel, ['att_00000001'], 'cardCtx: an absent linksInPanel dep counts as on (D1)');
+  assert.deepEqual(popup, []);
+});
+
+test('ask-panel-render: a host with no openInPanel dep: the PDF name opens the pop-up', async () => {
+  const popup = [];
+  await pdfNameClick({ openFiles: (o) => popup.push(o.index) });
+  assert.deepEqual(popup, [0], 'D3: no panel, the click is never swallowed');
 });
 
 test('#958: a structural flush (a new row, a resync) keeps every row element connected — the column is never emptied', async () => {

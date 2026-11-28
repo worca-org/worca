@@ -2,7 +2,7 @@ import { icon } from './icons.mjs';
 import { renderInheritField, readDirtyFields, readInheritField, inheritText, formatPair } from './inherit-field.mjs';
 import { engineLabel, engineChoiceLabel, isBetaEngine, ENGINE_NAMES, MODEL_ENGINE_NAMES, SIGN_IN_ENGINE_NAMES, CHAT_ENGINE_NAMES, ENGINES } from '../../src/shared/engine-switch.mjs';
 import { applyEngineLocks, engineLock } from './engine-locks.mjs';
-import { MODEL_ROLES, ROLE_LABELS, ROLE_HINTS, ROLE_HARNESSES, roleOfSettingId } from '../../src/shared/model-roles.mjs';
+import { MODEL_ROLES, ROLE_LABELS, ROLE_HINTS, ROLE_HARNESSES, roleOfSettingId, decidesLabel, toolDecidesText, isCliDecides } from '../../src/shared/model-roles.mjs';
 const roleLabelText = (role) => `From ${ROLE_LABELS[role]}`;
 // The own-sign-in engines have no effort flag, except Goose and OpenCode.
 export const ENGINE_EFFORTS = Object.freeze({ claude: Object.freeze(['medium', 'high', 'xhigh', 'max']), codex: Object.freeze(['minimal', 'low', 'medium', 'high']),
@@ -14,7 +14,7 @@ export const ENGINE_EFFORTS = Object.freeze({ claude: Object.freeze(['medium', '
 const engineName = (v) => (v == null ? null : engineLabel(v));
 export const helpersNote = (engine) => (engine === 'copilot' ? "Copilot runs its helper jobs (titles, overview, PR description, Auto classifier, Away mode's decider) on its own default model."
   : `${engineLabel(engine)} runs its helper jobs (titles, overview, PR description, Auto classifier, Away mode's decider) on Claude. Pick them under Claude Code.`);
-export const JOB_LABELS = Object.freeze({ title: 'Titles', classifier: 'Auto workflow classifier', overview: 'Run overview', prDescription: 'PR description', memoryDefrag: 'Memory defragment', agentGen: 'Agent generation', naming: 'Run naming', commandSummary: 'Command summaries', workspaceScan: 'Workspace scan', requirementsInterview: 'Requirements interview', secondOpinion: 'Second-opinion reviewer' });
+export const JOB_LABELS = Object.freeze({ title: 'Titles', classifier: 'Auto workflow classifier', overview: 'Run overview', prDescription: 'PR description', memoryDefrag: 'Memory defragment', agentGen: 'Agent generation', naming: 'Run naming', commandSummary: 'Command summaries', guide: 'Guide', workspaceScan: 'Workspace scan', requirementsInterview: 'Requirements interview', secondOpinion: 'Second-opinion reviewer' });
 // The setting id of an engine's helper slot, as settings-cascade.mjs names it: memory defragment
 // and workspace scan are runs of their own (spec §3.1 "own-run models"), the rest are utility jobs.
 // Agent generation, Run naming and Command summaries have no cascade entry (user-only, Claude-only); their ids are the
@@ -40,6 +40,7 @@ export const JOB_HINTS = Object.freeze({
   agentGen: 'Drafts a new agent\'s prompt and metadata in Workflows › Agents (Generate).',
   naming: 'Suggests the title and branch name on the New run form (Smart run naming). Unset: the cheapest ready Claude model.',
   commandSummary: 'Writes the one-line summary of a chat command when the chat gave none, from the command alone (secrets hidden, never its output). Turn it off in Settings › Chat › Summarise commands. Unset: the cheapest ready Claude model; with none ready, commands keep their raw text.',
+  guide: 'The quick check of a Shaper prompt in the chat composer.',
   workspaceScan: 'Runs the workspace scan that maps how member projects connect.',
   requirementsInterview: 'Makes product briefs, does code looks for a feature and runs the interview rounds on the Requirements page.',
   secondOpinion: 'The one role review that runs on another model than its step, so one reviewer judges on its own (Shaper\'s Product reviewer).',
@@ -223,7 +224,7 @@ const ROLES_HOST = new WeakMap();
 /** The role picks (the setup assistant): per harness, one model + effort row per role. Binds its
  *  listeners once per host. `engines`: the harnesses to show (every engine with roles by default; the setup assistant
  *  passes the ready ones); `switchLevel`: the engine switch's level (Expert by default; the setup assistant passes null, every level). */
-export function renderRolesSection(host, { roles = {}, catalog = [], engine = 'claude', engines = ROLE_HARNESSES, switchLevel = 'expert', status = null, onChange = null } = {}) {
+export function renderRolesSection(host, { roles = {}, catalog = [], engine = 'claude', engines = ROLE_HARNESSES, switchLevel = 'expert', status = null, onChange = null, roleDefaults = null, claudeAuth = 'unknown' } = {}) {
   const doc = host.ownerDocument; host.replaceChildren();
   const shown = ROLE_HARNESSES.filter((h) => engines.includes(h));
   if (!shown.length) shown.push('claude');
@@ -237,8 +238,16 @@ export function renderRolesSection(host, { roles = {}, catalog = [], engine = 'c
     panel.className = 'roles-engine'; panel.dataset.engine = h;
     panel.append(Object.assign(doc.createElement('h3'), { className: 'engine-card-name', textContent: engineLabel(h) }));
     for (const r of MODEL_ROLES) {
+      // #1450: an empty role runs Worca's default on Claude Code (signed in or unknown) and Codex; elsewhere the tool decides.
+      const dflt = roleDefaults && !(h === 'claude' && claudeAuth === 'signed-out') ? roleDefaults?.[h]?.[r]?.model : null;
+      const tool = h === 'codex' ? 'Codex' : engineLabel(h);
+      const defaultLabel = !roleDefaults ? "each job's own default"
+        : dflt ? `Worca's default (${catalog.find((m) => m?.id === dflt)?.label || dflt})` : toolDecidesText(engineLabel(h));
       const el = renderInheritField(doc, { id: `models.${h}.roles.${r}`, label: ROLE_LABELS[r], hint: ROLE_HINTS[r], kind: 'model', level: 'user', engine: h,
-        catalog, efforts: ENGINE_EFFORTS[h], own: roles?.[h]?.[r], inherited: { value: undefined, source: 'default' }, defaultLabel: "each job's own default" });
+        catalog, efforts: ENGINE_EFFORTS[h], own: roles?.[h]?.[r], inherited: { value: undefined, source: 'default' }, defaultLabel,
+        // A saved "Let <tool> decide" always keeps its option (Claude Code signed out has no default to offer it over):
+        // without it the select would read empty and the next change would clear the stored choice.
+        ...(dflt || isCliDecides(roles?.[h]?.[r]) ? { decideLabel: decidesLabel(tool) } : {}) });
       const clear = el.querySelector('.inherit-clear');
       if (clear) { clear.replaceChildren(icon(doc, 'x', 14)); clear.setAttribute('aria-label', `Clear ${ROLE_LABELS[r]}`); clear.title = 'Clear: each job uses its own default'; }
       panel.append(el);
@@ -292,8 +301,8 @@ export function paintRoleFallbacks(engineHost, roles, catalog = []) {
   }
   for (const box of engineHost.querySelectorAll('.engine-slots')) box.dispatchEvent(new (engineHost.ownerDocument.defaultView.Event)('roles-changed'));
 }
-const CLAUDE_HELPER_KEYS = Object.freeze({ title: 'titleModel', classifier: 'autoWorkflowModel', prDescription: 'prDescriptionModel', memoryDefrag: 'memoryDefrag', agentGen: 'agentGenModel', naming: 'namingModel', commandSummary: 'commandSummaryModel', secondOpinion: 'secondOpinionModel' });
-const CLAUDE_PAIR_KEYS = new Set(['memoryDefrag', 'agentGenModel', 'namingModel', 'commandSummaryModel', 'secondOpinionModel']);
+const CLAUDE_HELPER_KEYS = Object.freeze({ title: 'titleModel', classifier: 'autoWorkflowModel', prDescription: 'prDescriptionModel', memoryDefrag: 'memoryDefrag', agentGen: 'agentGenModel', naming: 'namingModel', commandSummary: 'commandSummaryModel', guide: 'guideModel', secondOpinion: 'secondOpinionModel' });
+const CLAUDE_PAIR_KEYS = new Set(['memoryDefrag', 'agentGenModel', 'namingModel', 'commandSummaryModel', 'guideModel', 'secondOpinionModel']);
 export function enginePatchToSettingsBody(patch) {
   const body = {};
   for (const [id, value] of Object.entries(patch || {})) {
@@ -309,7 +318,7 @@ export function enginePatchToSettingsBody(patch) {
       const pair = {}; if (value && value.model) pair.model = value.model; if (value && value.effort) pair.effort = value.effort;
       body.requirementsInterview = Object.keys(pair).length ? pair : null; continue;
     }
-    match = /^models\.claude\.(?:utility\.)?(title|classifier|prDescription|memoryDefrag|agentGen|naming|commandSummary|secondOpinion)$/.exec(id);
+    match = /^models\.claude\.(?:utility\.)?(title|classifier|prDescription|memoryDefrag|agentGen|naming|commandSummary|guide|secondOpinion)$/.exec(id);
     if (match) { const key = CLAUDE_HELPER_KEYS[match[1]]; body[key] = CLAUDE_PAIR_KEYS.has(key) ? (value && value.model ? { model: value.model, effort: value.effort || '' } : null) : (value && value.model) || ''; }
   }
   return body;

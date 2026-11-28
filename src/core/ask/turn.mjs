@@ -48,6 +48,7 @@ import { validateMcpChange } from './mcp-deps.mjs';
 import { scrub } from './mcp-proposal.mjs';
 import { actionsProposalInput } from './actions-proposal.mjs';
 import { validateProxyChange, validateProxyFlagOn } from './proxy-deps.mjs';
+import { validateEnvProposal } from './env-proposal.mjs';
 import { scriptApprovalCard } from './script-approval.mjs';
 import { defaultScriptDeps } from './script-deps.mjs';
 import { claimFileForAgent } from '../agent-user.mjs';
@@ -85,7 +86,8 @@ const TERMINAL = new Set(['done', 'stopped', 'error']);
 // worca Chat P2 (review P2-1): what a sub-agent's chat-action call asked for, in the "Not applied: …" notice.
 const SUB_ACTION_WORDS = Object.freeze({ change_setting: 'change a setting', pause_run: 'pause a run', resume_run: 'resume a run',
   propose_stop_run: 'stop a run', send_direction: 'send a direction to a run', propose_pull_request: 'create a PR',
-  propose_changes: 'propose changes', route_message: 'route a message' });
+  propose_changes: 'propose changes', route_message: 'route a message',
+  change_requirement: 'change a requirement' });
 
 // The classified notice's raw-detail cap — the runner's own reject is already
 // tail-capped tighter than this; the slice(-N) here only bounds the unusual
@@ -205,16 +207,18 @@ class AskTurn extends EventEmitter {
     // Next-prompt suggestion (ask-suggestion): the server sets it for a user's message (never an event turn). Off by
     // default, so a turn built without it — every test fixture — never spawns the suggestion call.
     this.suggest = suggest === true;
-    // Design chat (Design P5): its tool results go to deps.designAction (_onDesignAction). surfaceLocked: a page's own chat
-    // (Workflows or Design) — no Ask cards, no sign-in probe, no Task built-in, no suggestion.
+    // A chat with a design (Design P5): its design tools' results go to deps.designAction (_onDesignAction); it stays a
+    // plain chat otherwise. surfaceLocked: the Workflows chat — no Ask cards, no sign-in probe, no Task built-in, no
+    // suggestion.
     this.design = design === true;
     // Design P8 (L8.10): a locked-down Design chat's {workDir, projectDir?}, extra read roots of read_file / grep / glob.
     this.designRoots = designRoots && typeof designRoots === 'object' && !Array.isArray(designRoots) ? designRoots : null;
-    this.surfaceLocked = !!this.composer || this.design;
+    this.surfaceLocked = !!this.composer;
     this.suggestionPromise = Promise.resolve();   // stored for test determinism, never awaited by run()
     this._replyText = '';                         // the finished reply's text (set in _complete), the suggestion's input
     this.commands = null;
     this.proxyBridge = null;
+    this.tabsBridge = null;
     this.assistantMessageId = assistantMessageId;
     this.userMessageId = userMessageId;
     this.prompt = prompt;
@@ -264,6 +268,8 @@ class AskTurn extends EventEmitter {
       validateMetricsChange: deps.validateMetricsChange ?? validateMetricsChange,
       validateAwayChange: deps.validateAwayChange ?? validateAwayChange,
       validateProxyChange: deps.validateProxyChange ?? validateProxyChange,
+      // The environment cards (env-proposal.mjs): (toolName, input) → {ok, card} | {ok:false, errors}.
+      validateEnvProposal: deps.validateEnvProposal ?? validateEnvProposal,
       validateProxyFlagOn: deps.validateProxyFlagOn ?? validateProxyFlagOn,
       validatePolicyChange: deps.validatePolicyChange ?? validatePolicyChange,
       validateScheduleChange: deps.validateScheduleChange ?? validateScheduleChange,
@@ -321,6 +327,8 @@ class AskTurn extends EventEmitter {
       // terminal is enabled (terminalEnabledHere). null = no command tools.
       commandBridge: deps.commandBridge ?? null,
       proxyBridge: deps.proxyBridge ?? null,
+      // The tool panel's tab bridge (issue 1064 slice 3): ({threadId}) => {url, token, dispose()} | null.
+      tabsBridge: deps.tabsBridge ?? null,
       serverPath: deps.serverPath ?? ASK_MCP_SERVER_PATH,
       newAskId: deps.newAskId ?? newAskId,
       setPendingCardComments: deps.setPendingCardComments ?? setPendingCardComments,
@@ -766,6 +774,8 @@ class AskTurn extends EventEmitter {
    * {ok:false} already reached the model as text: no card, no notice.
    */
   async _onProjectProposal(input, text, isError) {
+    // kind "sandbox" changes an existing project's sandbox settings: an environment card, gated like the others.
+    if (input && typeof input === 'object' && input.kind === 'sandbox') return this._onEnvProposal('propose_project_change', input, text, isError);
     if (isError) return;
     let out = null;
     try { out = JSON.parse(text); } catch { out = null; }
@@ -953,6 +963,43 @@ class AskTurn extends EventEmitter {
     this._persistBlocks();
   }
 
+  /**
+   * propose_environment_spec_change / propose_environment_build / propose_project_change kind "sandbox" RESULT: the
+   * child's {ok:true} is only a hint. The parent replays the chat-scope gate (a project outside it is refused; no
+   * projectKey takes the pinned project), re-validates the same INPUT against the project as it is now, and mints the
+   * environment card. A child {ok:false} already reached the model as text: no card, no notice.
+   */
+  async _onEnvProposal(name, input, text, isError) {
+    if (isError) return;
+    let out = null;
+    try { out = JSON.parse(text); } catch { out = null; }
+    if (!out || out.ok !== true) return;
+    const d = this.deps;
+    const raw = input && typeof input === 'object' ? input : {};
+    const scope = this.pinnedScope;
+    const key = (typeof raw.projectKey === 'string' && raw.projectKey.trim()) || (scope && scope.projectKey) || '';
+    try {
+      if (this.scopeGated && key) {
+        let members = [];
+        if (scope && scope.workspaceId) { try { members = await d.workspaceMemberKeys(scope.workspaceId); } catch { members = []; } }
+        if (!targetInScope(scope, { projectKey: key }, members)) {
+          this.reducer.addBlock({ kind: 'notice', text: `Environment change rejected: ${scopeRefusalText(scope, { projectKey: key })}` });
+          this._persistBlocks();
+          return;
+        }
+      }
+      const r = await d.validateEnvProposal(name, { ...raw, ...(key ? { projectKey: key } : {}) });
+      if (r && r.ok) this.reducer.addBlock({ kind: 'card', id: d.newAskId('card'), state: 'proposed', card: r.card });
+      else {
+        const errors = (r && Array.isArray(r.errors) && r.errors.length) ? r.errors : ['invalid proposal'];
+        this.reducer.addBlock({ kind: 'notice', text: `Environment change rejected: ${errors.join('; ')}` });
+      }
+    } catch (err) {
+      this.reducer.addBlock({ kind: 'notice', text: `Environment change rejected: ${err?.message || err}` });
+    }
+    this._persistBlocks();
+  }
+
   /** The card exists from the tool_use on (spec §8.2, PD7): a building block with the four-step trace, persisted. */
   _onWorkflowStart(toolUseId, input) {
     const d = this.deps;
@@ -1081,6 +1128,7 @@ class AskTurn extends EventEmitter {
       onMcpProposal: ({ input, text, isError }) => this._onMcpProposal(input, text, isError),
       onProxyProposal: ({ input, text, isError }) => this._onProxyProposal('propose_network_proxy_change', input, text, isError),
       onProxyFlagProposal: ({ input, text, isError }) => this._onProxyProposal('propose_corporate_proxy_on', input, text, isError),
+      onEnvProposal: ({ name, input, text, isError }) => this._onEnvProposal(name, input, text, isError),
       onWebProposal: ({ input, text, isError }) => this._onWebProposal(input, text, isError),
       onScriptApproval: ({ name, input }) => this._onScriptApproval(name, input),
       onScopeSwitch: this.surfaceLocked ? null : ({ input, text, isError }) => this._onScopeSwitch(input, text, isError),
@@ -1224,7 +1272,7 @@ class AskTurn extends EventEmitter {
    * per-frame ask-usage costUsd:null (:51); the R-C stop test in THIS file is
    * the end-to-end pin of the summary rule.
    */
-  async _complete({ kind, status, reason = null, message = null, errorClass = undefined, code = undefined }) {
+  async _complete({ kind, status, reason = null, message = null, errorClass = undefined, code = undefined, notInstalled = null }) {
     if (this._completed) return { status: this.status };
     this._completed = true;
     const d = this.deps;
@@ -1251,7 +1299,10 @@ class AskTurn extends EventEmitter {
       const detail = [message, extra].filter((s) => s && String(s).trim()).join('\n');
       this.reducer.addBlock({
         kind: 'notice',
-        text: humanErrorText(errorClass),
+        // A CLI that is not on this machine is stamped 'network' (runs pause on it); the chat names the real cause, and
+        // `claudeSetup` gives the notice a link to Connect Claude Code (only Claude's runner says notInstalled).
+        text: notInstalled || humanErrorText(errorClass),
+        ...(notInstalled ? { claudeSetup: true } : {}),
         errorClass,
         detail: detail ? String(detail).slice(-ERROR_DETAIL_MAX) : null,
       });
@@ -1498,6 +1549,7 @@ class AskTurn extends EventEmitter {
       // Agent mode never rides the relay: relay mode is agent isolation, where the terminal refuses agent callers.
       this.commands = !this.relay && this.agentMode && d.commandBridge ? d.commandBridge({ threadId: this.threadId }) : null;
       this.proxyBridge = !this.relay && d.proxyBridge ? d.proxyBridge({ threadId: this.threadId }) : null;
+      this.tabsBridge = !this.relay && d.tabsBridge ? d.tabsBridge({ threadId: this.threadId }) : null;
       // One sign-in answer per turn: handed to the MCP child (spawn.mjs WORCA_ASK_CLAUDE_AUTH) and used by _onProposal,
       // so the model and the card get one verdict however long the turn runs. A relayed chat runs its tools here, in
       // this process (preflight's cache), so its child gets nothing.
@@ -1506,7 +1558,7 @@ class AskTurn extends EventEmitter {
       await d.fs.writeFile(
         mcpConfigPath,
         // MCP registry §9.2: the copies ride after `worca` — refs only (`${MCPSECRET_…}`); the values go in spawnEnv.
-        JSON.stringify(d.buildMcpConfig({ homeBase, threadId: this.threadId, serverPath: d.serverPath, git: d.gitAvailable(), ...(claudeAuth ? { claudeAuth } : {}), ...(this.reader ? { reader: this.reader } : {}), ...(this.relay ? { relay: this.relay } : {}), ...(this.web ? { web: this.web } : {}), ...(this.mcp ? { extraServers: this.mcp.servers } : {}), ...(this.commands ? { commands: this.commands } : {}), ...(this.proxyBridge ? { proxy: this.proxyBridge } : {}), ...(this.lockedDown ? { engine: this.engine, model: this.model } : {}), ...(skillRoot ? { skillRoot } : {}), ...(designRoots ? { designRoots } : {}) }), null, 2),
+        JSON.stringify(d.buildMcpConfig({ homeBase, threadId: this.threadId, serverPath: d.serverPath, git: d.gitAvailable(), ...(claudeAuth ? { claudeAuth } : {}), ...(this.reader ? { reader: this.reader } : {}), ...(this.relay ? { relay: this.relay } : {}), ...(this.web ? { web: this.web } : {}), ...(this.mcp ? { extraServers: this.mcp.servers } : {}), ...(this.commands ? { commands: this.commands } : {}), ...(this.proxyBridge ? { proxy: this.proxyBridge } : {}), ...(this.tabsBridge ? { tabs: this.tabsBridge } : {}), ...(this.lockedDown ? { engine: this.engine, model: this.model } : {}), ...(skillRoot ? { skillRoot } : {}), ...(designRoots ? { designRoots } : {}) }), null, 2),
         // Never a key value (webKeyVar: the key rides the process env). A relayed turn runs as
         // the person's agent user (agent-pool.mjs), which reads this file through its group. It
         // carries this turn's relay token: with a pool the file goes to that user's own group (worca
@@ -1542,6 +1594,7 @@ class AskTurn extends EventEmitter {
       if (this.relay) { try { this.relay.dispose(); } catch { /* already gone */ } this.relay = null; }
       if (this.commands) { try { this.commands.dispose(); } catch { /* already gone */ } this.commands = null; }
       if (this.proxyBridge) { try { this.proxyBridge.dispose(); } catch { /* already gone */ } this.proxyBridge = null; }
+      if (this.tabsBridge) { try { this.tabsBridge.dispose(); } catch { /* already gone */ } this.tabsBridge = null; }
       // Memory usage: ONE merge per turn (an Ask turn is one execution). Best-effort: a failure costs the counts only.
       if (this._memoryReads.size) {
         try { await d.recordMemoryUsage(this._memoryReads.events()); }
@@ -1616,8 +1669,9 @@ class AskTurn extends EventEmitter {
         ...(this.lockedDown ? { engine: this.engine } : {}),
         commands: this.commands,
         proxy: this.proxyBridge,
+        tabs: this.tabsBridge,
         git: d.gitAvailable(),
-        ...(this.surfaceLocked ? { composer: true } : {}),   // the Workflows and Design chats: no Task built-in (spawn.mjs)
+        ...(this.surfaceLocked ? { composer: true } : {}),   // the Workflows chat: no Task built-in (spawn.mjs)
         // Skills registry §4.4: every attempt too, until the sideload safety net drops the layer.
         skills: this.skills && this.skillMount ? { pluginDirs: this.skillMount.pluginDirs, names: this.skillNames } : null,
       });
@@ -1686,6 +1740,7 @@ class AskTurn extends EventEmitter {
           kind: 'error',
           message: err?.message || String(err),
           errorClass: err?.errorClass ?? undefined,
+          notInstalled: (err && typeof err.notInstalled === 'string' && err.notInstalled) || null,
         });
       }
     }

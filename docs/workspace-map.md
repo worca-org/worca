@@ -151,7 +151,7 @@ The same actions over HTTP:
 
 ## Creating a workspace
 
-**How workspaces work.** The Workspaces page has a *How workspaces work* button that opens a four-screen walkthrough (what a workspace is, how links are found, checking the Map, how the change order guides a run) with a sample map. It also opens by itself the first time someone with no workspace presses Create workspace, and again after the last workspace is deleted. Opening it never changes a workspace.
+**How workspaces work.** The Workspaces page has a *How workspaces work* button that opens a four-screen walkthrough (what a workspace is, how links are found, checking the Map, how the change order guides a run) with a sample map. Its last screen has a **Show me in the product** button that closes the walkthrough and starts the Getting started tour for grouping projects into a workspace. Until it has been opened, the button carries a **new** mark (**Show again** in Settings › General › Getting started brings the mark back). The walkthrough also opens by itself the first time someone with no workspace presses Create workspace, and again after the last workspace is deleted. Opening it never changes a workspace.
 
 **Workspaces › Create workspace** opens the wizard: a name, the member projects (2–40) and the
 scan's models. The project list shows every registered project. Repositories that are not projects
@@ -256,7 +256,7 @@ failed (never paused), so Re-scan stays available.
 
 ## Workspace runs
 
-In **New pipeline**, set **Target** to **Workspace**. The planner writes one plan whose every
+In **New run**, set **Target** to **Workspace**. The planner writes one plan whose every
 task is tagged with the projects it touches (`Projects: <projectKey>[, ...]`), and each
 implementer edits only those. Every Git member gets its own branch and worktree; every Folder
 member gets its own copy, which you apply to its folder (or discard) on its own. **Workspace
@@ -320,7 +320,7 @@ member's checkout — `.env` and `.env.*` files such as `.env.example` included,
 protects from agents. Checking a line an agent cites (a survey fact in the catalog, a reported
 use in the join) reads that file whatever its name, inside the member's checkout. The
 catalog's search for literal mentions skips the files Normal protects (`.env*`, `*.pem`,
-`*.key`, `id_rsa`, `id_ed25519`, `*.p12`, `*.pfx`). What the stages record (a URL, a topic, a
+`*.key`, `.npmrc`, `.netrc`, `id_*`, `*.p12`, `*.pfx`). What the stages record (a URL, a topic, a
 table name, with its file and line) is stored in the map, shown on the Map tab, and given to
 the scan's agents in their briefs. Credentials in what they read — URL passwords, password,
 token and API-key values, a token used as a URL's user name (`https://<token>@github.com/…`,

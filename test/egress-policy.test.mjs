@@ -3,7 +3,7 @@
 // socket, and the child environment worca hands out only while it enforces a policy.
 // The Docker overlay's own behaviour (no mode) is in test/docker-files.test.mjs.
 
-import { test } from 'node:test';
+import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import net from 'node:net';
@@ -22,6 +22,12 @@ import { deploymentFacts } from '../src/core/deployment.mjs';
 import { buildSpawnEnv } from '../src/core/claude-runner.mjs';
 
 const PLATFORM_ALLOW = 'app.worca.dev,worca-run-broker.railway.internal';
+
+// Settings and the saved proxy login live under HOME, which the whole suite shares: this file reads its own, so a
+// proxy another test file saves there cannot change these results.
+const OWN_HOME = mkdtempSync(join(tmpdir(), 'worca-egress-home-'));
+process.env.HOME = OWN_HOME; process.env.USERPROFILE = OWN_HOME;
+after(() => rmSync(OWN_HOME, { recursive: true, force: true }));
 
 test('mode: missing or blank is open and not enforced (an instance from before the policy)', () => {
   for (const env of [{}, { WORCA_EGRESS_MODE: '' }, { WORCA_EGRESS_MODE: '   ' }]) {
@@ -616,7 +622,7 @@ async function savedLoginRig(t, { fakeOpts = {}, networkProxy = {}, password = '
   const home = mkdtempSync(join(tmpdir(), 'worca-egress-login-'));
   const o = await origin();
   const fake = await startFakeUpstream({ scheme: 'ntlm', domain: 'ACME', user: 'jdoe', password: 'S3cret!', originPort: o.port, ...fakeOpts });
-  const saved = password ? saveProxyLogin({ ...ACME, password }, { home }) : null;
+  const saved = password ? await saveProxyLogin({ ...ACME, password }, { home }) : null;
   if (saved && marked) markLoginRejected(saved.id, { home, upstream: `127.0.0.1:${fake.port}` });
   const logs = [];
   const env = {};
@@ -649,7 +655,7 @@ test('saved login: the boot line names it, and reloadLogin picks up a new save',
   const n = egressNotice(fresh.r);
   assert.equal(n.level, 'info');
   assert.match(n.text, /^Corporate proxy: via 127\.0\.0\.1:\d+ \(NTLMv2\), logged in as ACME\\jdoe, local proxy/);
-  saveProxyLogin(ACME, { home });
+  await saveProxyLogin(ACME, { home });
   assert.equal(r.reloadLogin(), true);
   assert.equal(r.connector.status().state, 'unverified');
   assert.equal(r.reloadLogin(), false, 'nothing changed since');
@@ -670,7 +676,7 @@ test('saved login: a 407 to a handshake begun before a new login leaves the new 
   const { r, home, fake, port } = await savedLoginRig(t, { password: 'wrong', fakeOpts: { holdType3: true } });
   const pending = rawRequest(port, CONNECT_GH);
   await untilTrue(() => fake.stats.type3 === 1);
-  saveProxyLogin(ACME, { home });
+  await saveProxyLogin(ACME, { home });
   assert.equal(r.reloadLogin(), true);
   fake.release();
   assert.match(await pending, /^HTTP\/1\.1 407/);
@@ -691,7 +697,7 @@ test('saved login: the default watcher swaps a new login in without a restart', 
     rmSync(home, { recursive: true, force: true });
   });
   assert.equal(r.connector.status().state, 'none', 'no login at boot');
-  saveProxyLogin(ACME);   // the default home: WORCA_HOME/.worca-cc
+  await saveProxyLogin(ACME);   // the default home: WORCA_HOME/.worca-cc
   await untilTrue(() => r.connector.status().state === 'unverified', 3000, 25);
   assert.equal(r.connector.status().auth, 'auto');
 });
@@ -715,7 +721,7 @@ test('saved login: an explicit auth none never sends it, and the watcher leaves 
   assert.equal(r.connector.status().auth, 'none');
   assert.ok(watcher, 'the watcher runs whenever the proxy is on (a swap may bring a login-taking upstream)');
   await rawRequest(port, CONNECT_GH);
-  saveProxyLogin(ACME, { home });
+  await saveProxyLogin(ACME, { home });
   watcher();
   r.reloadLogin();
   assert.equal(r.connector.status().auth, 'none');
@@ -1186,4 +1192,193 @@ test('opted out at boot: clearing networkProxy.enabled auto-starts without a res
     assert.equal(live.current().autoStarted, true);
     for (const [k, v] of Object.entries(env)) assert.doesNotMatch(String(v), /Password/, `${k} carries no password`);
   } finally { await live.close(); await fake.close(); o.server.close(); }
+});
+
+// ── GHE.com tenant (Copilot data residency): worca adds the configured tenant to ITS OWN allow policy ──
+import { copilotTenantAllow } from '../src/core/egress-policy.mjs';
+
+const tenantSettings = (host, accountType = 'ghe-com') => ({ providers: { copilot: { accountType, ...(host ? { enterpriseHost: host } : {}) } } });
+const allowEnv = (extra = {}) => ({ PATH: '/bin', WORCA_EGRESS_MODE: 'allow', WORCA_EGRESS_ALLOW: 'app.worca.dev', ...extra });
+
+test('copilotTenantAllow: ghe-com with a valid host only; never throws', () => {
+  assert.deepEqual(copilotTenantAllow(tenantSettings('acme.ghe.com')), ['acme.ghe.com', '.acme.ghe.com']);
+  for (const s of [tenantSettings('acme.ghe.com', 'enterprise'), tenantSettings(null), tenantSettings('github.com'), tenantSettings('acme.ghe.com/x'), {}, null, undefined, { providers: 5 }, { providers: { copilot: 'x' } }]) {
+    assert.deepEqual(copilotTenantAllow(s), []);
+  }
+});
+
+test('allow mode: a configured GHE.com tenant is added (apex + subdomains); api.acme.ghe.com and copilot-api.acme.ghe.com pass, other.ghe.com does not', async () => {
+  const env = allowEnv(); const logs = [];
+  const r = await startEgressPolicy({ env, settings: () => tenantSettings('acme.ghe.com'), log: (l) => logs.push(l), unref: true });
+  try {
+    assert.equal(r.status, 'on');
+    for (const h of ['acme.ghe.com', 'api.acme.ghe.com', 'copilot-api.acme.ghe.com', 'app.worca.dev']) assert.equal(decide(h, r.policy).ok, true, h);
+    for (const h of ['other.ghe.com', 'ghe.com', 'evilacme.ghe.com', 'acme.ghe.com.evil.example', 'github.com']) assert.equal(decide(h, r.policy).ok, false, h);
+    assert.ok(logs.some((l) => /Egress: allowing acme\.ghe\.com, \.acme\.ghe\.com for the GitHub Copilot GHE\.com tenant \(WORCA_EGRESS_DENY still applies\)/.test(l)), logs.join('\n'));
+  } finally { await r.close(); }
+});
+
+test('DENY still wins over an injected tenant (WORCA_EGRESS_DENY=.ghe.com)', async () => {
+  const r = await startEgressPolicy({ env: allowEnv({ WORCA_EGRESS_DENY: '.ghe.com' }), settings: () => tenantSettings('acme.ghe.com'), unref: true });
+  try {
+    assert.equal(decide('api.acme.ghe.com', r.policy).ok, false);
+    assert.equal(decide('api.acme.ghe.com', r.policy).rule, 'deny');
+  } finally { await r.close(); }
+});
+
+test('open mode reads no tenant settings and starts nothing; block mode is unchanged', async () => {
+  const boom = () => { throw new Error('settings must not be read'); };
+  const open = await startEgressPolicy({ env: { PATH: '/bin' }, settings: boom, proxyOn: () => false });
+  assert.equal(open.status, 'off');
+  const inherited = { PATH: '/bin' }; const url = 'http://127.0.0.1:9';
+  Object.assign(inherited, egressChildEnv(url), { WORCA_EGRESS_MODE: 'allow' });
+  assert.equal((await startEgressPolicy({ env: inherited, settings: boom, proxyOn: () => false })).status, 'inherited');
+  const block = await startEgressPolicy({ env: { PATH: '/bin', WORCA_EGRESS_MODE: 'block', WORCA_EGRESS_DENY: 'bad.example' }, settings: () => tenantSettings('acme.ghe.com'), unref: true });
+  try {
+    assert.equal(block.status, 'on');
+    assert.deepEqual(block.policy.allow, []);
+    assert.equal(block.setExtraAllow, undefined);
+    assert.equal(decide('api.acme.ghe.com', block.policy).ok, true);
+  } finally { await block.close(); }
+});
+
+test('a bad stored host injects nothing; a throwing extraAllow keeps the base list', async () => {
+  const r = await startEgressPolicy({ env: allowEnv(), settings: () => tenantSettings('acme.ghe.com/x'), unref: true });
+  try { assert.deepEqual(r.policy.allow, ['app.worca.dev']); } finally { await r.close(); }
+  const t = await startEgressPolicy({ env: allowEnv(), settings: () => tenantSettings('acme.ghe.com'), unref: true, extraAllow: () => { throw new Error('nope'); } });
+  try { assert.deepEqual(t.policy.allow, ['app.worca.dev']); } finally { await t.close(); }
+});
+
+test('live: a settings change adds, swaps and removes the tenant entries without a restart', async () => {
+  let tick = null; let stored = tenantSettings('acme.ghe.com');
+  const logs = [];
+  const live = await startLiveEgress({
+    env: allowEnv(), settings: () => stored, readStrict: () => stored, log: (l) => logs.push(l), unref: true,
+    watch: (fn) => { tick = fn; return () => {}; },
+  });
+  try {
+    const allowed = (h) => decide(h, live.current().policy).ok;
+    assert.equal(allowed('api.acme.ghe.com'), true);
+    stored = tenantSettings('other.ghe.com'); tick();
+    assert.equal(allowed('api.acme.ghe.com'), false);
+    assert.equal(allowed('copilot-api.other.ghe.com'), true);
+    const n = logs.filter((l) => /Egress: allowing/.test(l)).length;
+    tick();                                                           // unchanged: no repeat line
+    assert.equal(logs.filter((l) => /Egress: allowing/.test(l)).length, n);
+    stored = tenantSettings(null, 'individual'); tick();
+    assert.equal(allowed('copilot-api.other.ghe.com'), false);
+    assert.deepEqual(live.current().policy.allow, ['app.worca.dev']);
+    stored = tenantSettings('acme.ghe.com'); tick();
+    assert.equal(allowed('acme.ghe.com'), true);
+  } finally { await live.close(); }
+});
+
+// ── sandbox egress (plan Task 13, core-3): the E2B allowlist an `allow` project gets, from the same list ──
+// Kept in its own block with its own import so the catalog work on this file rebases cleanly.
+const sandboxPolicy = () => import('../src/core/sandbox-egress.mjs');
+const ALL = ['0.0.0.0/0'];
+
+test('sandbox egress: open by default, and for anything but allow', async () => {
+  const { sandboxEgress } = await sandboxPolicy();
+  assert.equal(sandboxEgress({}), null);
+  assert.equal(sandboxEgress(null), null);
+  assert.equal(sandboxEgress({ egress: 'open' }), null);
+  assert.equal(sandboxEgress({ egress: 'ALLOW ' }), null, 'only the exact value opts in');
+});
+
+test('sandbox egress: allow uses the shared list, apex and subdomains for a leading dot', async () => {
+  const { sandboxEgress } = await sandboxPolicy();
+  assert.deepEqual(sandboxEgress({ egress: 'allow' }, {}), {
+    allowOut: ['api.anthropic.com', 'github.com', '*.github.com', 'githubusercontent.com', '*.githubusercontent.com', 'registry.npmjs.org'],
+    denyOut: ALL,
+  });
+  assert.deepEqual(sandboxEgress({ egress: 'allow' }, { WORCA_EGRESS_ALLOW: 'pypi.org, .pythonhosted.org,10.0.0.0/8, 1.1.1.1' }), {
+    allowOut: ['pypi.org', 'pythonhosted.org', '*.pythonhosted.org', '10.0.0.0/8', '1.1.1.1'], denyOut: ALL });
+});
+
+test('sandbox egress: in a box the overlay hands the sidecar list over as WORCA_SANDBOX_EGRESS_ALLOW, which wins', async () => {
+  const { sandboxEgress } = await sandboxPolicy();
+  assert.deepEqual(sandboxEgress({ egress: 'allow' }, { WORCA_SANDBOX_EGRESS_ALLOW: 'git.acme.example', WORCA_EGRESS_ALLOW: 'pypi.org' }),
+    { allowOut: ['git.acme.example'], denyOut: ALL });
+  assert.deepEqual(sandboxEgress({ egress: 'allow' }, { WORCA_SANDBOX_EGRESS_ALLOW: '' }).allowOut,
+    sandboxEgress({ egress: 'allow' }, {}).allowOut, 'empty means the default list, as in the sidecar');
+  const eg = readFileSync(new URL('../docker/compose.egress.yml', import.meta.url), 'utf8');
+  assert.match(eg.split(/^ {2}egress:/m)[0], /WORCA_SANDBOX_EGRESS_ALLOW: \$\{WORCA_EGRESS_ALLOW:-\}/, 'the overlay passes it to worca');
+  assert.doesNotMatch(eg.split(/^ {2}egress:/m)[0], /^\s+WORCA_EGRESS_ALLOW:/m, 'never under the name Worca\'s own policy reads');
+});
+
+test('sandbox egress: a denied host name leaves allowOut; IP and CIDR denies go into denyOut as they are', async () => {
+  const { sandboxEgress } = await sandboxPolicy();
+  const env = { WORCA_EGRESS_ALLOW: 'github.com,.github.com,registry.npmjs.org,1.1.1.1', WORCA_EGRESS_DENY: 'registry.npmjs.org, .github.com, 9.9.9.0/24, .invalid' };
+  assert.deepEqual(sandboxEgress({ egress: 'allow' }, env), { allowOut: ['github.com', '1.1.1.1'], denyOut: [...ALL, '9.9.9.0/24'] });
+  // A name under a wildcard cannot be carved out of it in E2B: the wildcard stays, and the caller hears which.
+  assert.deepEqual(sandboxEgress({ egress: 'allow' }, { WORCA_EGRESS_ALLOW: '.github.com', WORCA_EGRESS_DENY: 'gist.github.com' }),
+    { allowOut: ['github.com', '*.github.com'], denyOut: ALL, unheldDeny: ['gist.github.com'] });
+  // An exactly allowed name under a denied wildcard leaves allowOut too.
+  assert.deepEqual(sandboxEgress({ egress: 'allow' }, { WORCA_EGRESS_ALLOW: 'api.github.com', WORCA_EGRESS_DENY: '.github.com' }), { denyOut: ALL });
+});
+
+test('sandbox egress: an empty list is deny-all', async () => {
+  const { sandboxEgress, toE2bNetwork } = await sandboxPolicy();
+  assert.deepEqual(toE2bNetwork([]), { denyOut: ALL });
+  assert.deepEqual(sandboxEgress({ egress: 'allow' }, { WORCA_EGRESS_ALLOW: 'registry.npmjs.org', WORCA_EGRESS_DENY: 'registry.npmjs.org' }), { denyOut: ALL });
+});
+
+test('importing the sandbox allow list leaves a piped stdin blocking: readFileSync(0) still reads a slow writer (no node:process facade)', async () => {
+  const { spawn } = await import('node:child_process');
+  const mod = new URL('../src/core/sandbox-egress.mjs', import.meta.url).href;
+  const script = `await import(${JSON.stringify(mod)}); const { readFileSync } = await import('node:fs'); process.stdout.write(String(readFileSync(0, 'utf8').length));`;
+  const out = await new Promise((resolve, reject) => {
+    const c = spawn(process.execPath, ['--input-type=module', '-e', script], { stdio: ['pipe', 'pipe', 'pipe'] });
+    let stdout = ''; let stderr = '';
+    c.stdout.on('data', (d) => { stdout += d; });
+    c.stderr.on('data', (d) => { stderr += d; });
+    c.on('error', reject);
+    c.on('exit', (code) => (code === 0 ? resolve(stdout) : reject(new Error(`child exited ${code}: ${stderr}`))));
+    c.stdin.write('x'.repeat(1024));
+    setTimeout(() => c.stdin.end('y'.repeat(1024)), 300);   // the child reads an empty pipe in between
+  });
+  assert.equal(out, '2048');
+});
+
+test('toE2bAllow: .x is x and *.x; names, IPs and CIDRs pass through once', async () => {
+  const { toE2bAllow } = await sandboxPolicy();
+  assert.deepEqual(toE2bAllow(['.x.com', 'x.com', 'a.b', '1.2.3.4', '10.0.0.0/8', '.x.com']), ['x.com', '*.x.com', 'a.b', '1.2.3.4', '10.0.0.0/8']);
+  assert.deepEqual(toE2bAllow([]), []);
+});
+
+test('secretVault on: the connector gets the vaulted NT hash through the real readers, and a new save swaps in within a poll', async (t) => {
+  const { fakeVault } = await import('./helpers/vault-on.mjs');
+  const { watchProxyLogin } = await import('../src/core/proxy-credentials.mjs');
+  const { isVaultRef } = await import('../src/core/secrets/refs.mjs');
+  const { worcaHome } = await import('../src/core/projects.mjs');
+  // The default Worca home, as in production: startEgressPolicy primes the vault of worcaHome().
+  const dir = mkdtempSync(join(tmpdir(), 'worca-egress-vault-'));
+  const prev = process.env.WORCA_HOME;
+  process.env.WORCA_HOME = dir;
+  const home = worcaHome();
+  const { vaultOn } = fakeVault(dir);
+  const o = await origin();
+  const fake = await startFakeUpstream({ scheme: 'ntlm', domain: 'ACME', user: 'jdoe', password: 'S3cret!', originPort: o.port });
+  let r;
+  t.after(async () => {
+    await r?.close(); await fake.close(); o.server.close();
+    if (prev === undefined) delete process.env.WORCA_HOME; else process.env.WORCA_HOME = prev;
+    rmSync(dir, { recursive: true, force: true });
+  });
+  await vaultOn(async () => {
+    await saveProxyLogin(ACME, { home });
+    assert.ok(isVaultRef(JSON.parse(readFileSync(join(home, PROXY_LOGIN_FILE), 'utf8')).ntHash));
+    r = await startEgressPolicy({
+      env: {}, proxyOn: FLAG_ON, loginPollMs: 50,
+      settings: () => ({ networkProxy: { upstream: fake.url() } }),
+      login: () => readProxyLogin({ home }),
+      watchLogin: (fn) => watchProxyLogin(fn, { home, intervalMs: 50 }),
+    });
+    const port = Number(new URL(r.url).port);
+    assert.match(await rawRequest(port, CONNECT_GH), /origin saw \/t/, 'the upstream accepted the vaulted NT hash');
+    const next = await saveProxyLogin(ACME, { home });
+    await untilTrue(() => r.connector.status().loginId === next.id, 1000, 10);
+    assert.match(await rawRequest(port, CONNECT_GH), /origin saw \/t/);
+  });
 });

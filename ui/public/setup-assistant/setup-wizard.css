@@ -13,6 +13,15 @@
 @media (forced-colors:active){.setup-card .sa-progress-seg{background:Canvas;border:1px solid CanvasText;}
   .setup-card .sa-progress-seg[data-state="done"],.setup-card .sa-progress-seg[data-state="current"]{background:CanvasText;}}
 .setup-card .sa-sub{margin:0;color:var(--ink-2);}
+/* The line under the progress bar for someone with no level yet (hidden by its own attribute otherwise). */
+.setup-card .sa-level-hint{margin:0;color:var(--ink-2);}
+.setup-card .sa-level-hint[hidden]{display:none;}
+/* The ready screen: the level just earned (avatar, name, what the next level needs), or the one missing line. */
+.setup-card .sa-ready{display:flex;align-items:center;gap:16px;min-width:0;}
+.setup-card .sa-ready-avatar{flex:none;width:56px;height:56px;border-radius:50%;background:oklch(0.92 0.04 var(--wl-hue,235));}
+.setup-card .sa-ready-text{display:flex;flex-direction:column;gap:4px;min-width:0;}
+.setup-card .sa-ready-level{font-weight:600;}
+.setup-card .sa-ready-next,.setup-card .sa-ready-missing{margin:0;color:var(--ink-2);}
 .setup-card .sa-step{display:flex;flex-direction:column;gap:16px;min-width:0;}
 /* The step's 16px gap spaces its children; .field's own 18px bottom margin on top of it doubled the space between fields. */
 .setup-card .sa-step > .field{margin-bottom:0;}
@@ -92,7 +101,7 @@
 .setup-card.dlg > .dlg-head{padding-bottom:16px;}
 .setup-card.dlg > .dlg-foot{padding-top:16px;}
 .setup-card .dlg-foot .confirm-actions{flex-wrap:wrap;}
-/* Wizard foot: the way out (Cancel / Set up later, Close, Share; Back after a failed network apply) sits on the
+/* Wizard foot: the way out (Cancel / Skip all, Close, Share; Back after a failed network apply) sits on the
    left; Skip / Discard changes, Back and the primary action stay on the right, Back and the primary side by side,
    the primary last. paintFoot always appends the left one first. */
 .setup-card .dlg-foot .confirm-actions > :first-child:not(:last-child){margin-right:auto;}
@@ -103,3 +112,5 @@
 .setup-card .hint.err{color:var(--red-ink);}
 .setup-card .input::placeholder{color:var(--ink-2);}
 .setup-card .input[aria-invalid="true"].input::placeholder{color:var(--ink-2);}
+/* Where agents run (setup-where-agents-run.mjs): its lines sit on the section's own gap, no paragraph margins. */
+.setup-card :is(.sa-where-line,.sa-where-none,.sa-where-guide){margin:0;overflow-wrap:anywhere;}

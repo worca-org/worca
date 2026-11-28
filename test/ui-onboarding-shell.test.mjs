@@ -37,10 +37,10 @@ const click = (window, node) => node.dispatchEvent(new window.Event('click', { b
 const STEPS = ['claude', 'project', 'run', 'ask', 'realRun', 'workflows', 'workspace', 'teamMetrics', 'teamPolicy'];
 const status = (done = [], flags = {}) => ({
   steps: Object.fromEntries(STEPS.map((id) => [id, done.includes(id)])),
-  done: done.length, total: 9, claude: { bin: 'claude', hint: null }, hidden: false, welcomeSeen: false, ...flags,
+  done: done.length, total: 9, claude: { bin: 'claude', hint: null }, hidden: false, welcomeSeen: false, setupFinished: true, ...flags,
 });
 
-async function boot({ onboarding = status(['claude']), projects = [], level = null, settingsError = null, width = null, holdOnboarding = null } = {}) {
+async function boot({ onboarding = status(['claude']), projects = [], level = null, settingsError = null, width = null, holdOnboarding = null, settings = null, levelView = null } = {}) {
   // `level`: the server-rendered interface mode (docs/ui-levels.md); null = no attribute (gates nothing).
   const shellHtml = level ? html.replace('<html lang="en" data-theme="system">', `<html lang="en" data-theme="system" data-level="${level}">`) : html;
   const dom = trackDom(new JSDOM(shellHtml, { url: 'http://localhost:4317/', pretendToBeVisual: true }));
@@ -51,6 +51,7 @@ async function boot({ onboarding = status(['claude']), projects = [], level = nu
   }
   window.WebSocket = class { constructor() { this.readyState = 1; } send() {} close() {} addEventListener() {} };
   const posts = [];
+  const levelCalls = [];
   let current = onboarding;
   // ob.hold: a promise a later GET waits on; ob.fail: the next GETs answer 500 with this error;
   // ob.down: the next GETs reject (the server is not answering at all).
@@ -59,7 +60,12 @@ async function boot({ onboarding = status(['claude']), projects = [], level = nu
     const url = String(u);
     const json = (body) => Promise.resolve({ ok: true, status: 200, json: async () => body });
     if (url.includes('/api/onboarding')) {
-      if (init.method === 'POST') { const b = JSON.parse(init.body); posts.push(b); current = { ...current, ...b }; }
+      if (init.method === 'POST') {
+        const { guidesReset, ...b } = JSON.parse(init.body);
+        posts.push(guidesReset ? { guidesReset, ...b } : b);
+        // The server's reset: every How it works area is unseen again, Workspaces' legacy flag included.
+        current = { ...current, ...b, ...(guidesReset ? { guidesSeen: {}, workspaceGuideSeen: false } : {}) };
+      }
       if (init.method !== 'POST') ob.gets += 1;
       if (init.method !== 'POST' && ob.down) return Promise.reject(new TypeError(ob.down));
       if (init.method !== 'POST' && (ob.hold || ob.fail)) {
@@ -71,6 +77,13 @@ async function boot({ onboarding = status(['claude']), projects = [], level = nu
     }
     // settingsError: the error POST /api/settings answers with (a mode switch the server refuses).
     if (settingsError && url.includes('/api/settings') && init.method === 'POST') return Promise.resolve({ ok: false, status: 500, json: async () => ({ error: settingsError }) });
+    // settings: what GET /api/settings answers (#1450's one-time notice reads modelRoles and roleDefaults).
+    if (settings && url.includes('/api/settings') && init.method !== 'POST') return json(settings);
+    // levelView: a getter for the served WorcaLevelView; every worca-level call (read, ack, events) is logged in `levelCalls`.
+    if (levelView && url.includes('/api/worca-level')) {
+      levelCalls.push({ url, method: init.method || 'GET', body: init.body ? JSON.parse(init.body) : null });
+      return url.includes('/events') ? Promise.resolve({ ok: true, status: 204, json: async () => ({}) }) : json(levelView());
+    }
     if (url.includes('/api/projects')) return json({ projects });
     // The setup assistant's load (a fresh boot opens it): minimal answers, so it paints its Check step.
     if (url.includes('/api/setup/detect')) return json({ checks: [{ id: 'claude', label: 'Claude Code', state: 'ok', line: 'Signed in.' }] });
@@ -85,7 +98,7 @@ async function boot({ onboarding = status(['claude']), projects = [], level = nu
   window.localStorage.clear();
   await import(pathToFileURL(appPath).href + `?b=${Date.now()}_${Math.random()}`);
   await settle();
-  return { window, doc: window.document, posts, ob, setStatus: (s) => { current = s; } };
+  return { window, doc: window.document, posts, ob, levelCalls, setStatus: (s) => { current = s; } };
 }
 
 // ---- app.js wiring ----
@@ -186,11 +199,50 @@ test('Hide posts {hidden:true} and removes the pill (the page stays); Settings �
   assert.match(doc.getElementById('gsSettingsMsg').textContent, /^Hidden from the sidebar · 1 of 9 done/);
   click(window, btn);
   await settle();
-  assert.deepEqual(posts, [{ hidden: true }, { hidden: false }]);
+  assert.deepEqual(posts, [{ hidden: true }, { guidesReset: true, hidden: false }]);
   assert.equal(doc.querySelector('.view[data-view="getting-started"]').classList.contains('hidden'), false, 'opens the page');
   assert.equal(doc.getElementById('getting-started-host').hidden, false, 'shelf painted');
   assert.equal(doc.querySelector('.gs-pill-host').hidden, false);
   assert.equal(doc.getElementById('welcome-modal').classList.contains('hidden'), true, 'ONLY the checklist returns — the welcome stays seen');
+});
+
+test('Settings › Show again posts only {guidesReset:true} when the checklist is not hidden — "Open checklist" resets the explainers too', async () => {
+  const { doc, window, posts } = await boot({ onboarding: status(['claude'], { welcomeSeen: true, hidden: false }) });
+  window.location.hash = 'settings';
+  window.dispatchEvent(new window.Event('hashchange'));
+  await settle();
+  const btn = doc.getElementById('gsShowAgain');
+  assert.equal(btn.textContent, 'Open checklist');
+  click(window, btn);
+  await settle();
+  assert.deepEqual(posts, [{ guidesReset: true }], 'no hidden key when nothing was hidden');
+  assert.equal(doc.querySelector('.view[data-view="getting-started"]').classList.contains('hidden'), false, 'opens the page');
+});
+
+test('Settings › Show again brings every How it works mark back, Workspaces included', async () => {
+  const seen = { chat: true, runs: true, stats: true, workspaces: true };
+  const { doc, window, posts } = await boot({ onboarding: status(['claude'], { welcomeSeen: true, hidden: true, guidesSeen: seen, workspaceGuideSeen: true }) });
+  const markOf = (id) => doc.getElementById(id)?.dataset.new;
+  window.location.hash = 'runs';
+  window.dispatchEvent(new window.Event('hashchange'));
+  await settle();
+  assert.equal(markOf('howto-btn'), 'false', 'precondition: Runs is seen');
+  window.location.hash = 'workspaces';
+  window.dispatchEvent(new window.Event('hashchange'));
+  await settle();
+  assert.equal(markOf('ws-howto-btn'), 'false', 'precondition: Workspaces is seen');
+  window.location.hash = 'settings';
+  window.dispatchEvent(new window.Event('hashchange'));
+  await settle();
+  assert.match(doc.querySelector('#getting-started-card .gs-settings-text').textContent, /How it works/, 'the card says it brings the marks back');
+  click(window, doc.getElementById('gsShowAgain'));
+  await settle();
+  assert.deepEqual(posts, [{ guidesReset: true, hidden: false }]);
+  assert.equal(markOf('ws-howto-btn'), 'true', 'Workspaces mark is back');
+  window.location.hash = 'runs';
+  window.dispatchEvent(new window.Event('hashchange'));
+  await settle();
+  assert.equal(markOf('howto-btn'), 'true', 'Runs mark is back');
 });
 
 test('Connect Claude Code re-checks on open: a page that loaded while signed out does not keep saying so', async () => {
@@ -201,7 +253,7 @@ test('Connect Claude Code re-checks on open: a page that loaded while signed out
   await settle();
   click(window, doc.querySelector('.gs-tile[data-step="claude"]'));
   await settle();
-  const line = doc.getElementById('claude-setup-status');
+  const line = doc.getElementById('engine-setup-status');
   assert.match(line.textContent, /installed and signed in/);
   assert.match(line.className, /\bok\b/);
 });
@@ -214,10 +266,10 @@ test('Connect Claude Code › Check again: busy while it asks, a result line eve
   await settle();
   click(window, doc.querySelector('.gs-tile[data-step="claude"]'));
   await settle();
-  const box = doc.getElementById('claude-setup-status');
-  const btn = doc.getElementById('claude-setup-check');
-  const where = () => box.querySelector('.ob-claude-where')?.textContent;
-  const checked = () => box.querySelector('.ob-claude-checked')?.textContent;
+  const box = doc.getElementById('engine-setup-status');
+  const btn = doc.getElementById('engine-setup-check');
+  const where = () => box.querySelector('.ob-setup-where')?.textContent;
+  const checked = () => box.querySelector('.ob-setup-checked')?.textContent;
   assert.match(box.textContent, /not signed in yet/);
   assert.equal(where(), `Worca checked ${dir}. If your terminal is signed in, Worca may be running with a different HOME or CLAUDE_CONFIG_DIR.`);
   assert.equal(checked(), undefined, 'the check on open leaves no "Checked just now" line');
@@ -258,7 +310,7 @@ test('Connect Claude Code › Check again: busy while it asks, a result line eve
   assert.match(box.textContent, /installed and signed in/);
   assert.equal(checked(), 'Checked just now: signed in.');
   assert.equal(where(), undefined, 'signed in: no folder line');
-  click(window, doc.getElementById('claude-setup-close'));
+  click(window, doc.getElementById('engine-setup-close'));
   click(window, doc.querySelector('.gs-tile[data-step="claude"]'));
   await settle();
   assert.equal(checked(), undefined, 'opened again: no stale "Checked just now" line');
@@ -269,13 +321,13 @@ test('a tile guide: "Connect Claude Code" opens the setup dialog; "Chat" rings t
   click(window, doc.querySelector('.gs-pill'));
   await settle();
   click(window, doc.querySelector('.gs-tile[data-step="claude"]'));
-  const setup = doc.getElementById('claude-setup-modal');
+  const setup = doc.getElementById('engine-setup-modal');
   assert.equal(setup.classList.contains('hidden'), false);
-  assert.match(doc.getElementById('claude-setup-status').textContent, /not on the PATH/);
-  click(window, doc.getElementById('claude-setup-close'));
+  assert.match(doc.getElementById('engine-setup-status').textContent, /not on the PATH/);
+  click(window, doc.getElementById('engine-setup-close'));
   assert.equal(setup.classList.contains('hidden'), true);
   click(window, doc.querySelector('.gs-tile[data-step="claude"]'));       // open it again
-  dragOut(window, doc.getElementById('claude-setup-status'), setup);
+  dragOut(window, doc.getElementById('engine-setup-status'), setup);
   assert.equal(setup.classList.contains('hidden'), false, 'a selection dragged out of the status does not close it');
   backdropClick(window, setup);
   assert.equal(setup.classList.contains('hidden'), true, 'read-only: a backdrop click closes it');
@@ -332,8 +384,11 @@ test('a replay walks every stop again: a control whose state is already right is
   const target = () => doc.querySelector('.guide-layer')?.dataset.target;
   const text = () => doc.querySelector('.guide-layer .guide-text')?.textContent || '';
   const next = () => doc.querySelector('.guide-layer .guide-next');
-  assert.equal(target(), '#topnav-new', 'always from the first hop: New run, in the top bar');
-  click(window, doc.getElementById('topnav-new'));
+  assert.equal(target(), '.nav button[data-nav="runs"]', 'always from the first hop: the Runs row');
+  click(window, doc.querySelector('.nav button[data-nav="runs"]'));
+  await until(() => target() === '#runs-new');
+  assert.equal(target(), '#runs-new', 'then New run, in the Runs page head');
+  click(window, doc.getElementById('runs-new'));
   await settle();
   // The project picker is a stop either way: unpicked it asks for a pick, picked it offers Next.
   assert.equal(target(), '#projectSelect');
@@ -373,7 +428,9 @@ test('a replay walks every stop again: a control whose state is already right is
   await settle();
   click(window, doc.querySelector('.gs-tile[data-step="run"]'));
   await settle();
-  click(window, doc.getElementById('topnav-new'));
+  click(window, doc.querySelector('.nav button[data-nav="runs"]'));
+  await until(() => target() === '#runs-new');
+  click(window, doc.getElementById('runs-new'));
   await until(() => target() === '#projectSelect');
   assert.equal(target(), '#projectSelect', 'a fresh walk: nothing passed earlier carries over');
   if (next()) click(window, next());
@@ -409,10 +466,12 @@ test('a step above the interface mode asks to switch first (Not now leaves all a
       assert.equal(doc.querySelector('.guide-layer'), null, 'and starts no tour');
     } },
     { name: 'confirming switches the mode and starts the tour at its first real hop', run: async () => {
-      const { doc, window } = await boot({ level: 'simple', onboarding: status(['claude', 'project'], { welcomeSeen: true }), projects: [{ name: 'p', path: '/tmp/p', key: 'p-00000001', exists: true }] });
+      // Team steps are listed before Runner only in Expert mode (D-18): a Runner on a team sees them in Simple mode, in the folded list.
+      const runner = { top: false, level: { index: 2, name: 'Runner' }, nextLevel: null, ladder: [], runner: { realRuns: 3, of: 3, stepsDone: 6, stepsOf: 6 } };
+      const { doc, window } = await boot({ level: 'simple', levelView: () => runner, onboarding: status(['claude', 'project', 'teamPolicy'], { welcomeSeen: true }), projects: [{ name: 'p', path: '/tmp/p', key: 'p-00000001', exists: true }] });
       click(window, doc.querySelector('.gs-pill'));
       await settle();
-      click(window, doc.querySelector('.gs-tile[data-step="teamMetrics"]'));
+      click(window, doc.querySelector('.gs-later-item[data-step="teamMetrics"]'));
       await settle();
       assert.equal(doc.getElementById('confirm-title').textContent, 'Switch to Expert?');
       click(window, doc.getElementById('confirm-ok'));
@@ -493,9 +552,9 @@ test('the project tour: the dialog opens on New (canvas AddNew), the guide rings
   assert.doesNotMatch(readFileSync(appPath, 'utf8'), /give the dialog that opens its folder/);
 });
 
-test('first start: a fresh install opens the setup assistant before the welcome; Set up later shows the welcome (AC-4.1)', async () => {
+test('first start: a fresh install opens the setup assistant before the welcome; Skip all shows the welcome (AC-4.1)', async () => {
   await checkRows([
-    { name: 'fresh: #setup-modal up, #welcome-modal hidden; Set up later closes it at once and shows the welcome', run: async () => {
+    { name: 'fresh: #setup-modal up, #welcome-modal hidden; Skip all closes it at once and shows the welcome', run: async () => {
       const { doc, window, posts } = await boot({ onboarding: status(['claude'], { fresh: true }) });
       assert.ok(doc.getElementById('setup-modal'), 'the assistant is up');
       assert.equal(doc.getElementById('welcome-modal').classList.contains('hidden'), true);
@@ -505,7 +564,7 @@ test('first start: a fresh install opens the setup assistant before the welcome;
       assert.equal(doc.getElementById('setup-modal'), null);
       assert.equal(doc.querySelector('.discard-modal'), null, 'no Discard changes? question');
       assert.equal(doc.getElementById('welcome-modal').classList.contains('hidden'), false, 'the welcome follows');
-      assert.deepEqual(posts, [], 'Set up later writes nothing');
+      assert.deepEqual(posts, [], 'Skip all writes nothing');
     } },
     { name: 'a boot without fresh shows the welcome first, and no assistant', run: async () => {
       const { doc } = await boot();
@@ -513,4 +572,84 @@ test('first start: a fresh install opens the setup assistant before the welcome;
       assert.equal(doc.getElementById('welcome-modal').classList.contains('hidden'), false);
     } },
   ]);
+});
+
+// ---- #1450: the one-time notice about Worca's role defaults ----
+const ROLE_DEFAULTS = { claude: { deep: { model: 'claude-opus-5-5' }, everyday: { model: 'claude-sonnet-5-5' }, quick: { model: 'claude-haiku-5-5' } } };
+// The notice's warn toast (#toasts), or null.
+const noticeToast = (doc) => [...doc.querySelectorAll('#toasts .toast.warn')]
+  .find((t) => t.querySelector('.tt')?.textContent === 'Steps now run on Worca’s defaults') || null;
+
+test('role-defaults notice: a warn toast shown once with an empty role (never over the welcome), seen recorded on show, Open Models goes to Models; hidden once seen or with every role set', async () => {
+  const seenWelcome = status(['claude'], { welcomeSeen: true });
+  const { doc, window, posts } = await boot({ onboarding: seenWelcome, settings: { modelRoles: {}, roleDefaults: ROLE_DEFAULTS } });
+  await until(() => noticeToast(doc));
+  const toast = noticeToast(doc);
+  assert.ok(toast, 'the warn toast is up');
+  assert.match(toast.querySelector('.td').textContent, /^Steps with no model now run on Worca's defaults \(Opus 5\.5 \/ Sonnet 5\.5 \/ Haiku 5\.5\)/);
+  assert.equal(toast.querySelector('.toast-act').textContent, 'Open Models');
+  assert.equal(doc.getElementById('confirm-modal').classList.contains('hidden'), true, 'no modal opens');
+  assert.equal(doc.getElementById('toasts').contains(doc.activeElement), false, 'the toast never takes focus');
+  await until(() => posts.some((p) => p.roleDefaultsNoticeSeen === true));
+  assert.ok(posts.some((p) => p.roleDefaultsNoticeSeen === true), `seen is recorded on show, before any click: ${JSON.stringify(posts)}`);
+  click(window, toast.querySelector('.toast-act'));
+  await settle();
+  assert.equal(window.location.hash, '#models/jobs');
+  assert.equal(noticeToast(doc), null, 'Open Models closes the toast');
+
+  const again = await boot({ onboarding: { ...seenWelcome, roleDefaultsNoticeSeen: true }, settings: { modelRoles: {}, roleDefaults: ROLE_DEFAULTS } });
+  await settle(10);
+  assert.equal(noticeToast(again.doc), null, 'seen: never again');
+  const allSet = { claude: { deep: { model: 'claude-opus-5-5' }, everyday: { cliDecides: true }, quick: { model: 'claude-haiku-5-5' } } };
+  const set = await boot({ onboarding: seenWelcome, settings: { modelRoles: allSet, roleDefaults: { claude: ROLE_DEFAULTS.claude } } });
+  await settle(10);
+  assert.equal(noticeToast(set.doc), null, 'every role set: nothing to say');
+  const welcome = await boot({ settings: { modelRoles: {}, roleDefaults: ROLE_DEFAULTS } });
+  await settle(10);
+  assert.equal(noticeToast(welcome.doc), null, 'the welcome is up: no notice over it');
+});
+
+test('fresh install: open -> setup done (earned) -> Start your first run -> at most 2 modal dialogs were ever opened before the first run, and no levels welcome exists (R-po-3)', async () => {
+  // The level the server serves: Curious from the first read (the wiring keeps only a view that holds a level), with its
+  // celebration only once setup is finished (earned on the ready screen).
+  let finished = false;
+  const curious = { index: 1, key: 'curious', name: 'Curious', hue: 235, avatar: '/img/curious.png', tagline: 't', description: 'd', hat: 'h', phrase: 'p', recap: 'r' };
+  const levelView = () => ({
+    count: 5, level: curious, setup: { finished, providerSignedIn: true, missing: finished ? [] : ['setup'] },
+    progress: null, next: [], nextLevel: { index: 2, key: 'runner', name: 'Runner' }, top: false, ladder: [{ index: 2, items: [{ label: '3 real runs', done: false }] }],
+    runner: { realRuns: 0, of: 3, stepsDone: 0, stepsOf: 6 },
+    welcome: { kind: 'new' },                                   // a server that still carries one: nothing may open for it
+    celebration: finished ? { ...curious, nextName: 'Runner' } : null, summary: null, nudge: null, modeSuggestion: null,
+  });
+  const { doc, window, levelCalls } = await boot({ onboarding: status(['claude'], { fresh: true }), levelView });
+  const opened = new Set();
+  const OPEN = '.viewer-modal:not(.hidden), dialog[open]';
+  const watch = () => { for (const n of doc.querySelectorAll(OPEN)) opened.add(n); };
+  const observer = new window.MutationObserver(watch);
+  observer.observe(doc.documentElement, { childList: true, subtree: true, attributes: true, attributeFilter: ['class', 'open', 'hidden'] });
+  watch();
+  try {
+    assert.ok(doc.getElementById('setup-modal'), 'the assistant is up');
+    // Walk the assistant to its Finish: every step's Next, then Finish with nothing to apply.
+    for (let i = 0; i < 12 && !doc.querySelector('#setup-modal .sa-continue'); i++) {
+      const next = await until(() => doc.querySelector('#setup-modal .sa-next:not([disabled])'), 1500);
+      if (!next) break;
+      finished = finished || next.textContent === 'Finish';
+      click(window, next);
+      await settle();
+    }
+    const go = await until(() => doc.querySelector('#setup-modal .sa-continue'));
+    assert.ok(go, 'the ready screen is up');
+    assert.equal(go.textContent, 'Start your first run');
+    click(window, go);
+    await settle(12);
+    watch();
+    assert.equal(doc.getElementById('setup-modal'), null, 'the assistant closed');
+    assert.equal(window.location.hash, '#new', 'and it went to the first run');
+    assert.ok(opened.size <= 2, `${opened.size} modal dialogs were opened: ${[...opened].map((n) => n.id || n.className).join(', ')}`);
+    // The ready screen was the welcome: #welcome-modal never opens after it (D-11, R-po-3), not even on the #new route.
+    assert.ok(doc.getElementById('welcome-modal')?.classList.contains('hidden') ?? true, 'the first-run welcome stays closed');
+    assert.equal(doc.querySelector('[data-dialog^="welcome"]'), null, 'no levels welcome dialog');
+    assert.deepEqual(levelCalls.filter((c) => c.url.includes('/events')), [], 'no page-view event is posted');
+  } finally { observer.disconnect(); }
 });

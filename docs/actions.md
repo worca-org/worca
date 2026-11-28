@@ -34,6 +34,18 @@ A run can be checked out when it ended `done`, `stopped` or `error`, is not arch
 branch, and kept no uncommitted work of its own. Paused and interrupted runs are refused: resume or
 stop them first.
 
+On a workspace run, the **Check out the changes** card lists only projects the run changed, and its
+header counts them ("2 of 5 projects changed"). The rest fold into one line, "3 projects had no
+changes", with nothing to click: their branches have no commits, so there is nothing to check out.
+A project that already has a checkout keeps its own row, changed or not, because its folder,
+Discard and Download patch live there. A project whose changes could not be decided, such as one from
+an older run, is listed, so no work is hidden.
+
+While a checkout's setup runs, its row shows a progress line: `Running setup: <the setup command> ·
+12s · usually ~20s`. The seconds count up live. The last part is how long the last setup took, and it
+is left out when there is none; with no setup command set the line just says
+"Running setup".
+
 
 ### When the branch is already checked out in your folder
 
@@ -176,6 +188,16 @@ Next to the project's own actions, each checkout offers four buttons (turn any o
 | Open folder | `open <dir>` (Finder) | `xdg-open <dir>` (needs a display) | `explorer.exe <dir>` |
 | Copy command | Copies the git commands that put the branch in your own clone (below) | | |
 
+The Diff tab's open controls use the Editor built-in too. While a run is live, **Open in <Editor>** above the diff
+opens the run's worktree (a workspace run: the `repos/` folder that holds every member worktree), and edits you make
+there go into the run. Each file's head has an open icon, on live and finished runs, which opens that file at its first
+changed line: in the live worktree, or in the run's checkout (a linked "Use that folder" folder too). On a finished run
+that is not checked out, one click checks it out first (or uses the folder that already has its branch), then opens the
+file. Deleted files, protected paths (`.env*`, `*.pem`, `**/secrets/**`, …), archived runs and runs that cannot be
+checked out get no icon. With no editor, the editor turned off for the project, or a hosted worca without
+`WORCA_ACTIONS_REMOTE=1`, neither control shows. The route is `POST /api/runs/:id/open-in-editor` (`{ member?, file?, line? }`);
+it never checks out by itself.
+
 ### Your own editor and terminal
 
 Settings › Runs › Actions › **Editor** and **Terminal** replace the detection. Each takes a command line,
@@ -185,6 +207,10 @@ Linux, `cmd.exe /d /s /c` on Windows), so arguments, quotes, `~`, `$VAR` / `%VAR
 - **`{folder}`** (or `{worktree}`) marks where the checkout folder goes, quoted for the shell. Without it the
   folder is added at the end, so a bare command such as `xed` works. `{branch}`, `{project}` and `{runId}`
   work too.
+- **`{file}`** and **`{line}`** place the file the Diff tab opens (quoted, absolute) and its first changed line
+  (digits), for example `subl {file}:{line}` or `idea {folder} --line {line} {file}`. Opening the whole folder,
+  `{file}` becomes the folder and `{line}` becomes `1`. A line with `{file}` gets no folder added at the end. A line
+  without `{file}` opens only the folder, even from a file's icon.
 - **A macOS app** (`/Applications/Xcode.app`, or just `Xcode.app`) opens with `open -a`.
 - **An unquoted path with spaces** at the start is quoted for you, such as
   `C:\Program Files\Microsoft VS Code\Code.exe --new-window`.
@@ -242,7 +268,9 @@ can check a run out by itself when it ends:
 | `until-pr` | Kept until its pull request is merged or closed. Checked at start-up and every hour; a run without a PR stays |
 
 A kept checkout skips setup until its first action, which runs setup first (the card says "Setup
-runs before the first action").
+runs before the first action"). A setup command added after a checkout was made with none (the Browser tab's
+Use this adds one) runs before that checkout's next action, unless an action of that project is running in the
+checkout (as **Run setup** refuses then) or the checkout is your own folder (setup runs there only when you ask).
 
 **Keep at most N** caps the number of checked-out runs. After every checkout and at start-up, the
 oldest checkouts beyond N are discarded. A run with a running action is never discarded, and
@@ -361,7 +389,9 @@ ones, and up to 40 log lines per instance.
   Editor and Terminal: it runs the line being edited, behind the same guards as saving it.
 - **cwd pinned.** `cwd` must stay inside the worktree: checked when the config is saved, and again
   before every spawn.
-- **Open links** are `http`/`https` only, checked on save and again before they are rendered.
+- **Open links** are `http`/`https` only, checked on save and again before they are rendered. A click opens
+  the address in a Browser tab of the tool panel, through the preview proxy for a local address
+  ([terminal.md](terminal.md#browser-tabs)); Ctrl- or middle-click opens your browser's own tab.
 - **Hosted (remote) mode.** Actions are refused with `403 ACTIONS_DISABLED` unless the server starts
   with `WORCA_ACTIONS_REMOTE=1`. It is an environment variable on purpose: in remote mode every
   signed-in person is an administrator of the UI (see [remote-access.md](remote-access.md#limits)),

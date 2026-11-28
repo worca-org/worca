@@ -3,7 +3,7 @@
 // claim someone else, and the PR body names the person (git/gh faked, no network).
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import http from 'node:http';
+import { appServer } from './helpers/app-server.mjs';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -48,7 +48,7 @@ before(async () => {
   ({ runs } = mod);
   ({ _testing: gitInfo } = await import('../src/core/git-info.mjs'));
   ({ readPipeline } = await import('../src/core/artifacts.mjs'));
-  srv = http.createServer(mod.app);
+  srv = appServer(mod.app);
   await new Promise((r) => srv.listen(0, '127.0.0.1', r));
   base = `http://127.0.0.1:${srv.address().port}`;
 });
@@ -88,7 +88,7 @@ test('a run records who started it, persisted on the pipeline row; the HTTP body
   await stopRun(await untilRecorded(second));
 });
 
-test('the PR body ends with who started the run', async () => {
+test('the PR body names nobody, even for a named starter', async () => {
   const dir = gitDir('attrib-pr');
   const r = await post('/api/run', { projectDir: dir, prompt: 'z', mock: true, humanInLoop: false }, { 'X-Forwarded-Email': 'grace@example.com' });
   const { runId } = await r.json();
@@ -114,5 +114,5 @@ test('the PR body ends with who started the run', async () => {
   const create = seen.find((c) => c[0] === 'gh' && c[1] === 'pr' && c[2] === 'create');
   assert.ok(create, JSON.stringify(seen));
   const body = create[create.indexOf('--body') + 1];
-  assert.match(body, /\n\n---\nStarted by grace@example\.com via worca$/);
+  assert.doesNotMatch(body, /Started by|via worca/);
 });

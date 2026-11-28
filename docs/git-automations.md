@@ -18,7 +18,8 @@ Two events are supported today:
 Editing an issue or a PR never starts a run. Neither do Worca's own comments or Worca's own PRs.
 
 A project's repository is its `origin` remote when that is on github.com or dev.azure.com, else the first remote
-that is. On Azure DevOps see [Azure DevOps](#azure-devops) for what each event means there.
+that is. A remote through a `~/.ssh/config` Host alias (`git@github-work:me/repo.git`) counts as the host the alias
+names, so with a fork cloned that way as `origin` the automations watch the fork, not `upstream`. On Azure DevOps see [Azure DevOps](#azure-devops) for what each event means there.
 
 ## Auto-handle
 
@@ -177,6 +178,11 @@ Only trusted authors start runs: OWNER, MEMBER or COLLABORATOR on the repository
 applies to review comments), plus the logins a rule adds. An issue from anyone else starts nothing and
 costs nothing; it shows in Activity as skipped. A maintainer starts it by adding the rule's trigger label
 (only people with triage access can label).
+
+Watch PR (the run's own watcher on a created PR) trusts the same authors for its inline review triggers, plus
+the logins in the project's **Pull requests › Reviewers that may trigger a fix** setting; PR-level comments count
+only from those listed logins, and only when a quick model check finds they ask for code changes (see
+[Runs › Watch PR](runs.md#watch-pr-and-conflicts)).
 
 On such a PR the label covers the code the maintainer looked at: once a review rule has reviewed it, a later push
 from the same author is skipped ("pushed after the trigger label") until a maintainer adds the label again (remove

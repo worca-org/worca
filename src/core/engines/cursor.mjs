@@ -29,9 +29,13 @@
 //   back when it ends (restoreCursorProjectFiles, G14). With --force, approval is deny-list only.
 // - unverified: the prompt is the last positional argument (no stdin mode is relied on); the agent can read a file
 //   outside its cwd when told to (the long-prompt staging relies on it).
+// - seen on cursor-agent 2026.11.11-b912975 (a real ~/.cursor, no spawn traced): Cursor HAS hooks. ~/.cursor/hooks.json
+//   holds user commands for beforeSubmitPrompt, preToolUse, postToolUse, postToolUseFailure, beforeShellExecution,
+//   beforeMCPExecution, afterAgentResponse and stop. worca neither writes nor reads them (`hookTelemetry` stays false),
+//   and no flag is known that turns the user's hooks off, so they may run on every spawn (and ~/.cursor/skills load).
 // - assumed absent (capability false): a system-prompt flag, an effort flag, a per-spawn tool allowlist, sub-agents,
-//   hooks, a skills folder, a turn or spend cap, and any switch that turns the shell or file tools off — so an Ask
-//   chat (CURSOR_ASK_LOCKDOWN) and a read-only spawn refuse.
+//   a skills folder worca can fill, a turn or spend cap, and any switch that turns the shell or file tools off — so
+//   an Ask chat (CURSOR_ASK_LOCKDOWN) and a read-only spawn refuse.
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
 import { execCli, cliRefusal } from './exec-cli.mjs';
 import { CURSOR_CLI } from './cli-specs.mjs';
@@ -46,6 +50,8 @@ import { ARGV_INLINE_LIMIT } from './claude.mjs';
 import { ENGINE_PROJECT_FILES, projectFileOwned, writeProjectFiles, restoreProjectFiles } from './project-files.mjs';
 import { makeChatDescriptor } from './chat-descriptor.mjs';
 export { excludeLine } from './project-files.mjs';
+import { sandboxMcpConfig } from '../exec-env/policy.mjs';
+import { CURSOR_CLI_CONFIG } from '../exec-env/relay-route.mjs';
 
 /** Read at call time (not import time), so a test or a server child can point it at a fake after import. */
 export const cursorDefaultBin = () => process.env.WORCA_CURSOR_BIN || 'cursor-agent';
@@ -89,18 +95,36 @@ function shellWord(rule) {
   const body = m[1].trim().replace(/(?::\*| \*)$/, '').trim();
   return /^[A-Za-z0-9._/-]+$/.test(body) ? body : null;
 }
-/** A Claude path rule body as Cursor's glob. Claude: `//abs` is absolute, `/rel` is relative to the project root
- *  (the run checkout is Cursor's cwd), `~/…`, `./…` and bare patterns as written. */
-const cursorPath = (body) => (body.startsWith('//') ? body.slice(1) : body.startsWith('/') ? `.${body}` : body);
+// A Claude path rule body as Cursor's glob, or null when Cursor cannot be told it. Claude: `//abs` is absolute, `~/…`
+// the home, `/rel` relative to the project root and `./rel` or a bare pattern relative to the cwd (both the run
+// checkout, Cursor's cwd).
+// Cursor (2026.11.11) matches a deny glob as an anchored regex, `*` any characters, against the path.resolve()d
+// absolute path, separators untouched. So a relative glob as written (`./rel`, `rel`) never matches anything: it is
+// written `**/rel`, any path ending in `/rel` (inside the checkout, and the same name deeper or elsewhere too: it
+// denies more, never less). A `../` body would need the checkout's parent and stays unenforced. On Windows the
+// resolved path is `C:\…`, which no `/` glob ever matches, so there every glob is written with backslashes:
+// `//**/x` as `**\x` (x at any depth, any drive or UNC share), another `//abs` as `*:\abs` (any drive), `~/x` as
+// `~\x` (Cursor expands `~` before a backslash too), a relative `x` as `**\x`. Cursor's `?` is a literal question
+// mark, never Claude's one character, so a `?` is written `*`: it denies more, never less.
+const cursorPath = (body, win) => {
+  const sep = (s) => { const g = s.replaceAll('?', '*'); return win ? g.replaceAll('/', '\\') : g; };
+  if (body.startsWith('//**/')) return sep(win ? body.slice(2) : body.slice(1));
+  if (body.startsWith('//')) return win ? `*:${sep(body.slice(1))}` : sep(body.slice(1));
+  if (body.startsWith('~/')) return sep(body);
+  const rel = body.startsWith('./') ? body.slice(2) : body.startsWith('/') ? body.slice(1) : body;
+  if (!rel || rel === '..' || rel.startsWith('../')) return null;
+  return sep(rel.startsWith('**/') ? rel : `**/${rel}`);
+};
 
 /**
  * What Cursor can be told of a run's DENY rules (allow / ask are never lifted). Every rule it is told is `partial`
  * (CURSOR_RULE_TERMS): the gate refuses those unless --allow-unguarded-engine, and the spawn still writes them.
  * @returns {{deny:string[], partial:string[], unenforced:string[]}}
  */
-export function cursorRulePlan(permissionRules) {
+export function cursorRulePlan(permissionRules, { platform = process.platform } = {}) {
+  const win = platform === 'win32';
   const out = { deny: [], partial: [], unenforced: [] };
-  const add = (token, rule) => { if (!out.deny.includes(token)) out.deny.push(token); out.partial.push(rule); };
+  const add = (token, rule) => { if (!out.deny.includes(token)) out.deny.push(token); if (!out.partial.includes(rule)) out.partial.push(rule); };
   for (const raw of Array.isArray(permissionRules?.deny) ? permissionRules.deny : []) {
     const rule = String(raw).trim();
     if (!rule) continue;
@@ -108,7 +132,8 @@ export function cursorRulePlan(permissionRules) {
     const word = shellWord(rule);
     if (word) { add(`Shell(${word})`, rule); continue; }
     const path = /^(Read|Edit|Write)\((.+)\)$/.exec(rule);
-    if (path && path[2].trim()) { add(`${path[1] === 'Read' ? 'Read' : 'Write'}(${cursorPath(path[2].trim())})`, rule); continue; }
+    const glob = path && path[2].trim() ? cursorPath(path[2].trim(), win) : null;
+    if (glob) { add(`${path[1] === 'Read' ? 'Read' : 'Write'}(${glob})`, rule); continue; }
     out.unenforced.push(rule);
   }
   return out;
@@ -329,7 +354,7 @@ export const CURSOR_RESUME_NOT_FOUND_RE = /(?:chat|conversation|session)[^.\n]*n
 export async function runCursorProcess({
   cwd = process.cwd(), systemPrompt = '', prompt = '', model, onEvent = () => {}, signal,
   bin = cursorDefaultBin(), resumeSessionId, sandbox, askLockdown, envScrub, envAllowlist, asAgent,
-  mcpConfigPath, spawnEnv: runSpawnEnv, redactValues, maxTurns, permissionRules, noGit = false,
+  mcpConfigPath, spawnEnv: runSpawnEnv, redactValues, maxTurns, permissionRules, noGit = false, tryGuard = null, execEnv,
 } = {}) {
   if (signal?.aborted) { const e = new Error('aborted'); e.name = 'AbortError'; throw e; }
   if (askLockdown) throw new Error(`${bin}: Cursor cannot be locked down for a chat (no switch for its shell or file tools) — Chat on Cursor is unavailable`);
@@ -346,6 +371,11 @@ export async function runCursorProcess({
   let chat = cursorChatOf(resumeSessionId);
   if (resumeSessionId && !chat) safeEmit(onEvent, { type: 'stderr', stream: 'err', text: `[worca] cursor: stored session ${JSON.stringify(String(resumeSessionId).slice(0, 12))}… is not a Cursor chat — starting a fresh one` });
 
+  // A remote run (exec-env, e2b): the template's cursor-agent, its calls through worca's model relay, which signs them
+  // with an access token worca exchanges for the server's CURSOR_API_KEY (neither enters the sandbox); no host guard;
+  // the run's url MCP servers only; the .cursor files written here as always (every ownership check holds), then
+  // mirrored into the sandbox checkout (the harness keeps them out of the sync tree, syncEngineFiles out of its git).
+  const remote = execEnv?.remote ? execEnv : null;
   // The checkout's .cursor files: deny rules and MCP servers (D3). Written before the spawn; a tracked file throws.
   const plan = cursorRulePlan(permissionRules);
   const files = {};
@@ -354,12 +384,34 @@ export async function runCursorProcess({
   if (mcpConfigPath) {
     let doc;
     try { doc = JSON.parse(readFileSync(mcpConfigPath, 'utf8')); } catch (err) { throw new Error(`${bin}: cannot read the MCP config ${mcpConfigPath}: ${err.message}`); }
+    if (remote) doc = sandboxMcpConfig(doc).config;
     servers = doc && typeof doc.mcpServers === 'object' && doc.mcpServers && Object.keys(doc.mcpServers).length ? doc.mcpServers : null;
     if (servers) files['.cursor/mcp.json'] = `${JSON.stringify(cursorMcpDocument(servers), null, 2)}\n`;
   }
   writeCursorProjectFiles(cwd, files, { git: !noGit });
 
-  const guardOn = hostGuardEnabled();
+  if (remote && bin !== 'cursor-agent') safeEmit(onEvent, { type: 'stderr', stream: 'err', text: `[worca] cursor: ${bin} (this machine's binary) is ignored; the ${remote.label} runs its own pinned cursor-agent` });
+  const exe = remote ? 'cursor-agent' : bin;
+  const guardOn = hostGuardEnabled() && !remote;
+  // CURSOR_API_KEY (and any CURSOR_ var) survives scrub; the run env carries the MCP servers' ${env:…} values.
+  // Workflow tests 3a (D56): a try's outward guard (stand-ins first on PATH, git with no sign-in); absent ⇒ unchanged.
+  const { env } = composeSpawnEnv({ envScrub, envAllowlist, prefixes: ['CURSOR_'], runEnv: cleanRunEnv(runSpawnEnv) ?? undefined, hostPid: guardOn ? process.pid : null,
+    ...(tryGuard ? { tryGuard } : {}) });
+  // In a sandbox only the kept MCP servers' ${env:…} values ride along (the run env holds every registry secret).
+  // The relay route and the template's cursor-agent come first, then its config dir (CURSOR_CONFIG_DIR: the HTTP/1.1
+  // agent stream the relay can carry) and the .cursor files: a refusal leaves nothing in the sandbox.
+  let childEnv = env;
+  let relayRoute = null;
+  if (remote) {
+    try {
+      relayRoute = remote.openEngineRoute('cursor', { spawnEnv: env, model });
+      const routed = remote.envFor(env, { engine: 'cursor', keep: remote.mcpEnvRefs, route: relayRoute });
+      await remote.ensureCli(exe);
+      childEnv = { ...routed, ...(await remote.engineHome('cursor', { files: [{ rel: 'cli-config.json', data: CURSOR_CLI_CONFIG }] })) };
+      await remote.syncEngineFiles(Object.keys(files).map((rel) => join(cwd, rel)));
+    } catch (err) { if (relayRoute) remote.closeModelRoute(relayRoute.id); throw redacted(err); }
+    onEvent = remote.meteredEvents(relayRoute.id, onEvent);
+  }
   const sys = guardOn ? [hostGuardSystemPrompt(process.pid), systemPrompt].filter(Boolean).join('\n\n') : systemPrompt;
   // No system-prompt flag (capability false): the system prompt is folded into the prompt behind a delimiter.
   const full = sys ? `=== SYSTEM ===\n${sys}\n=== END SYSTEM ===\n\n${String(prompt ?? '')}` : String(prompt ?? '');
@@ -375,15 +427,18 @@ export async function runCursorProcess({
     positional = `Your complete instructions are too long for the command line: read the whole file ${staged} first, then follow it exactly as if it were this message.`;
   }
 
-  // CURSOR_API_KEY (and any CURSOR_ var) survives scrub; the run env carries the MCP servers' ${env:…} values.
-  const { env } = composeSpawnEnv({ envScrub, envAllowlist, prefixes: ['CURSOR_'], runEnv: cleanRunEnv(runSpawnEnv) ?? undefined, hostPid: guardOn ? process.pid : null });
-
   // G14: what the agent changed in worca's .cursor files during a spawn is put back before the next one (or a retry).
-  const restore = () => {
+  // A remote spawn changed the sandbox's mirror, not this checkout: worca's copy is mirrored there again.
+  const restore = async () => {
     let changed;
     try { changed = restoreCursorProjectFiles(cwd, files, { git: !noGit }); } catch (err) {
       safeEmit(onEvent, { type: 'stderr', stream: 'err', text: `[worca] cursor: could not restore worca's .cursor files: ${err.message}` });
       return;
+    }
+    if (remote) {
+      try { await remote.syncEngineFiles(Object.keys(files).map((rel) => join(cwd, rel))); } catch (err) {
+        safeEmit(onEvent, { type: 'stderr', stream: 'err', text: `[worca] cursor: could not restore worca's .cursor files in the ${remote.label}: ${redacted(err).message}` });
+      }
     }
     if (changed.length) safeEmit(onEvent, { type: 'stderr', stream: 'err', text: `[worca] cursor: the agent changed ${changed.join(' and ')} during the spawn — worca put its own copy back` });
   };
@@ -400,7 +455,8 @@ export async function runCursorProcess({
     try {
       res = await superviseSpawn({
         cli: CURSOR_CLI,
-        file: bin, args, displayBin: bin, cwd, env, stdin: null, signal: spawnSignal, asAgent, stagedDir, onEvent,
+        file: exe, args, displayBin: bin, cwd, env: childEnv, stdin: null, signal: spawnSignal, asAgent: remote ? false : asAgent, stagedDir, onEvent,
+        execEnv: remote,
         cleanup: () => {},
         stdoutErrorDetail: () => normalizer.finish().error || '',
         classify: (m) => classifyCursorError(m),
@@ -426,7 +482,7 @@ export async function runCursorProcess({
         throw err;
       });
     } finally {
-      restore();
+      await restore();
     }
     const final = normalizer.finish();
     if (capped && !signal?.aborted) throw turnCap();
@@ -450,6 +506,7 @@ export async function runCursorProcess({
     throw redacted(err);
   } finally {
     if (stagedDir) rmSync(stagedDir, { recursive: true, force: true });
+    if (relayRoute) remote.closeEngineRoute(relayRoute.id, onEvent);
   }
 }
 

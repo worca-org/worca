@@ -47,7 +47,8 @@ model, **Change where it runs** in the model form's foot makes the choice again
 ### Harnesses, providers and models
 
 A **harness** runs the agents: Claude Code, Codex, Copilot, Cursor, Gemini CLI, Goose,
-OpenCode or Qwen Code, picked per run (see [Engines](#engines)). A **provider** is where a model's tokens are billed: a harness's own
+OpenCode or Qwen Code, picked per run (see [Engines](#engines)), and per step when a step's model names one (see
+[Per-step harness](#per-step-harness)). A **provider** is where a model's tokens are billed: a harness's own
 sign-in, or an endpoint. A **model** sits on one provider. Which harnesses can
 run a model follows from its connection, never from a setting:
 
@@ -108,28 +109,67 @@ Agents run on Claude Code by default. The other engines are all in **beta**: Ope
 [CLI agent](#cursor), Google's [Gemini CLI and Qwen Code](#gemini-cli-and-qwen-code),
 [Goose](#goose) and [OpenCode](#opencode).
 
-- Pick one per run with **Engine** on New pipeline (Advanced) or
+- Pick the run's **default harness** with **Default harness** on New run (Advanced) or
   `--engine claude|codex|copilot|cursor|gemini|goose|opencode|qwen`, or set a default with
   **Default for new runs** (a harness group's ⋯ menu on Models › Catalogue, or beside the
-  harness tiles on Models › Jobs) or in a project's settings.
+  harness tiles on Models › Jobs) or in a project's settings. A step whose model pick names a harness runs there
+  instead ([Per-step harness](#per-step-harness)).
 - Each needs its own CLI installed and signed in; each section below says how.
 - The beta engines hold guardrail rules only in part, so a run under Normal or Strict needs
   **Allow unguarded** (`--allow-unguarded-engine`), or Permissive (`--guardrails permissive`); the partial
-  rules still apply, and the run log lists what is held.
+  rules still apply, and the run log lists what is held. One consent covers every harness the run uses, a Claude
+  Code run with one step on Codex included.
 - Copilot, Cursor, Gemini CLI and Qwen Code report no dollar cost; Goose and OpenCode price
   what they know. Each section's **Cost** note says how worca shows it.
 - Chat runs on every engine but Cursor ([Chat](#chat)).
 - A model's connection decides which engines can run it
   ([Harnesses, providers and models](#harnesses-providers-and-models)).
 
-![New pipeline in Advanced mode for the nimbus-crm project: the Workflow picker on Auto beside the Engine picker set to Codex (Beta), the hint that Codex runs this pipeline including titles and summaries, a typed task to add an Idempotency-Key header to POST /contacts, and the Branches table starting from main, up to date](screenshots/engine-picker.png)
+![New run in Advanced mode for the nimbus-crm project: the Workflow picker on Auto beside the Engine picker set to Codex (Beta), the hint that Codex runs this pipeline including titles and summaries, a typed task to add an Idempotency-Key header to POST /contacts, and the Branches table starting from main, up to date](screenshots/engine-picker.png)
+
+### Per-step harness
+
+A model pick can name the harness it runs on: `engine` beside `model` (`claude`, `codex`, `copilot`, `cursor`,
+`gemini`, `goose`, `opencode`, `qwen`). That step runs there whatever the run's default harness; a pick without
+`engine` runs on the default harness, as before.
+
+- **Where.** A workflow's agent node (`config.engine`) and review role (`roleReview.roles[i].engine`), a project's node
+  and role picks (`PATCH /api/config`), the Default workflow's per-role steps (`POST /api/config`) and a run overlay
+  (`overlay.nodes.<id>.engine`, `….roles.<key>.engine`). Presets, a run's saved setup and **Rerun** keep it.
+- **Where to pick.** The Workflows view, the Chat run card, New run › Advanced › Agents and Requirements › **Set up
+  this run** open the same harness › provider › model picker. It lists the harnesses that are ready (installed and
+  signed in, and not turned off by the [credential broker](credential-broker.md)), plus the run's default harness and
+  the harness of the step's current pick, ready or not. Until the readiness is read, it lists every harness.
+- **It travels with its model.** A layer that names another model leaves the lower layer's `engine` behind. A `PATCH`
+  without `engine` keeps it while the model stays the same and clears it when the model changes or is cleared; `null`
+  or `''` clears it.
+- **Checked where it is set.** The model must run on that harness, or the write is refused. A saved pick whose model has
+  since left that harness stays saved; at start it is dropped like any other, and the warning names that harness.
+- **Start checks cover every harness the run uses:** sign-in, the credential broker, the guardrail rules each can hold,
+  MCP servers and the capability lines, each naming its steps on a mixed run (`engine codex (Plan): …`), all before the
+  run exists.
+- **A pin is set.** A Settings step slot and Care's model fill skip a step whose workflow pick names a harness; a
+  workflow pick without one ranks below them, as before.
+- **One harness per remote run and per Auto run.** Picking E2B or Docker for a run whose steps use more than one
+  harness is refused: pick Local. A saved remote default runs such a run locally and says why. An Auto run drops a pin
+  to another harness in the workflow it adopts, runs that step on its default harness and says so once.
+- **Sessions.** The steps of one session must share a harness; otherwise they run as separate sessions.
+- **Pauses.** A usage limit names the harness of the step that hit it. Continuing on another harness (`--engine`, or
+  **Resume on …**, the run's own default harness included) moves every remaining step there, pinned ones included; a
+  plain resume keeps each step on its own. **Switch model…** runs every remaining step on the model you pick, on the
+  run's harness.
+- **Cost.** A run that used a harness that reports no cost reads *cost partly unknown*; a step on such a harness shows
+  no cost, never $0.00. The run page names the default harness and the others, and a step's model pill ends in
+  *· on <harness>* when it ran off the default.
+- Chat proposes models for the run's default harness only.
 
 ## The Catalogue tab
 
 **Models › Catalogue** lists the catalog, one group per harness. Claude Code,
 OpenAI Codex and GitHub Copilot ship built-in models, so they always have a
-group; another harness gets one once it has a model. A model that runs on two
-harnesses shows in both groups and is counted once.
+group; another harness gets one once it has a model (**Add model** › *A sign-in*
+adds the first). A model that runs on two harnesses shows in both groups and is
+counted once.
 
 - **A group's head** names the harness, its counts (built-in, *custom*, *built-in
   hidden*), the chips *Default* and *Beta*, and its state, *Ready* or *Not ready*.
@@ -346,9 +386,11 @@ Where a slot looks, in order:
 
 - **Steps:** the node's own pick, the project's step model, your or the team's
   step model, the workflow template's own model, then the role, else Worca's
-  factory default for that slot. A run started
+  factory default for that slot, else Worca's default for the role (see
+  [When a role is empty](#when-a-role-is-empty)). A run started
   with its own model (`--model`) uses that model for every unset step instead
-  of the role, and an Auto run skips the role, as it skips your step models.
+  of the role, and an Auto run skips your roles, as it skips your step models,
+  but a stage the Auto classifier leaves empty still gets Worca's default.
 - **Helper jobs:** the job's own setting, then the role, then Worca's factory
   default where the job has one, then today's fallback (for titles: the run's
   model, then the built-in Haiku). Memory defragment and the workspace scan read
@@ -360,9 +402,9 @@ design's own pick in its composer wins over the row (see [Design › Models](des
 
 Roles are kept per harness (`modelRoles.claude`, `modelRoles.codex`,
 `modelRoles.copilot`, … one per engine): a Claude run never reads the Codex
-roles, and a harness with no roles keeps today's fallbacks. With no
-`modelRoles` at all, every slot resolves exactly as it did before roles
-existed. Every engine has roles, so a Copilot, Cursor, Gemini CLI, Qwen Code,
+roles, not even for a step pinned to Codex: that step's own pick names its model. An empty role on Claude Code or Codex runs Worca's default for it (below);
+on every other harness the tool picks its own model. Nothing in `settings.json`
+is rewritten for this. Every engine has roles, so a Copilot, Cursor, Gemini CLI, Qwen Code,
 Goose or OpenCode run takes its steps' models from that engine's roles. Helper
 jobs still run on Claude or Codex only, so the other engines' roles cover
 steps and Chat. On OpenCode, which refuses a step that names no model, roles
@@ -385,6 +427,55 @@ curl -X POST http://localhost:4317/api/settings -H 'Content-Type: application/js
 `null` clears a role (`{ "modelRoles": { "claude": { "quick": null } } }`).
 Chat's `change_setting` sets the same values as `models.<harness>.roles.<role>`.
 
+### When a role is empty
+
+A step or helper job with no model anywhere used to spawn with no `--model`, so
+Claude Code's own default ran. On some accounts that default is a premium model
+(Fable 5.2), which a run then used without anyone choosing it. Now an empty role
+resolves, at run time, to Worca's default:
+
+| Role | Claude Code | Codex (derived from the catalog by price tier) |
+|---|---|---|
+| Deep thinking | Opus 5.5 | the cheapest top-tier model (`gpt-5.6-sol` today) |
+| Everyday tasks | Sonnet 5.5 | the cheapest strong-tier model, Codex's own default on a tie (`gpt-6.1-sol`) |
+| Quick jobs | Haiku 5.5 | the cheapest model that is not free and takes tool calls (`gpt-6-luna`) |
+
+A Worca default carries no effort and is never a premium model. It applies on
+Claude Code unless it is signed out (a Claude id cannot run then), and on Codex
+always. A paused run started before this change resumes on these defaults too.
+Helper jobs that already had a default of their own keep it: Titles, Memory
+defragment, Workspace scan and, on Claude Code, the Auto workflow classifier
+(Sonnet 5), Run naming, Command summaries and the Requirements interview.
+`GET /api/settings` returns them as `roleDefaults` (with `claudeAuth`), and
+`GET /api/run-defaults` returns `effectiveRoles` per engine and role
+(`source`: `role`, `worca-default`, `cli-decides` or `tool-decides`). The run
+log names each step that runs on a Worca default; the audit keeps only the
+warnings (the tool decides, or Claude Code is signed out).
+
+- **Let Claude Code decide** (Codex: **Let Codex decide**) keeps the old
+  behaviour for one role: it is stored as `{ "cliDecides": true }` and spawns
+  with no model flag. A team policy cannot set it; a shared team setup leaves it
+  out.
+- **Copilot, Cursor, Gemini CLI, Qwen Code, Goose and OpenCode** (and Claude Code
+  signed out) pick their own model when a role is empty. Models › Jobs, the run
+  card and the run log say "<tool> decides: Worca can't know which model runs".
+- **Premium guard.** Before a step runs on a premium model nobody chose (a Worca
+  or factory default, an Auto classifier pick), the run pauses with
+  `model_confirm`; `--yes` runs pause too, and nothing resumes it by itself. It
+  also stops a step right after its `[init]` line when Claude Code started a
+  premium model nobody chose, or a different model than was asked for (an alias,
+  a routed model and a session-group member are never compared). **Continue on
+  <model>** (`POST /api/resume { "confirmModel": "<id>" }`, or
+  `worca resume <id> --confirm-model <model>`) runs it, and the run does not ask
+  again for that model; **Switch model and continue…** (`worca resume <id>
+  --model <model>`) picks another, and a model you pick there counts as chosen. Under Let Claude Code decide a premium pick is only logged.
+- **Onboarding.** The setup assistant preselects the defaults for each empty
+  role, and an install that already has an empty role sees a one-time notice.
+
+Known gaps: a session-group member runs on its Chat host's model and gets no
+`[init]` guard, and a model-less spawn (Let Claude Code decide, or a harness
+that decides) is not list-priced in Design's cost estimate.
+
 ### Built-in workflows take their models from the Models page
 
 The built-in workflows name no model. Each model they used to pin is now a
@@ -398,6 +489,7 @@ their factory default applies to role reviews only:
 | Models › Jobs › Steps › Requirements Review | role reviews of the requirements (Shaper with requirements first) | Sonnet 5.5 · medium |
 | Models › Jobs › Helper jobs › Second-opinion reviewer | the one role a role review names as its second opinion (Shaper's Product reviewer) | Opus 5.5 · medium |
 | Models › Jobs › Helper jobs › Memory defragment | the Memory defragment run | Sonnet 5 |
+| Models › Jobs › Helper jobs › Guide | the quick check of a Shaper prompt in the chat composer (`shaperSmallRuns`) | the cheapest ready Claude model |
 | Settings › Runs › Workspaces | the workspace scan | your Everyday tasks role (else Sonnet 5 · medium), project agents `sonnet` · medium |
 
 The factory default comes after your role: a node pick, a project pick, your
@@ -451,15 +543,44 @@ that folds open, with a one-line summary and its state; its buttons end with
 **Save**. A provider is account-level state that every model bridged through it
 shares.
 
-**GitHub Copilot.** *Account* (Individual, Business or Enterprise: it picks the
-API host when the sign-in does not name one) and *Max concurrent requests*.
-**Sign in** shows an 8-character device code: enter it at
-github.com/login/device and the row flips to *Connected*. Worca stores the GitHub
+**GitHub Copilot.** *Account* (Individual, Business, Enterprise or GHE.com
+tenant: it picks the API host when the sign-in does not name one) and *Max
+concurrent requests*. **Sign in** shows an 8-character device code: enter it at
+the address shown (github.com/login/device, or your tenant's, see below) and the
+row flips to *Connected*. Worca stores the GitHub
 token in `~/.worca-cc/settings.json` (or reads it from your shell as `${VAR}`) and
 exchanges it for Copilot's short-lived token in memory, refreshed before it
 expires. **Refresh usage** shows the premium-request quota, **Import models**
 opens Add model's Copilot list ([Import from Copilot](#import-from-copilot)), and
 **Sign out** asks first.
+
+*GHE.com tenant (data residency).* The fourth account type is for a GitHub
+Enterprise Cloud tenant at `<tenant>.ghe.com`. Choosing it reveals a **GHE.com host**
+field (`acme.ghe.com`; an `https://` prefix and a trailing `/` are accepted, any
+path, port or credentials are refused) and *Save host* stores the type and the host
+together. Then everything goes to the tenant, and nothing to github.com: sign-in on
+`<tenant>.ghe.com` (the device code and the address to enter it at come from there),
+`/user`, the token exchange, the quota and the model list on `api.<tenant>.ghe.com`,
+and requests on the gateway the exchange names (`endpoints.api`) when it is GitHub's
+(`*.<tenant>.ghe.com` or `*.githubcopilot.com`), else `copilot-api.<tenant>.ghe.com`.
+A sign-in belongs to one GitHub host, so changing the host or the account type to or
+from GHE.com signs you out in the same save (the row asks first and says so);
+Individual, Business and Enterprise keep the sign-in. The same fields exist on the
+CLI, `worca models set copilot accountType=ghe-com enterpriseHost=acme.ghe.com`, and
+Ask Worca can propose them. A `ghe-com` block with no valid host refuses to sign in,
+list models or run: it never falls back to github.com. Self-hosted GitHub Enterprise
+Server (`/api/v3`) is not supported, and the Copilot CLI engine keeps its own
+`copilot login --host`. Verify the Copilot app is allowed on your tenant: if
+GitHub refuses the sign-in, the message names the host and asks you to check that.
+
+A *"the sign-in on `<host>` worked, but GitHub refused Copilot access"* message means
+the sign-in succeeded and GitHub's Copilot token exchange answered 401/403. It quotes
+GitHub's own reason (and the single-sign-on link when there is one) and is also
+written to the server log. A missing Copilot seat or a policy that blocks this editor
+is your enterprise admin's to fix; GitHub's *"enable your managed account for Copilot
+Business"* means the account has no seat. Nothing is stored after such a refusal, so
+the next attempt is a fresh sign-in. *"Rejected the stored token — sign in again"* is
+only for a sign-in that was saved and later stopped working.
 
 **OpenRouter.** *API key*, *Max concurrent requests*, *Provider order*, *Sort
 providers by* and *Allow other providers when these are unavailable*, with
@@ -563,6 +684,14 @@ Copilot entries are pinned *Free* and Worca counts the requests a run
 initiated instead (the cost pill reads `$0 · N requests`). A generic
 OpenAI-compatible entry is flagged *cost not verified* until you pin a
 per-million-token price on it.
+
+Fable 5.2 (`claude-fable-5-2`, $8 / $40 per Mtok) and Fable 5.1 are premium-tier
+models. Worca never picks one by itself: the premium guard pauses a run before
+it would use one nobody chose ([When a role is empty](#when-a-role-is-empty)).
+When a usage limit is one model's own ("You've hit your Fable limit"), the
+pause records it (`limitScope: "model"`, `limitModel`), and **Switch model and
+continue…** offers the other models on the same sign-in, so the resume does not
+fail the same way.
 
 ## Importing models
 
@@ -706,6 +835,21 @@ free model touching only the pipeline steps. Command summaries' redaction is bes
 switch in Settings › Chat turns the job off. A changed Command summaries model applies to new
 commands within a minute, while lines already written stay until a restart.
 
+*Guide* is the quick check of a Shaper prompt in the chat composer, listed under Helper jobs only
+while the shaperSmallRuns flag is on (`shaperSmallRuns`). It takes a model and an effort, on the
+Claude Code tile only (`guideModel`, user-level); unset, it runs on the cheapest ready Claude model
+at its lowest effort. Change it at Models › Jobs › Helper jobs › Guide: the composer's Guide switch
+names the model in its tooltip and follows a save without a reload. Guide is asked the prompt
+alone: no chat, no files, no role name and no tools, from an empty folder. It checks five things in
+the asker's wording, plain for Product, UX and Compliance and technical otherwise: who it is for,
+what they get, what starts it, its limits and how you know it worked. For each check it returns
+covered or one open question, plus a size of small, medium or large. A prompt over 8000 characters
+is not sent, and with the Guide switch off nothing is sent. Write it out asks the same model for one short line per
+open gap and nothing else; it never returns the prompt, so the written text is your prompt unchanged plus one
+"(suggested)" line per filled gap. The check's wording follows the role picked in the composer's role picker, the
+composer shows the size as "Large: several runs", "Medium: a few runs" or "Small: one run", and Add on a gap row puts
+your own answer in with no model call.
+
 The *Requirements interview* helper (the Requirements page's product briefs, code looks and interview
 rounds) runs on Claude only and is set per user. Unlike Memory defragment, it takes an effort without a
 model: the default model then runs at that effort. A model picked with no effort runs at that model's own default effort. A model removed from the
@@ -721,7 +865,7 @@ tool round trip, each helper call and each retry — so a small pipeline run tak
 | --- | --- |
 | The account menu, last row of the spend card | *Free requests today 941 / 1000*; amber below 10%, red at 0, the reset on hover; it opens the OpenRouter row on Models › Providers. Only with a `:free` model in the catalog |
 | A run's cost pill | *$0 · 87 free requests* for a run that used `:free` models |
-| New pipeline form | a warning when a node's model is `:free` and fewer requests are left than this install's typical run (the median of its recent runs; 90 before it has any) |
+| New run form | a warning when a node's model is `:free` and fewer requests are left than this install's typical run (the median of its recent runs; 90 before it has any) |
 | The Models › Providers tab | the allowance in the OpenRouter row, read when the tab opens |
 
 The count is OpenRouter's own (`GET /api/v1/key`, `free_model_daily_requests`), read
@@ -938,9 +1082,9 @@ because the CLI is signed out, worca says so instead of showing the bare error.
 
 worca can run pipelines and chats on OpenAI's Codex CLI.
 
-1. Install the `codex` CLI (or use the one bundled with the ChatGPT desktop app) and make sure worca finds it: on `PATH`, or `WORCA_CODEX_BIN=/path/to/codex` in worca's environment. On Windows an npm install needs no `WORCA_*_BIN`: worca runs the package's native `.exe` when it finds one next to npm's `.cmd` shim, else `node <entry script>` from the shim (never a shell), and the variable may point at a `.exe` or a `.cmd`.
+1. Install the `codex` CLI (`npm install -g @openai/codex`, or use the one bundled with the ChatGPT desktop app) and make sure worca finds it: on `PATH`, or `WORCA_CODEX_BIN=/path/to/codex` in worca's environment. On Windows an npm install needs no `WORCA_*_BIN`: worca runs the package's native `.exe` when it finds one next to npm's `.cmd` shim, else `node <entry script>` from the shim (never a shell), and the variable may point at a `.exe` or a `.cmd`.
 2. Sign in once in a terminal: `codex login`. `codex login status` must say you are logged in.
-3. Pick Codex per run on New pipeline, or as a default with **Default for new runs** (Models › Catalogue or Models › Jobs). For Chat, Settings › Chat › Engine & models.
+3. Pick Codex per run on New run, or as a default with **Default for new runs** (Models › Catalogue or Models › Jobs). For Chat, Settings › Chat › Engine & models.
 
 On a Codex run the helper jobs (titles, the run overview, the PR description, the Auto workflow classifier, and Away mode's night decider) run on Codex too, read-only with codex's shell switched off, because they read text worca did not write. These jobs need a codex that knows `--disable shell_tool` and `--disable unified_exec` (`codex-cli 0.146` does).
 
@@ -951,7 +1095,7 @@ On a Codex run the helper jobs (titles, the run overview, the PR description, th
 **MCP servers on Codex.** A pipeline's MCP servers attach to its Codex nodes, with these limits:
 
 - Codex takes stdio servers only. A remote (HTTP/SSE) server from the MCP registry refuses the run; one from a project's `.mcp.json` is skipped with a warning.
-- The servers in the checkout's own `.mcp.json` attach only when Claude Code would run them without asking: those named in `enabledMcpjsonServers`, or all of them with `enableAllProjectMcpServers: true`, minus those in `disabledMcpjsonServers`. An approval counts only where a repository cannot put one: `~/.claude/settings.json`, your answers to Claude Code's own approval prompt (kept for the project in `~/.claude.json`), the project's `.claude/settings.local.json` while git does not track it, and Claude Code's managed settings. Claude Code ignores a repository's own approvals in a folder you have not trusted, and worca cannot tell which folders you trust. The committed `.claude/settings.json` can only restrict: its `disabledMcpjsonServers` and an `enableAllProjectMcpServers: false` still apply. The run names the servers it leaves out for want of approval, and so does New pipeline before Start. The project's **Sets** tab lists the servers with their status, and **Approve** names one in the project's `.claude/settings.local.json`, keeping that file out of git. Their `${VAR}` references are filled the way Claude Code fills them, as for any other server on Codex.
+- The servers in the checkout's own `.mcp.json` attach only when Claude Code would run them without asking: those named in `enabledMcpjsonServers`, or all of them with `enableAllProjectMcpServers: true`, minus those in `disabledMcpjsonServers`. An approval counts only where a repository cannot put one: `~/.claude/settings.json`, your answers to Claude Code's own approval prompt (kept for the project in `~/.claude.json`), the project's `.claude/settings.local.json` while git does not track it, and Claude Code's managed settings. Claude Code ignores a repository's own approvals in a folder you have not trusted, and worca cannot tell which folders you trust. The committed `.claude/settings.json` can only restrict: its `disabledMcpjsonServers` and an `enableAllProjectMcpServers: false` still apply. The run names the servers it leaves out for want of approval, and so does New run before Start. The project's **Sets** tab lists the servers with their status, and **Approve** names one in the project's `.claude/settings.local.json`, keeping that file out of git. Their `${VAR}` references are filled the way Claude Code fills them, as for any other server on Codex.
 - Other servers Claude Code loads on its own (user scope, plugins) are not attached on Codex.
 - Codex gives all of a run's servers one shared environment. Copies of a registry server, such as two GitHub copies with their own `GITHUB_TOKEN`, each get their own variable names there, so they attach side by side. Two other servers may not declare the same variable with different values.
 
@@ -1027,9 +1171,9 @@ copilot login                    # follow the prompts to sign in to GitHub
 native `.exe` when it finds one next to npm's `.cmd` shim, else `node <entry script>` from the shim (never a shell),
 and the variable may point at a `.exe` or a `.cmd`.
 
-**Use it.** Pick Copilot per run under **Engine** on New pipeline (Advanced), or run `worca --engine copilot …`. To
-make it the default, use **Default for new runs** (Models › Catalogue or Models › Jobs) or a project's Settings. For
-Chat, use Settings › Chat › Engine & models.
+**Use it.** Pick Copilot per run under **Default harness** on New run (Advanced), or run
+`worca --engine copilot …`. To make it the default, use **Default for new runs** (Models › Catalogue or Models › Jobs)
+or a project's Settings. For Chat, use Settings › Chat › Engine & models.
 
 **Models.** The models `copilot --model` takes are built-in catalog entries on the Copilot sign-in, listed in the GitHub Copilot group of Models › Catalogue under *Built in · Copilot sign-in*. Their catalog id is `copilot/<Copilot's id>`, such as `copilot/gpt-5.5` or `copilot/claude-sonnet-5.5`. Copilot's own ids clash with Codex's built-ins (`gpt-5.5`) and look like Claude's, and the catalog keeps one entry per id. Copilot is handed its own id. To add a model Copilot gained after this list, use **Add model** › *A sign-in* › **GitHub Copilot**.
 
@@ -1097,7 +1241,7 @@ worca can run pipelines on Cursor's headless CLI agent. Chat does not run on Cur
 
 1. Install the Cursor CLI (`cursor-agent`) and make sure worca finds it: on `PATH`, or `WORCA_CURSOR_BIN=/path/to/cursor-agent` in worca's environment. On Windows a `.cmd`/`.bat` launcher on `PATH` is resolved too (never through a shell), and the variable may point at a `.exe` or a `.cmd`. The `cursor` command that opens the editor is not the agent.
 2. Sign in once in a terminal: `cursor-agent login`. `cursor-agent status` must say you are logged in. Or set `CURSOR_API_KEY` in worca's own environment; worca passes it to Cursor and stores nothing.
-3. Pick Cursor per run on New pipeline, or as a default with **Default for new runs** (Models › Catalogue or Models › Jobs). Each harness tile on Models › Jobs shows whether that engine is ready.
+3. Pick Cursor per run on New run, or as a default with **Default for new runs** (Models › Catalogue or Models › Jobs). Each harness tile on Models › Jobs shows whether that engine is ready.
 
 **Models.** worca ships no Cursor models. With no model set, Cursor runs your account's default. To pick one, use **Add model** › *A sign-in* › **Cursor** with the id Cursor expects (for example `sonnet-4.5`). Cursor models take no env, no endpoint and no effort. A model id that looks like a Claude id (`sonnet-4.5`) only reaches Cursor when it is in the catalog on the Cursor harness; otherwise worca treats it as Claude's and the run uses Cursor's default (the run log says so). An id that is already a built-in (a Claude model or a Codex model such as `gpt-5.6-sol`) cannot be added as a Cursor model.
 
@@ -1119,7 +1263,7 @@ worca can run pipelines on Cursor's headless CLI agent. Chat does not run on Cur
 
 **Usage limits.** A usage limit is the allowance of whoever the step ran on:
 
-- **A harness's own sign-in** (your Claude Code, ChatGPT or Cursor subscription): the paused run offers to continue on each other harness that is ready (installed and signed in). From the command line every other harness is listed; the resume refuses one that is not ready.
+- **A harness's own sign-in** (your Claude Code, ChatGPT or Cursor subscription): the paused run offers to continue on each other harness that is ready (installed and signed in); the limit is the harness of the step that hit it, and continuing moves every remaining step to the new harness, steps set to another harness included. From the command line every other harness is listed; the resume refuses one that is not ready.
 - **A provider or a custom endpoint** (a gateway's quota, an API key's limit): the pause names the provider (*OpenAI-compatible limit — …*). No other harness is offered: it would reach the same provider.
 - **Either way**, *Switch model…* (the run page's banner and the Resume menu) picks a model on another connection, and every remaining step of the run runs on it. From the command line: `worca resume <id> --model <model id>`. It must be a catalog model the run's harness can run.
 
@@ -1137,7 +1281,7 @@ Verified on Gemini CLI 0.63.0 and Qwen Code 0.25.0. The captured streams and eve
    - **Qwen Code:** run `qwen` once in a terminal and choose how it signs in, or set a whole provider in worca's environment or `~/.qwen/.env` (for example `OPENAI_API_KEY`, `OPENAI_BASE_URL` and `OPENAI_MODEL`). A key alone is not enough: Qwen Code then stops with "No auth type is selected".
 
    Neither CLI has a status command, so the harness tile's *Ready* on Models › Jobs only checks that the binary runs and that a sign-in is configured. worca never reads the credentials.
-3. Pick the engine per run on New pipeline, or as a default with **Default for new runs** (Models › Catalogue or Models › Jobs). For Chat, Settings › Chat › Engine & models.
+3. Pick the engine per run on New run, or as a default with **Default for new runs** (Models › Catalogue or Models › Jobs). For Chat, Settings › Chat › Engine & models.
 
 **Models.** worca ships none. With no model set, the CLI runs its own default (Gemini CLI: `auto`). To pick one, use **Add model** › *A sign-in* › **Gemini CLI** or **Qwen Code** with the id the CLI expects (for example `gemini-3.8-flash` or `qwen3-coder-plus`). These models take no env and no endpoint; which provider a Qwen Code model reaches is Qwen Code's own setting. Their effort is the model's thinking on Gemini CLI (low, medium, high: a thinking level on Gemini 3, a thinking budget of 1024, 8192 or 24576 tokens on Gemini 2.5), written into the settings file worca hands the CLI, and `model.reasoningEffort` on Qwen Code (low to max), written into worca's system settings; a model without reasoning ignores it.
 
@@ -1185,7 +1329,7 @@ worca can run pipelines on [Goose](https://github.com/aaif-goose/goose)'s headle
 
 1. Install the Goose CLI (`brew install block-goose-cli`) and make sure worca finds it: on `PATH`, or `WORCA_GOOSE_BIN=/path/to/goose` in worca's environment. On Windows a `.cmd`/`.bat` launcher on `PATH` is resolved too (never through a shell), and the variable may point at a `.exe` or a `.cmd`.
 2. Set up a provider once: `goose configure`, or put the provider's key (for example `GOOGLE_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`) in worca's own environment. worca stores no Goose key. With guardrails that scrub the environment, add the key's name to the project's allowlist; `GOOSE_` variables always pass.
-3. Pick Goose per run on New pipeline, or as a default with **Default for new runs** (Models › Catalogue or Models › Jobs). Its harness tile only checks that `goose --version` runs: a missing provider key shows up when the first step fails.
+3. Pick Goose per run on New run, or as a default with **Default for new runs** (Models › Catalogue or Models › Jobs). Its harness tile only checks that `goose --version` runs: a missing provider key shows up when the first step fails.
 
 **Models.** worca ships no Goose models. With no model set, Goose runs the provider and model of its own config. To pick one, use **Add model** › *A sign-in* › **Goose** with the id `provider/model` (for example `google/gemini-2.5-flash`, `openai/gpt-4o`, `ollama/qwen2.5-coder`, `openrouter/anthropic/claude-sonnet-4`). worca splits it at the first `/` into goose's `--provider` and `--model`. Goose models take no env and no endpoint. Their efforts (low, medium, high, max) set `GOOSE_THINKING_EFFORT`; what each one does is up to the provider, and some ignore it.
 
@@ -1212,30 +1356,30 @@ worca can run pipelines on [Goose](https://github.com/aaif-goose/goose)'s headle
 
 ## OpenCode
 
-worca can run pipelines on [OpenCode](https://opencode.ai) (`opencode run`). OpenCode is in beta in worca. Chat runs on OpenCode 1.19.4 or newer (1.x), locked down to worca's own tools (see the end of this section). Checked against opencode 1.18.23.
+worca can run pipelines on [OpenCode](https://opencode.ai) (`opencode run`), both the 1.x and the 2.x line. OpenCode is in beta in worca. Chat runs on OpenCode 1.19.4 or newer (1.x) or 2.3.2 or newer (2.x), locked down to worca's own tools (see the end of this section). Checked against opencode 1.18.23 (1.x, npm `opencode-ai`) and opencode 2.3.2 (2.x, npm `@opencode/cli` and Homebrew's `opencode` formula). worca reads the binary's major version once and runs each line its own way; the differences are noted below.
 
-1. Install OpenCode and make sure worca finds it: on `PATH`, or `WORCA_OPENCODE_BIN=/path/to/opencode` in worca's environment. On Windows an npm install needs no `WORCA_*_BIN`: worca runs the package's native `.exe` when it finds one next to npm's `.cmd` shim, else `node <entry script>` from the shim (never a shell), and the variable may point at a `.exe` or a `.cmd`. worca runs OpenCode 1.x (npm `opencode-ai`). OpenCode 2 (npm `@opencode/cli`, and Homebrew's `opencode` formula) changed how `opencode run` works, so worca refuses it until it is supported.
-2. Connect a provider once in a terminal: `opencode auth login`, or set the provider's key (for example `ANTHROPIC_API_KEY`) in worca's own environment. `opencode providers list` shows what OpenCode sees. Without either, only OpenCode Zen's free models run, and they send the code to opencode.ai, so Models › Jobs shows OpenCode as *Not ready* and a run is refused, unless every step names its model or you opt in (below). worca checks the credentials in the environment the agent gets: under a set that scrubs the environment, a key only worca has does not count. For Google models, set `GOOGLE_GENERATIVE_AI_API_KEY`: OpenCode 1.18 lists a `GEMINI_API_KEY` under `providers list` but does not use it, so a run stops with "Google Generative AI API key is missing".
-3. Pick OpenCode per run on New pipeline, or as a default with **Default for new runs** (Models › Catalogue or Models › Jobs).
+1. Install OpenCode (`npm install -g @opencode/cli` for 2.x, or `brew install opencode`) and make sure worca finds it: on `PATH`, or `WORCA_OPENCODE_BIN=/path/to/opencode` in worca's environment. On Windows an npm install needs no `WORCA_*_BIN`: worca runs the package's native `.exe` when it finds one next to npm's `.cmd` shim, else `node <entry script>` from the shim (never a shell), and the variable may point at a `.exe` or a `.cmd`. worca supports OpenCode 1.x (npm `opencode-ai`) and 2.x (npm `@opencode/cli`, and Homebrew's `opencode` formula).
+2. Connect a provider once in a terminal: `opencode auth login`, or set the provider's key (for example `ANTHROPIC_API_KEY`) in worca's own environment. `opencode providers list` (1.x) or `opencode auth list` (2.x) shows what OpenCode sees. Without either, only OpenCode Zen's free models run, and they send the code to opencode.ai, so Models › Jobs shows OpenCode as *Not ready* and a run is refused, unless every step names its model or you opt in (below). worca checks the credentials in the environment the agent gets: under a set that scrubs the environment, a key only worca has does not count. For Google models, set `GOOGLE_GENERATIVE_AI_API_KEY`: OpenCode 1.18 lists a `GEMINI_API_KEY` under `providers list` but does not use it, so a run stops with "Google Generative AI API key is missing".
+3. Pick OpenCode per run on New run, or as a default with **Default for new runs** (Models › Catalogue or Models › Jobs).
 
-**Models.** worca ships no OpenCode models. With no model set, OpenCode runs its own default (your `opencode.json` `model`, else its first provider's), which can be a free OpenCode Zen model that sends the code to opencode.ai. So worca refuses a run in which any step names no model, and never starts OpenCode without one. To run on OpenCode's own default anyway, set `WORCA_OPENCODE_ALLOW_DEFAULT_MODEL=1` in worca's environment. To pick one, use **Add model** › *A sign-in* › **OpenCode** with the id `opencode models` lists, `provider/model` (for example `anthropic/claude-sonnet-4-5`). An OpenCode model takes no env and no endpoint: OpenCode's own providers connect it. Its efforts are OpenCode's `--variant` values (`minimal`, `low`, `medium`, `high`, `max`); a variant the model does not have is ignored by OpenCode without a word.
+**Models.** worca ships no OpenCode models. With no model set, OpenCode runs its own default (your `opencode.json` `model`, else its first provider's), which can be a free OpenCode Zen model that sends the code to opencode.ai. So worca refuses a run in which any step names no model, and never starts OpenCode without one. A run with no model at all takes your OpenCode chat model (else the OpenCode everyday role), or the catalogue's OpenCode model when it holds exactly one; with several and no role set, worca does not choose between them, and the run log lists them. To run on OpenCode's own default anyway, set `WORCA_OPENCODE_ALLOW_DEFAULT_MODEL=1` in worca's environment. To pick one, use **Add model** › *A sign-in* › **OpenCode** with the id `opencode models` lists, `provider/model` (for example `anthropic/claude-sonnet-4-5`). An OpenCode model takes no env and no endpoint: OpenCode's own providers connect it. Its efforts are OpenCode's reasoning variants (`minimal`, `low`, `medium`, `high`, `max`), passed as `--variant` on 1.x and as part of the model reference (`provider/model#variant`) on 2.x; a variant the model does not have is ignored by OpenCode without a word.
 
-**Cost.** OpenCode prices every step from its own price table, and worca books that cost, sub-agents included (worca reads each sub-agent session's cost with `opencode export`). A provider OpenCode has no prices for (a custom one in your `opencode.json`) reports $0: add a price to the model on the Models page, and worca uses it.
+**Cost.** OpenCode prices every step from its own price table, and worca books that cost, sub-agents included (worca reads each sub-agent session's cost with `opencode export`, or `opencode session export` on 2.x). A provider OpenCode has no prices for (a custom one in your `opencode.json`) reports $0: add a price to the model on the Models page, and worca uses it.
 
 **Helper jobs run on Claude.** On an OpenCode run, titles, the run overview, the PR description, the Auto workflow classifier and Away mode's night decider run on Claude, as on a Claude run: they read text worca did not write, and no read-only mode of OpenCode has been verified. The memory defrag and a workspace scan run on OpenCode itself.
 
 **What OpenCode holds, and what it does not.**
 
-- No per-role tool restriction or hook telemetry. The run log lists each one at start. A node's turn cap becomes the agent's `steps` limit: after that many tool steps OpenCode asks for a text reply, and worca fails the step as capped. Research fan-out runs through OpenCode's `task` tool as worca's investigator agent, which has no edit, write or shell tool and no sub-agents of its own, and the node's turn cap as its `steps` limit. worca removes OpenCode's built-in `general` and `explore` sub-agents, and a node without fan-out has no `task` tool. The investigator's tool calls reach the run log and the audit, read back with `opencode export` after the step. Skills are mounted at `.agents/skills`, which OpenCode lists for the agent. The system prompt reaches OpenCode as an agent's prompt.
+- No per-role tool restriction or hook telemetry. The run log lists each one at start. A node's turn cap becomes the agent's `steps` limit: after that many tool steps OpenCode asks for a text reply (1.x) or stops, and worca fails the step as capped. Research fan-out runs through OpenCode's `task` tool (2.x `subagent`) as worca's investigator agent, which has no edit, write or shell tool and no sub-agents of its own, and the node's turn cap as its `steps` limit. worca removes OpenCode's built-in `general` and `explore` sub-agents, and a node without fan-out has no sub-agent tool. The investigator's tool calls reach the run log and the audit, read back with `opencode export` (2.x: `opencode session export`, waited upon) after the step. Skills are mounted at `.agents/skills`, which OpenCode lists for the agent. The system prompt reaches OpenCode as an agent's prompt.
 - Guardrails go into OpenCode's permission config. A bare `Bash` removes the shell, and `WebSearch` and MCP tool rules (`mcp__server__tool`) remove those tools: held in full. `WebFetch` is held only when the same set denies the shell and web search too. Command rules (`Bash(git push:*)`) match each command OpenCode reads out of a shell line, but not one inside `$(…)`, a variable or `bash -c "…"`. `Read(…)` and `Edit(…)`/`Write(…)` path rules hold for OpenCode's file tools, and the shell can still reach those paths. So those count as held only in part: any set other than Permissive needs **Allow unguarded** (`--allow-unguarded-engine`).
 - The Normal and Secure sets' rules for worca's own state in `~/.worca-cc` are read and edit rules held only in part, as on Cursor. OpenCode has no sandbox, so a run with **Allow unguarded** can read and change those files through its shell. Container mode is the containment.
 - A set that denies the whole shell (a bare `Bash` rule) cannot run OpenCode Zen's free models: they refuse a request without the shell tool. The run stops and says so.
-- worca writes nothing into the run checkout: the agent, the rules and the MCP servers ride the `OPENCODE_CONFIG_CONTENT` variable, with MCP secrets as `{env:NAME}` references whose values reach OpenCode through its environment. worca turns off the checkout's own `opencode.json` (`OPENCODE_DISABLE_PROJECT_CONFIG`) and names the checkout's `AGENTS.md` and `CLAUDE.md` to OpenCode itself. That also turns off the checkout's `.opencode/` folder, so its plugin scripts do not load. worca runs OpenCode with `--pure`, so the plugins in your own `~/.config/opencode` and npm plugins named in your config do not load either. OpenCode's built-in sign-in plugins stay on.
-- Your own OpenCode settings still apply: providers, agents and MCP servers in `~/.config/opencode/opencode.json`. worca's rules are merged over them.
+- worca writes nothing into the run checkout: the agent, the rules and the MCP servers ride the `OPENCODE_CONFIG_CONTENT` variable, with MCP secrets as `{env:NAME}` references whose values reach OpenCode through its environment. worca turns off the checkout's own `opencode.json` (`OPENCODE_DISABLE_PROJECT_CONFIG`) and names the checkout's `AGENTS.md` and `CLAUDE.md` to OpenCode itself. That also turns off the checkout's `.opencode/` folder, so its plugin scripts do not load. On 1.x worca runs OpenCode with `--pure`, so the plugins in your own `~/.config/opencode` and npm plugins named in your config do not load either; 2.x has no such switch (and no `--print-logs`/`--variant`), so your plugins load there, and its guardrail rules still apply to what they can call. OpenCode's built-in sign-in plugins stay on. On 2.x worca also starts every run on its own private server (`--standalone`): 2.x's shared background service does not read a spawn's config environment.
+- Your own OpenCode settings still apply: providers, agents and MCP servers in `~/.config/opencode/opencode.json`, on 2.x too (it normalizes worca's 1.x-shaped inline config, including permissions, into its own ordered rules). worca's rules are merged over them.
 - Under the Secure set (environment scrubbed), provider keys in worca's environment do not reach OpenCode: use `opencode auth login`, or add the key's name to the set's environment allowlist.
 - The host guard's kill-check hook does not run on OpenCode; its instructions to the agent still apply.
 
-**Chat on OpenCode** needs OpenCode 1.19.4 or newer (1.x). A chat runs as an agent of its own, named anew for every spawn, whose permission denies every tool and allows worca's MCP server (attached under a name new per spawn too), with OpenCode's `general` and `explore` sub-agents off, `--pure` (no plugins of yours) and no project config. A tool denied that way is not offered to the model at all, and your own `~/.config/opencode` permissions, custom tools, agents and MCP servers cannot widen it (your MCP servers still start; their tools are not offered). Before the first chat on an opencode binary, worca runs the same [self-test](#gemini-cli-and-qwen-code) as on Gemini CLI and Qwen Code, with a test provider in the inline config; OpenCode fetches that provider's package (`@ai-sdk/openai-compatible`) from npm the first time.
+**Chat on OpenCode** needs OpenCode 1.19.4 or newer (1.x) or 2.3.2 or newer (2.x). A chat runs as an agent of its own, named anew for every spawn, whose permission denies every tool and allows worca's MCP server (attached under a name new per spawn too), with OpenCode's `general` and `explore` sub-agents off, no project config, and — on 1.x — `--pure` (no plugins of yours). A tool denied that way is not offered to the model at all, and your own `~/.config/opencode` permissions, custom tools, agents and MCP servers cannot widen it (your MCP servers still start; their tools are not offered). On 2.x there is no plugin switch, so a user plugin that leaves an extra tool offered fails worca's chat self-test and Chat reports OpenCode as not ready with the reason; watchers, agents and commands of yours still load but cannot widen the lockdown. Before the first chat on an opencode binary, worca runs the same [self-test](#gemini-cli-and-qwen-code) as on Gemini CLI and Qwen Code, with a test provider in the inline config; OpenCode fetches that provider's package (`@ai-sdk/openai-compatible`) from npm the first time.
 
 - OpenCode Zen's free models (`opencode/…`) refuse a request without the shell, so they are not offered in Chat: pick a model of another provider. A chat uses the providers you signed in to with `opencode auth login`, or a key in worca's environment under that provider's own names (a chat keeps only its model's provider's variables).
 - worca prices an OpenCode chat with the model's price on the Models page, or the list price of an `anthropic/…` or `openai/…` model; a per-turn cost cap refuses a model with neither.
@@ -1247,7 +1391,20 @@ worca can run pipelines on [OpenCode](https://opencode.ai) (`opencode run`). Ope
 **Which engine a chat runs on.** Chat runs on Claude Code, and on the engines worca can lock down to its own tools:
 [Codex](#codex), [GitHub Copilot CLI](#github-copilot-cli), [Gemini CLI and Qwen Code](#gemini-cli-and-qwen-code), [Goose](#goose) and
 [OpenCode](#opencode). Pick one in Settings › Chat › Engine & models, or by picking one of its models for a new chat.
-Cursor models are not offered in Chat: worca has no verified lockdown for Cursor. On every engine but Claude, a chat has no shell and no
+Cursor models are not offered in Chat: worca has no verified lockdown for Cursor. Nor is an engine whose program is not
+installed on this machine: worca looks for it (the engine's `WORCA_<ENGINE>_BIN`, else its usual name on your `PATH`)
+whenever the model picker loads, without starting it. The picker leaves such an engine out, and a new chat starts on the
+first engine that is installed (in the picker's order) when that engine is your Chat engine; install it and it is offered the next time you open the picker. A chat
+already on it keeps its model, marked *not installed* with the reason, led by a **Set up** row for that engine, and can
+move to another engine. An engine that
+is installed but not signed in stays offered: the chat says what to fix when you send. Claude Code follows the same rule
+(`WORCA_CLAUDE_BIN`, else `claude` on your `PATH`). Every engine's setup row opens its setup dialog (**Connect
+OpenAI Codex**, **Connect Goose**, … **Connect Claude Code**): the install command and sign-in step from that engine's section below, its
+`WORCA_<ENGINE>_BIN`, a link to the section, and **Check again**. Check again asks the server whether the program is
+installed (the same look as the picker's) and, once it is, whether the engine is ready, as Models › Jobs reports it
+(`GET /api/engines/<engine>/setup`). When no engine is installed, the model button says **Set up a harness**, and its
+menu lists the engines to set up. A Claude chat sent while it is missing says "Claude Code is not installed" with the path it looked
+for, and its **Set up…** link opens the same dialog. On every engine but Claude, a chat has no shell and no
 file tools of its own, reads through worca's `read_file`, `grep` and `glob`, and stops with an error the moment the engine
 calls a tool that is neither worca's nor one of your sets' MCP servers.
 
@@ -1338,8 +1495,11 @@ click Apply.
 ### Switching a chat's engine
 
 A chat is not tied to the engine it started on. The model picker lists the models of the chat's engine, marked
-*this chat*, and one row for each other engine that has models. Open an engine's row to see its models, and pick one to
-move the chat there:
+*this chat*, and one row for each other engine that has models and is installed here. Open an engine's row to see its models, and pick one to
+move the chat there. The installed engines with no model yet are listed under **More harnesses**; a row there opens `Add model`
+with that harness picked. Below them, dimmed and marked *not installed*, are the engines not installed on this machine; a
+row there opens that engine's setup dialog (in the browser extension, its setup section of this page in a new tab).
+Moving a chat:
 
 - worca first shows what changes: the tools the new engine has, images or PDFs it cannot view, whether it reports a
   cost, both models' context windows, the MCP servers from your sets it cannot start, the attachments it gets only by
@@ -1358,8 +1518,9 @@ move the chat there:
 - Each reply records its engine, model and effort. The chat's cost is the sum over all of them. The context meter
   starts over at the switch, since the new session has no context yet.
 - Event turns (a card you answered, a finished command) run on the engine the chat is on when they start.
-- When more than one engine is set up, the model button names the engine the chat runs on, in Chat and in the browser
-  extension.
+- In Chat the model button leads with the engine's harness mark (its tooltip names the engine), and so do each
+  engine's heading and row in the model picker and its row under **More harnesses**; in the browser extension it
+  names the engine in words when more than one is set up.
 - Your browser remembers the last model and effort you used on each engine; another engine's list shows that model
   first, tagged *last used*. The Workflows chat and the browser extension do not switch: the extension shows the chat's engine and lists
   its models only.
@@ -1367,7 +1528,7 @@ move the chat there:
 ### Per-agent models for one run
 
 When Chat proposes a run of a saved workflow it can also pick a model and effort for each
-agent step (`propose_run` `nodes`), from the models the run's engine runs:
+agent step (`propose_run` `nodes`), from the models the run's default harness runs (Chat never sets a harness):
 
 - **The picking policy** — judgement steps (Plan, Plan Review, Refine Plan, Review
   Implementation, Bug Root Cause, Deck Review) take the top price tier at high effort, never the
@@ -1394,12 +1555,12 @@ agent step (`propose_run` `nodes`), from the models the run's engine runs:
 - **On the card** the Agents section shows each pick beside the project's own setting
   (*project: …*), marked **Chat** with the reason and the model's facts on hover; a row
   carrying a pick or an edit has **Use project default** (*Use default* on a workspace card), and
-  **Reset to proposal** brings the picks back. The section shows at every interface mode when the
+  **Reset to proposal** brings the picks back. Each row's model is the harness › provider › model picker (**inherit** is the workflow default; on a role row, the node's model): a pick names its harness, and the row's effort pills and its Sub-agents (Claude Code only) follow that harness. **Default harness** under Advanced is where every other step runs; changing it keeps the rows pinned to a harness, and a Start a step's harness refuses asks once for **Allow unguarded**. The section shows at every interface mode when the
   card carries picks.
 - **The picks apply to that run only** — and so does any other change you make in a run card's
   Agents section. **Start run** (or **Schedule…**: the scheduled run keeps them) sends them with the run
   (`POST /api/run` `overlay.nodes`), which checks them again — each node must be an agent node of
-  the workflow; each model must be in the catalog, run on the run's engine and offer the effort —
+  the workflow; each model must be in the catalog, run on the harness its pick names (else the run's default harness) and offer the effort —
   and never writes the project's settings. Turn on **Save as project defaults** (project targets
   only) to save the lane as the project's agent settings first, as before. A workspace card's
   lane is editable for the run too; it names every pick outright, because the run merges them
@@ -1484,18 +1645,18 @@ picked per run, findings to Refine). Every node and role pick is cleaned in one 
   `## Clarifications (Q&A)` at approval. Approving without a pick (auto-approve, `--yes`) is
   never blocked: the conflict is audited as left undecided.
 - **Each role has its own model and effort.** A run overlay pick
-  (`overlay.nodes.<nodeId>.roles.<key>`) beats the project's (`POST /api/config`
-  `nodes.<nodeId>.roles`), which beats the template's (`roles[i].model` / `effort`). An effort
-  travels with its model. A role nothing names runs on the node's model, and *Model for all*
+  (`overlay.nodes.<nodeId>.roles.<key>`) beats the project's (`PATCH /api/config`
+  `nodes.<nodeId>.roles`), which beats the template's (`roles[i].model` / `effort`). An effort and a harness
+  (`engine`) travel with their model. A role with its own `engine` runs there; a role without one runs on its node's
+  harness. A role nothing names runs on the node's model, and *Model for all*
   runs every role on the run's model.
 - **The record names what ran:** each role's review records the model and effort its slice
   ran on.
 - **Set them in the Chat run card** (Advanced › Agents): a node that declares roles gets one row
-  per role, labelled like `Plan Review · Architect`, with a model select ("Node's model" = no
-  pick) and effort pills. An edited row rides that run only, or becomes the project's default
+  per role, labelled like `Plan Review · Architect`, with the model picker (**inherit**, *Node's model*, is no pick; a pick names its harness, and a pick without one runs on the node's harness) and effort pills. An edited row rides that run only, or becomes the project's default
   with *Save as project defaults*. A workflow, the project config and a run overlay set them too.
-- **A pick the run's engine cannot run is named, never dropped silently.** The node or role
-  runs on what the layers below give it, its record keeps the request as `wanted`, and the run
+- **A pick its harness cannot run is named, never dropped silently.** Its harness is the one it names, else the
+  run's default (a node) or its node's (a role). The node or role runs on what the layers below give it, its record keeps the request as `wanted`, and the run
   page shows one warning per drop, logged and audited once at start:
   - a node pick: `Plan: claude-opus-5-5 is not on Codex, runs Codex's default model` (or the
     model it does run, for example `runs gpt-5.5`);

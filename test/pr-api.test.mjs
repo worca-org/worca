@@ -7,7 +7,7 @@
 // carries are content-derived/minted (A15(3)) — use the RETURNED key/id (module vars).
 import { test, before, after, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
-import http from 'node:http';
+import { appServer } from './helpers/app-server.mjs';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -29,6 +29,7 @@ import { writeFileSync } from 'node:fs';
 import { getWatch } from '../src/core/pr-watch.mjs';
 import { checkRows } from './helpers/rows.mjs';
 import { withEnv } from './helpers/with-env.mjs';
+import { setMockSourceResponses } from '../src/core/plugin-shim.mjs';
 
 const NO_ADO = { WORCA_ADO_TOKEN: undefined, WORCA_ADO_READ_TOKEN: undefined, WORCA_ADO_WRITE_TOKEN: undefined, AZURE_DEVOPS_EXT_PAT: undefined };
 const WITH_ADO = { ...NO_ADO, WORCA_ADO_TOKEN: 'pat' };
@@ -49,7 +50,7 @@ before(async () => {
     branch: { source: 'main', feature: 'worca-cc/my-feature-pp', branchKept: true, commit: 'abc' } });
   betaId = seeded.id; betaKey = seeded.key;
   writeStoreMeta(betaKey, 'project', { key: betaKey, name: 'Beta', path: betaRepo });
-  srv = http.createServer(app);
+  srv = appServer(app);
   await new Promise((r) => srv.listen(0, '127.0.0.1', r));
   base = `http://127.0.0.1:${srv.address().port}`;
 });
@@ -874,7 +875,7 @@ test('POST /api/pr without a body (absent, null or blank) keeps today\'s --body 
   }
 });
 
-test('POST /api/pr sends the user description as the PR body, the attribution footer after it', async () => {
+test('POST /api/pr sends the user description as the PR body', async () => {
   let seen = [];
   stubForkRepo(seen);
   assert.equal((await post({ projectKey: betaKey, id: betaId, body: '## Summary\nRetries fetch.\n\n' })).status, 200);
@@ -886,11 +887,12 @@ test('POST /api/pr sends the user description as the PR body, the attribution fo
   seen = [];
   stubForkRepo(seen);
   assert.equal((await post({ projectKey: betaKey, id, body: 'Did the thing.' })).status, 200);
-  assert.equal(bodyArg(seen), 'Did the thing.\n\n---\nStarted by grace@example.com via worca');
+  assert.equal(bodyArg(seen), 'Did the thing.');
+  assert.doesNotMatch(bodyArg(seen), /via worca/);
   seen = [];
   stubForkRepo(seen);
   assert.equal((await post({ projectKey: betaKey, id })).status, 200);
-  assert.equal(bodyArg(seen), 'Signed feature\n\n---\nStarted by grace@example.com via worca', 'no description: today\'s title + footer');
+  assert.equal(bodyArg(seen), 'Signed feature', 'no description: the title only');
 });
 
 test('POST /api/pr refuses a non-string or oversized body with 400 before anything is pushed; the largest one fits the JSON limit', async () => {
@@ -1186,7 +1188,8 @@ test('GET /api/pr/remotes labels a Bitbucket remote and names the missing token'
 // ---------------------------------------------------------------------------
 const ISSUE_URL = 'https://github.com/up/repo/issues/42';
 // An issue-sourced run (the sourceMeta shape src/core/sources.mjs builds for github-source:
-// taskId is the connector's 'owner/repo#N' id), started by grace so the footer shows.
+// taskId is the connector's 'owner/repo#N' id), started by grace, so a named starter's body
+// is pinned too.
 // Same production-writer pattern as the existing attribution test.
 async function seedIssueRun({ url = ISSUE_URL, feature = 'worca-cc/issue-run' } = {}) {
   const { id, dir } = await createPipeline(betaRepo, { prompt: 'p', title: 'Issue feature', startedBy: 'grace@example.com',
@@ -1283,20 +1286,20 @@ test('POST /api/pr draft: true on an existing PR changes nothing: draft:false, "
   assert.deepEqual(prAudit(id), ['PR linked: https://github.com/up/repo/pull/3']);
 });
 
-test('POST /api/pr body order: description -> Closes line -> attribution footer', async () => {
+test('POST /api/pr body order: description -> Closes line', async () => {
   const id = await seedIssueRun({ feature: 'worca-cc/order-run' });
   let seen = [];
   stubForkRepo(seen);
   assert.equal((await post({ projectKey: betaKey, id, body: 'Did the thing.', ...FORK })).status, 200);
-  assert.equal(bodyArg(seen), 'Did the thing.\n\nCloses #42\n\n---\nStarted by grace@example.com via worca');
+  assert.equal(bodyArg(seen), 'Did the thing.\n\nCloses #42');
   seen = [];
   stubForkRepo(seen);
   assert.equal((await post({ projectKey: betaKey, id, ...FORK })).status, 200);
-  assert.equal(bodyArg(seen), 'Issue feature\n\nCloses #42\n\n---\nStarted by grace@example.com via worca', 'no description: title, then the line');
+  assert.equal(bodyArg(seen), 'Issue feature\n\nCloses #42', 'no description: title, then the line');
   seen = [];
   stubForkRepo(seen);
   assert.equal((await post({ projectKey: betaKey, id, body: 'x', pushRemote: 'origin', baseRemote: 'origin' })).status, 200);
-  assert.equal(bodyArg(seen), 'x\n\nCloses up/repo#42\n\n---\nStarted by grace@example.com via worca', 'a PR into me/repo names the repo');
+  assert.equal(bodyArg(seen), 'x\n\nCloses up/repo#42', 'a PR into me/repo names the repo');
 });
 
 test('POST /api/pr adds no Closes line for a prompt run, a PR-URL source, or a description that already closes the issue', async () => {
@@ -1309,13 +1312,13 @@ test('POST /api/pr adds no Closes line for a prompt run, a PR-URL source, or a d
   seen = [];
   stubForkRepo(seen);
   assert.equal((await post({ projectKey: betaKey, id: prSourced, body: 'Did it.', ...FORK })).status, 200);
-  assert.equal(bodyArg(seen), 'Did it.\n\n---\nStarted by grace@example.com via worca');
+  assert.equal(bodyArg(seen), 'Did it.');
 
   const id = await seedIssueRun({ feature: 'worca-cc/fixes-run' });
   seen = [];
   stubForkRepo(seen);
   assert.equal((await post({ projectKey: betaKey, id, body: 'Fixes #42', ...FORK })).status, 200);
-  assert.equal(bodyArg(seen), 'Fixes #42\n\n---\nStarted by grace@example.com via worca');
+  assert.equal(bodyArg(seen), 'Fixes #42');
 });
 
 test('GET /api/pr/remotes carries the run\'s source issue (null for a prompt run)', async () => {
@@ -1452,9 +1455,9 @@ test('POST /api/push: 409 when not merged back, and 409 for a normal run (open a
 });
 
 // ---------------------------------------------------------------------------
-// Spec D7 (slice 3): a shaped run's PR ends with its perspective checklist, before the attribution footer.
+// Spec D7 (slice 3): a shaped run's PR ends with its perspective checklist, after the Closes line.
 // ---------------------------------------------------------------------------
-test('POST /api/pr appends the latest perspective checklist after the Closes line and before the footer', async () => {
+test('POST /api/pr appends the latest perspective checklist after the Closes line', async () => {
   const { writeReview } = await import('../src/core/artifacts.mjs');
   const id = await seedIssueRun({ feature: 'worca-cc/checklist-run' });
   const item = (over) => ({ id: 'R-qa-1', perspective: 'qa', text: 'Rejects empty input.', status: 'met', evidence: 'test passes', ...over });
@@ -1463,21 +1466,20 @@ test('POST /api/pr appends the latest perspective checklist after the Closes lin
   const section = '<!-- worca:perspective-checklist -->\n## Perspective checklist\n\n' +
     '- [x] **R-qa-1** Rejects empty input. — test passes\n' +
     '- [ ] ~~**R-ux-1** Empty state.~~ — Not applicable: no UI';
-  const footer = '\n\n---\nStarted by grace@example.com via worca';
 
   let seen = [];
   stubForkRepo(seen);
   assert.equal((await post({ projectKey: betaKey, id, body: 'Did it.', ...FORK })).status, 200);
-  assert.equal(bodyArg(seen), `Did it.\n\nCloses #42\n\n${section}${footer}`, 'only cycle 2 is used');
+  assert.equal(bodyArg(seen), `Did it.\n\nCloses #42\n\n${section}`, 'only cycle 2 is used');
 
   seen = [];
   stubForkRepo(seen);
   const own = 'Mine.\n\n<!-- worca:perspective-checklist -->\n## Perspective checklist\n\n- [x] done';
   assert.equal((await post({ projectKey: betaKey, id, body: own, ...FORK })).status, 200);
-  assert.equal(bodyArg(seen), `${own}\n\nCloses #42${footer}`, 'a description that carries the marker is left alone');
+  assert.equal(bodyArg(seen), `${own}\n\nCloses #42`, 'a description that carries the marker is left alone');
 });
 
-test('POST /api/pr: a run without checklist rows is unchanged; a footer-less run ends with the section', async () => {
+test('POST /api/pr: a run without checklist rows is unchanged; a run ends with the section', async () => {
   const { writeReview } = await import('../src/core/artifacts.mjs');
   let seen = [];
   stubForkRepo(seen);
@@ -1551,4 +1553,87 @@ test('POST /api/pr with no remote at all: a 409 that says so, and nothing is pus
   assert.equal(r.status, 409, JSON.stringify(body));
   assert.match(body.error, /no git remote/);
   assert.equal(seen.some((a) => a[1] === 'push'), false);
+});
+
+// ── a ticket comment when a PR opens (#1456) ───────────────────────────────────
+// The comment is fire-and-forget after the response, so each test keeps WORCA_MOCK (the plugin shim's canned answers) on
+// across the POST AND the poll that waits for it.
+async function until(fn, ms = 10000) {
+  const t0 = Date.now();
+  for (;;) {
+    const v = await fn();
+    if (v) return v;
+    if (Date.now() - t0 > ms) throw new Error('condition never became true');
+    await new Promise((r) => setTimeout(r, 25));
+  }
+}
+const auditOf = (id) => getDb().prepare('SELECT text FROM pipeline_events WHERE pipeline_id = ? ORDER BY id').all(id).map((r) => r.text);
+const withMockSource = (responses, fn) => withEnv({ WORCA_MOCK: '1' }, async () => {
+  setMockSourceResponses(responses);
+  try { return await fn(); } finally { setMockSourceResponses(null); }
+});
+
+test('POST /api/pr on a plugin run reports pr-opened with the PR url and audits it', async () => {
+  const id = await seedIssueRun({ feature: 'worca-cc/announce-run' });
+  const calls = [];
+  stubForkRepo([]);
+  await withMockSource({ reportResult: (args) => { calls.push(args); return { ok: true }; } }, async () => {
+    const r = await post({ projectKey: betaKey, id, draft: true, ...FORK });
+    assert.equal(r.status, 200, await r.clone().text());
+    await until(() => auditOf(id).includes('Pull request reported to the task source.'));
+  });
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].status, 'pr-opened');
+  assert.equal(calls[0].id, 'up/repo#42');
+  assert.ok(calls[0].summary.includes('Pull request opened: https://github.com/up/repo/pull/7 (draft)'), calls[0].summary);
+  assert.ok(calls[0].summary.includes('- Branch: `worca-cc/announce-run`'));
+  assert.deepEqual(calls[0].links, [{ title: 'Pull request', url: 'https://github.com/up/repo/pull/7' }]);
+  assert.deepEqual(calls[0].move, { none: true }, 'a PR comment never moves the ticket');
+});
+
+test('POST /api/pr linking an existing PR posts no pr-opened comment', async () => {
+  const id = await seedIssueRun({ feature: 'worca-cc/announce-existing' });
+  const calls = [];
+  gitInfo.setRunner((cmd, args) => {
+    if (cmd === 'git' && args[0] === 'remote') return Promise.resolve({ ok: true, stdout: REMOTES_V, stderr: '', code: 0 });
+    if (cmd === 'gh' && args[0] === 'pr' && args[1] === 'create')
+      return Promise.resolve({ ok: false, stdout: '', stderr: 'a pull request already exists:\nhttps://github.com/up/repo/pull/3', code: 1 });
+    if (cmd === 'gh' && args[0] === 'pr' && args[1] === 'view') return Promise.resolve({ ok: true, stdout: 'https://github.com/up/repo/pull/3\n', stderr: '', code: 0 });
+    return Promise.resolve({ ok: true, stdout: 'gh 2.x', stderr: '', code: 0 });
+  });
+  await withMockSource({ reportResult: (args) => { calls.push(args); return { ok: true }; } }, async () => {
+    const j = await (await post({ projectKey: betaKey, id, ...FORK })).json();
+    assert.equal(j.existed, true);
+    await until(() => prAudit(id).includes('PR linked: https://github.com/up/repo/pull/3'));
+    await new Promise((r) => setTimeout(r, 300));   // one more poll window for a comment that must not come
+  });
+  assert.equal(calls.length, 0, 'a linked PR is not announced');
+  assert.ok(!auditOf(id).some((t) => /^Pull request (reported|could not)/.test(t)));
+});
+
+test('POST /api/pr: a failing pr-opened comment still answers 200 and audits the failure', async () => {
+  const id = await seedIssueRun({ feature: 'worca-cc/announce-fail' });
+  stubForkRepo([]);
+  await withMockSource({ reportResult: () => { throw new Error('tracker <down>'); } }, async () => {
+    const r = await post({ projectKey: betaKey, id, ...FORK });
+    assert.equal(r.status, 200, await r.clone().text());
+    assert.equal((await r.json()).url, 'https://github.com/up/repo/pull/7');
+    const line = await until(() => auditOf(id).find((t) => t.startsWith('Pull request could not be reported')));
+    assert.equal(line, 'Pull request could not be reported to the task source: tracker ‹down›.');
+  });
+});
+
+test('POST /api/pr on a prompt-source run calls no reportResult', async () => {
+  const { id, dir } = await createPipeline(betaRepo, { prompt: 'p', title: 'Plain feature' });
+  await writeState(dir, { projectKey: betaKey, id, title: 'Plain feature', status: 'done',
+    branch: { source: 'main', feature: 'worca-cc/announce-plain', branchKept: true } });
+  const calls = [];
+  stubForkRepo([]);
+  await withMockSource({ reportResult: (args) => { calls.push(args); return { ok: true }; } }, async () => {
+    assert.equal((await post({ projectKey: betaKey, id, ...FORK })).status, 200);
+    await until(() => prAudit(id).length === 1);
+    await new Promise((r) => setTimeout(r, 300));
+  });
+  assert.equal(calls.length, 0);
+  assert.ok(!auditOf(id).some((t) => /^Pull request (reported|could not)/.test(t)));
 });

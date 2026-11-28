@@ -16,6 +16,7 @@ export const CHATS_GROUP = Object.freeze([['date', 'Date', DATE_GROUP_TITLE], ['
 export const DEFAULT_CHATS_VIEW = Object.freeze({ show: 'all', sort: 'activity', groupBy: 'date' });
 export const CHATS_PAGE = 50;
 export const CHATS_EMPTY = Object.freeze({ needs: 'No chat needs you.', archived: 'No archived chats.' });
+export const DESIGN_CHATS_EMPTY = Object.freeze({ needs: 'No design chat needs you.', archived: 'No archived design chats.' });
 export const CHATS_LOADING = 'Loading chats…';
 export const CHATS_OFFLINE = "The chats show here once Worca's server is reachable again.";
 
@@ -108,6 +109,7 @@ export function chatRow(t, { scopeName = () => '', now = Date.now() } = {}) {
     activityMs, createdMs: timeMs(t.createdAt, now), cost, groupKey, groupName, projectKey: (scope && scope.projectKey) || '',
     labels: [], model: { ...chatDot(state, chatKind(t)), line },
     origin: t.origin || null,   // the chat integration that opened it (drawn as its platform's mark), null = an app chat
+    ...(t.designId ? { designId: t.designId } : {}),   // a chat with a design (drawn with Design's mark)
   };
 }
 

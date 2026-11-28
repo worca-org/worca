@@ -158,7 +158,13 @@ const JS_CHECKBOX_OK = [
   ['requirements-view.mjs', 'ipv-att-', 'picks the ticket attachments to add as files'],
   ['marketplace/remove-view.mjs', 'mk-purge-box', 'opt-in consent in the Remove dialog'],
   ['marketplace/update-view.mjs', 'mk-reviewed', 'acknowledges the reviewed changes'], ['marketplace/update-view.mjs', 'mk-include', 'picks updates'],
+  ['workflows/version-dialogs.mjs', 'wfv-sv-use', 'opt-in in the Save version dialog: also use the new version for new runs'],
+  ['workflows/tests-view.mjs', 'wft-pick-box', 'picks runs: the past runs to keep as test examples'],
+  ['workflows/test-dialogs.mjs', 'wft-keep-box', 'picks what to keep from the past run: its request and files, its answers'],
+  ['workflows/test-dialogs.mjs', 'wft-tv-optin', 'opt-ins next to the estimate: reuse earlier results, the free quick check'],
+  ['workflows/example-editor.mjs', 'wft-changes-box', 'opts in to keeping the uncommitted changes with the example, next to its start point (board 32)'],
   ['design/export-dialog.mjs', 'dsx-replace', 'consent: replace the listed files'],
+  ['requirements-attach/picker.mjs', 'attach-pick-', 'picks the features to attach to a run or a chat'],
   ['mcp-server-import.mjs', 'mcp-imp-pick', 'picks servers to import'],
 ].map(([file, token, reason]) => ({ file: `ui/public/${file}`, token, reason }));
 function checkboxEmitters(files) {
@@ -450,9 +456,9 @@ test('headings: section titles and sub-heads use the shared classes, with no siz
   }
 });
 
-const PAGE_CARDS = ['.chart-card', '.sched-feed', '.tp-ov-card', '.rd-sheet', '.hd-ov-card', '.pd-ov-card', '.hd-cl-card', '.hd-ov-task',
+const PAGE_CARDS = ['.chart-card', '.sched-feed', '.tp-ov-card', '.rd-sheet', '.hd-ov-card', '.pd-ov-card', '.hd-cl-card', '.run-task', '.run-setup',
   '.tp-editor .card.tp-group-card', '.tp-editor details.card', '.tm-empty .card', '.mv-providers', '.settings-card'];
-const TILES = ['.stat-tile', '.chat-run-tile', '.mcp-setlist'];
+const TILES = ['.stat-tile', '.chat-run-tile'];
 test('cards: every page card pads --pad-card, every tile --pad-tile', () => {
   for (const s of PAGE_CARDS) assert.match(bodyOf(s), /padding:var\(--pad-card\)/, s);
   for (const s of TILES) assert.match(bodyOf(s), /padding:var\(--pad-tile\)/, s);
@@ -498,4 +504,31 @@ test('the theme proof requires every shared-control check', () => {
     assert.ok(proof.includes(`'${w}'`), `${w} is in the required list`);
   }
   assert.match(read('test/fixtures/theme-kitchen-sink.html'), /class="sw-input"[^>]*disabled/);
+});
+
+test('openMenu: a pick and Escape focus the anchor by default, and `returnFocus` when one is given and connected', async () => {
+  const { openMenu, toggleMenu, closeMenus } = await import('../ui/public/workflows/menu.mjs');
+  const { window } = new JSDOM('<!doctype html><body><button id="a">Role</button><textarea id="field"></textarea></body>');
+  const doc = window.document;
+  const anchor = doc.getElementById('a');
+  const field = doc.getElementById('field');
+  const picked = [];
+  const items = [{ label: 'QA', checked: false, onSelect: () => picked.push(doc.activeElement) }];
+  const esc = (m) => m.el.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+  const run = (extra) => {
+    let m = openMenu({ doc, anchor, items, ...extra });
+    m.el.querySelector('.wfv-menu-item').click();
+    const afterPick = doc.activeElement;
+    m = toggleMenu({ doc, anchor, items, ...extra });
+    esc(m);
+    assert.equal(m.el.isConnected, false);
+    assert.equal(anchor.getAttribute('aria-expanded'), 'false');
+    return [afterPick, doc.activeElement];
+  };
+  assert.deepEqual(run({}).map((e) => e.id), ['a', 'a'], 'default: the anchor');
+  assert.deepEqual(run({ returnFocus: field }).map((e) => e.id), ['field', 'field']);
+  assert.equal(picked.at(-1), field, 'focus has moved before onSelect runs');
+  assert.deepEqual(run({ returnFocus: doc.createElement('textarea') }).map((e) => e.id), ['a', 'a'], 'a detached target: the anchor');
+  assert.deepEqual(run({ returnFocus: null }).map((e) => e.id), ['a', 'a']);
+  closeMenus();
 });

@@ -97,6 +97,16 @@ test('chromeArgs: a caller can drop file access and add its own flags (the Desig
   assert.ok(held.includes('--host-resolver-rules=MAP * ~NOTFOUND'));
 });
 
+test('a CDP call on a closed browser fails at once with "closed", never waits for ever', { skip: noChrome }, async () => {
+  const { launch } = await import('../assets/promo-kit/tools/cdp.mjs');
+  const b = await launch({ chrome: CHROME });
+  assert.equal(await b.evaluate('1 + 1'), 2);
+  await b.close();
+  const late = (p) => Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error('no answer in 5 s')), 5000))]);
+  await assert.rejects(late(b.evaluate('1')), /CDP socket closed/);
+  await assert.rejects(late(b.page('Page.getFrameTree')), /CDP socket closed/);
+});
+
 test('kit.js F.SFX and tools/sfx.mjs list the same sound names', () => {
   const kit = readFileSync(fileURLToPath(new URL('../assets/promo-kit/film/kit.js', import.meta.url)), 'utf8');
   const m = /F\.SFX = \[([\s\S]*?)\];/.exec(kit);
@@ -266,6 +276,23 @@ test('exportFilm renders every frame to an H.264 MP4 at 60 fps and muxes the aud
     const probe = spawnSync(FFMPEG, ['-hide_banner', '-i', out], { encoding: 'utf8' }).stderr;
     assert.match(probe, /Audio: aac/);
     assert.ok(progress.length >= 1 && progress.at(-1).done === 60);
+  } finally { rmSync(promo, { recursive: true, force: true }); }
+});
+
+// The audio mux must never cut the copied video where a short AAC track ends (CI saw "55 of its 60 frames").
+test('exportFilm keeps every frame when the audio ends early', { skip: noBoth }, async () => {
+  const promo = fixtureFilm(1, SLIDE);
+  try {
+    const audio = join(promo, 'short-tone.m4a');
+    ff(['-f', 'lavfi', '-i', 'sine=frequency=440:duration=0.9:sample_rate=48000', '-c:a', 'aac', '-b:a', '128k', audio]);
+    const out = join(promo, 'video', 'short-audio.mp4');
+    const r = await exportFilm({ html: join(promo, 'film', 'index.html'), out, audio, scale: 1, workers: 2, crf: 30, preset: 'ultrafast',
+      chrome: CHROME, ffmpeg: FFMPEG });
+    assert.equal(r.frames, 60, `the export kept ${r.frames} of its 60 frames`);
+    assert.equal(readMP4(out).samples, 60);
+    assert.ok(Math.abs(r.duration - 1) < 0.02, `duration ${r.duration}`);
+    const probe = spawnSync(FFMPEG, ['-hide_banner', '-i', out], { encoding: 'utf8' }).stderr;
+    assert.match(probe, /Audio: aac/);
   } finally { rmSync(promo, { recursive: true, force: true }); }
 });
 

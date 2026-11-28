@@ -10,6 +10,7 @@
 // and a wrong base URL or key breaks every pipeline that names the model. Credentials never
 // pass through here: a key is a ${VAR} reference or nothing, and the Copilot sign-in stays
 // under Models › Providers › GitHub Copilot.
+import { isVaultRef } from '../secrets/refs.mjs';
 import { modelEnvRef, maskModelEnvValue, isLocalBaseUrl, isTranslatedApi, UPSTREAM_PROVIDERS, effortsForEngine } from '../model-env.mjs';
 
 export const MODEL_CHANGE_KINDS = Object.freeze(['add_model', 'edit_model', 'remove_model', 'provider', 'import_copilot', 'import_endpoint']);
@@ -32,7 +33,7 @@ export const MODEL_ERRORS = Object.freeze({
   secretKey: (where) => `${where} must be a \${VAR} reference to a variable set in worca's environment (or empty to clear) — never the key itself; the user can paste a literal key under Models › Providers`,
   secretHeader: (k) => `upstream.headers.${k} looks like a credential — the user sets it in the model editor; use apiKey with a \${VAR} reference instead`,
   provider: 'provider must be one of copilot, openai, anthropic, openrouter',
-  providerSet: 'provider needs set: {baseUrl?, apiKey?, maxConcurrent?, accountType?}',
+  providerSet: 'provider needs set: {baseUrl?, apiKey?, maxConcurrent?, accountType?, enterpriseHost?}',
   providerSetOpenRouter: 'openrouter needs set: {apiKey?, maxConcurrent?, order?, sort?, allowFallbacks?}',
   signIn: (k) => `${k} is not settable here — the Copilot sign-in happens under Models › Providers, by the user`,
   noChange: 'nothing changes — the settings already say exactly this',
@@ -48,9 +49,13 @@ const BREAKS_RE = /[\x00-\x1f\x7f-\x9f\u2028\u2029]/g;
 const clip = (v, n) => String(v ?? '').replace(BREAKS_RE, ' ').slice(0, n);
 const isClear = (v) => v === null || v === '';
 
-/** A stored value as the card and the tools show it: a ${VAR} ref reads, a literal is masked. */
+/**
+ * A stored value as the card and the tools show it: a ${VAR} ref reads, a literal is masked, a vault reference is
+ * '••••••' (Ask may run in a process that does not hold the vault key).
+ */
 export function maskValue(v) {
   if (typeof v !== 'string' || !v) return v;
+  if (isVaultRef(v)) return '••••••';
   return modelEnvRef(v) ? v : maskModelEnvValue(v);
 }
 
@@ -60,6 +65,7 @@ const EMBEDDED_SECRET_RE = /:\/\/[^/\s]*@|[?&](?:key|api[-_]?key|token|access_to
 /** One env value as Ask shows it: routing and tuning read (a base URL, a model id, a limit); a credential is masked. */
 export function maskEnvValue(key, v) {
   if (typeof v !== 'string' || !v || modelEnvRef(v)) return v;
+  if (isVaultRef(v)) return '••••••';
   return SECRET_ENV_RE.test(key) || EMBEDDED_SECRET_RE.test(v) ? maskModelEnvValue(v) : v;
 }
 
@@ -318,13 +324,14 @@ export function createModelChangeValidator(r) {
     const before = r.providerConfig(name);
     let after;
     try { after = await r.updateProvider(name, set, { dryRun: true }); } catch (err) { return { ok: false, errors: [err.message] }; }
-    const fields = ['baseUrl', 'apiKey', 'maxConcurrent', 'accountType'];
-    const label = { baseUrl: 'Base URL', apiKey: 'API key', maxConcurrent: 'Max concurrent requests', accountType: 'Account type' };
+    const fields = ['baseUrl', 'apiKey', 'maxConcurrent', 'accountType', 'enterpriseHost'];
+    const label = { baseUrl: 'Base URL', apiKey: 'API key', maxConcurrent: 'Max concurrent requests', accountType: 'Account type', enterpriseHost: 'GHE.com host' };
     const shown = (f, v) => (v == null ? null : String(f === 'apiKey' ? maskValue(v) : v));
     const changed = fields.filter((f) => shown(f, before[f]) !== shown(f, after[f]));
     const rows = changed.map((f) => ({ field: label[f], before: shown(f, before[f]), after: shown(f, after[f]) }));
     if (!rows.length) return { ok: false, errors: [MODEL_ERRORS.noChange] };
     const warnings = [];
+    if (before.githubToken && !after.githubToken) warnings.push('changing the GitHub host signs out of GitHub Copilot — the user signs in again under Models › Providers');
     const keyRef = typeof after.apiKey === 'string' ? modelEnvRef(after.apiKey) : null;
     if (keyRef && !r.envHas(keyRef)) warnings.push(`\${${keyRef}} is not set in worca's environment — set it and restart Worca`);
     if (name !== 'copilot' && !after.apiKey && !(name === 'openai' && isLocalBaseUrl(after.baseUrl))) {

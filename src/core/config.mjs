@@ -18,13 +18,15 @@ import { AUTO_WORKFLOW_ID } from './graph/builtin-workflows.mjs';
 import { loadAgentRegistry, registryToSteps } from './agent-registry.mjs';
 import { EFFORTS, CODEX_EFFORTS, ALL_EFFORTS, MODEL_ENGINES, COPILOT_MODEL_PREFIX, prepareModelEnv, withTierModelEnv, withProviderModesOff, PROVIDER_MODE_ENV_KEYS, isSubagentModelValue, subagentModelIssue, BRIDGE_ROUTING_KEYS, bridgeExcludedTools, isTranslatedApi } from './model-env.mjs';
 import { findBridgedEntry, providerReadiness } from './bridge/registry.mjs';
-import { engineLabel } from '../shared/engine-switch.mjs';
+import { engineLabel, MODEL_ENGINE_NAMES } from '../shared/engine-switch.mjs';
 import { normaliseTags } from '../shared/run-tags.mjs';
-import { cleanPick } from '../shared/graph/role-slots.mjs';
+import { cleanPick, pickEngine } from '../shared/graph/role-slots.mjs';
 import { ROLE_KEY_RE } from '../shared/graph/role-review-step.mjs';
-import { connectionOf, harnessesOf, runsOn, harnessesLabel, effortsOn } from '../shared/connections.mjs';
+import { connectionOf, harnessesOf, runsOn, harnessesLabel, effortsOn, pickEffortsOn } from '../shared/connections.mjs';
 import { bridgeBaseUrl, bridgeSecret } from './bridge/server.mjs';
-import { listGlobalModels, addGlobalModel, removeGlobalModel, hideBuiltinModels, hideBuiltinEngines, readSettings, memoryDefragModel, setMemoryDefragModel, modelRolesSetting, assertDesignModelsInput } from './settings.mjs';
+import { copilotBlockHost } from './ghe-host.mjs';
+import { resolveSettingsSecretSync, settingsSecretField, settingsVaultState } from './secrets/settings-resolver.mjs';
+import { providerConfig, listGlobalModels, addGlobalModel, removeGlobalModel, hideBuiltinModels, hideBuiltinEngines, readSettings, memoryDefragModel, setMemoryDefragModel, modelRolesSetting, assertDesignModelsInput } from './settings.mjs';
 /** Whether the developer stored the hide-built-ins flag (a team default applies only when not). */
 const readSettingsHideStored = () => { const s = readSettings(); return typeof s.hideBuiltinModels === 'boolean' || s.hideBuiltinModelsChosen === true; };
 import { listPluginModels, allPluginModels, flattenPluginModelEnv } from './plugin-models.mjs';
@@ -35,7 +37,7 @@ import { PREDEFINED_LIST_PRICES, CODEX_PRICES, codexCachedRate } from './list-pr
 import { validateNightPatch } from './night/config.mjs';
 import { normalizeProjectActions, EMPTY_PROJECT_ACTIONS } from './actions/model.mjs';
 import { setCascadeModelOwnerReader, resolveSetting } from './settings-cascade.mjs';
-import { resolveRoleModel, roleOf, projectRoles, setRoleModelOwnerReader } from './model-roles.mjs';
+import { resolveRolePick, roleOf, projectRoles, setRoleModelOwnerReader, setRoleAuthReader } from './model-roles.mjs';
 
 /**
  * Recompute the agent step list FRESH from the layered registry (repo agents/ +
@@ -96,6 +98,7 @@ export { EFFORTS };
 export const PREDEFINED_MODELS = [
   { id: 'claude-opus-5-5',        label: 'Opus 5.5',        efforts: ['medium', 'high', 'xhigh', 'max'] },
   { id: 'claude-opus-5',          label: 'Opus 5',          efforts: ['medium', 'high', 'xhigh', 'max'] },
+  { id: 'claude-fable-5-2',       label: 'Fable 5.2',       efforts: ['medium', 'high', 'xhigh', 'max'] },
   { id: 'claude-fable-5-1',       label: 'Fable 5.1 (1M)',  efforts: ['medium', 'high', 'xhigh', 'max'] },
   { id: 'claude-opus-4-8',        label: 'Opus 4.8',        efforts: ['medium', 'high', 'xhigh', 'max'] },
   { id: 'claude-opus-4-8[1m]',    label: 'Opus 4.8 (1M)',   efforts: ['medium', 'high', 'xhigh', 'max'] },
@@ -276,15 +279,26 @@ function composeCatalog(projectCustom = [], { projectDir = null } = {}) {
   // true too: the CLI IS pointed at a custom endpoint (worca's own bridge).
   // provider + the entry's own key/base URL -> readiness (both can decide it)
   const readiness = new Map();
+  // The GHE.com tenant the Copilot provider signs in to, so pickers can tell it from github.com (null for github.com,
+  // and with the credential broker on, where worca's own host setting is unused).
+  let tenant;
+  const copilotTenant = () => {
+    if (tenant === undefined) {
+      const h = brokerEnabled() ? null : copilotBlockHost(providerConfig('copilot'));
+      tenant = h && h !== 'github.com' ? h : null;
+    }
+    return tenant;
+  };
   const bridgeShape = (m) => {
     if (!m.upstream) return {};
     const p = m.upstream.provider;
-    const key = `${p}\n${m.upstream.apiKey || ''}\n${m.upstream.baseUrl || ''}`;
+    const key = `${p}\n${m.upstream.apiKey || ''}\n${m.upstream.baseUrl || ''}\n${settingsVaultState().generation}`;
     if (!readiness.has(key)) readiness.set(key, providerReadiness(m.upstream));
     const r = readiness.get(key);
+    const host = p === 'copilot' ? copilotTenant() : null;
     return {
-      connection: connectionOf(m),
-      bridged: p, upstreamApi: m.upstream.api, upstreamModel: m.upstream.model,
+      connection: connectionOf(host ? { ...m, bridgedHost: host } : m),
+      bridged: p, upstreamApi: m.upstream.api, upstreamModel: m.upstream.model, ...(host ? { bridgedHost: host } : {}),
       needsSignIn: !r.ok, ...(r.ok ? {} : { signInReason: r.reason }),
       ...(m.upstream.capabilities ? { capabilities: { ...m.upstream.capabilities } } : {}),
     };
@@ -646,6 +660,11 @@ export async function listModels(projectDir) {
   return composeCatalog(customModels, { projectDir });
 }
 
+/** A vault reference in a model's env, resolved as that env key's settings field ('' when it does not resolve). */
+function resolveModelEnvRef(value, key) {
+  try { return resolveSettingsSecretSync(value, settingsSecretField('models', 'env', key)); } catch { return ''; }
+}
+
 /**
  * The routing env for a model id (design §4.4, §9.3), or undefined when none
  * is configured. The user's GLOBAL entry wins; otherwise the winning enabled
@@ -689,7 +708,7 @@ export function resolveModelEnv(modelId, { tag } = {}) {
       throw err;
     }
     const base = bridged.source === 'global' && entry ? entry : null;
-    const { env: extra, dropped } = prepareModelEnv(base && base.env ? base.env : {});
+    const { env: extra, dropped } = prepareModelEnv(base && base.env ? base.env : {}, process.env, { resolveRef: resolveModelEnvRef });
     for (const k of dropped) {
       console.warn(`[worca] model ${JSON.stringify(bridged.id)}: dropping env key ${JSON.stringify(k)} (reserved or unresolvable \${VAR} ref)`);
     }
@@ -746,7 +765,10 @@ export function resolveModelEnv(modelId, { tag } = {}) {
     }
   }
   if (!rawEnv) return undefined;
-  const { env, dropped } = prepareModelEnv(rawEnv);
+  // Only the user's own global entry resolves a vault reference: a plugin or team-policy env naming one is
+  // dropped, so another layer can never read the person's vaulted keys (confused deputy).
+  const fromUser = !!(entry && rawEnv === entry.env);
+  const { env, dropped } = prepareModelEnv(rawEnv, process.env, fromUser ? { resolveRef: resolveModelEnvRef } : {});
   for (const k of dropped) {
     console.warn(`[worca] model ${who}: dropping env key ${JSON.stringify(k)} (reserved or unresolvable \${VAR} ref)`);
   }
@@ -765,7 +787,7 @@ export function resolveModelEnv(modelId, { tag } = {}) {
  *  id a Codex or Copilot built-in also has. Synchronous; never throws. */
 function catalogEngineRows(projectDir = null) {
   // `harnesses`: every harness the entry's connection reaches (src/shared/connections.mjs); `engine` the first.
-  const row = (m, engine = engineTag(m)) => { const connection = connectionOf({ ...m, engine }); return { id: m.id, engine, connection, harnesses: harnessesOf({ connection }) }; };
+  const row = (m, engine = engineTag(m)) => { const connection = connectionOf({ ...m, engine }); return { id: m.id, engine, connection, harnesses: harnessesOf({ connection }), label: m.label || m.name || m.id }; };
   return [
     ...listGlobalModels().map((m) => row(m)),
     ...listPluginModels().map((m) => row(m)),
@@ -782,6 +804,11 @@ function catalogRowOf(modelId, projectDir = null) {
   if (!id) return null;
   const lc = id.toLowerCase();
   return catalogEngineRows(projectDir).find((r) => r.id.toLowerCase() === lc) || null;
+}
+
+/** A catalog model's display label (synchronous; the id itself for an unknown id). */
+export function modelLabelOf(modelId, { projectDir = null } = {}) {
+  return catalogRowOf(modelId, projectDir)?.label || String(modelId ?? '');
 }
 
 /** Every harness that can run `modelId`, or null for an id no catalog layer knows (a bare Claude Code id or
@@ -819,6 +846,8 @@ export function engineOfModel(modelId, { projectDir = null } = {}) {
 setCascadeModelOwnerReader((id, { projectDir = null } = {}) => enginesOfModel(id, { projectDir }));
 // Roles check their model with the same reader (a role on a model a failed import never created falls back, D3).
 setRoleModelOwnerReader((id) => enginesOfModel(id));
+// #1450 D-n: helpers read Claude's sign-in synchronously from the role probe's memo; cold → 'unknown' → Worca default.
+setRoleAuthReader(() => roleAuthMemo?.state ?? 'unknown');
 
 /** Why a run-level model cannot run on `engine` (no harness of its connection is that engine), else null. */
 export function foreignRunModel(model, engine, projectDir = null) {
@@ -859,7 +888,11 @@ export async function assertSlotModels(items, { projectDir = '', pending = [] } 
     if (!hit) throw bad(`unknown model "${value.model}" — add it to the catalog first`);
     if (!runsOn(hit, engine)) throw bad(`"${hit.id}" runs on ${harnessesLabel(hit)} — this slot picks a model ${engineLabel(engine)} can run`);
     // A pending row has no efforts yet; only a catalog row is checked (role efforts never reach here, A7).
-    if (value.effort && models.includes(hit) && !effortsOn(hit, engine).includes(value.effort)) throw bad(`${hit.id} does not offer effort "${value.effort}" on ${engineLabel(engine)}`);
+    // A model that offers no effort accepts the pick with or without one: the effort is inert. That covers every
+    // Cursor model (cursor-agent has no effort lever) and an OpenCode Zen `opencode/*`, whose catalog row advertises
+    // none because OpenCode 2.3.1+ refuses any variant on it (buildOpencodeArgs drops it).
+    const offered = effortsOn(hit, engine);
+    if (value.effort && models.includes(hit) && offered.length && !offered.includes(value.effort)) throw bad(`${hit.id} does not offer effort "${value.effort}" on ${engineLabel(engine)}`);
   }
 }
 
@@ -927,12 +960,18 @@ export async function resolveStepModels(projectDir, fallbackModel, engine = 'cla
   const { roles } = await projectRolesFor(eng, projectDir);
   const out = {};
   for (const { key, label } of agentSteps()) {
-    const own = eng === 'claude' ? (cfg.steps[key] || {}) : {};
+    // The legacy per-role steps (project_config.steps, wf_default's storage) apply on ANY engine — `modelForEngine`
+    // below keeps a pick only when the engine runs it, so a stale Claude pick on an opencode run (or vice versa)
+    // falls through to the slot/fallback instead of being reported as a model this run will spawn. Before
+    // multi-engine this was claude-only, silently discarding per-role picks saved on other engines.
+    const own = cfg.steps[key] || {};
     const sel = own.model || own.effort ? own : (slots[key] || {});
     // Model roles (D3, D15): after the slot's own value and the run's model, before "no --model"; team roles included.
-    const role = !sel.model && !sel.effort && !fallback ? resolveRoleModel(eng, roleOf(`steps.${key}`, { name: label }), { roles }) : null;
+    // #1450: an empty role resolves to Worca's default (filled like a role); "Let <tool> decide" leaves it unset.
+    const pick = !sel.model && !sel.effort && !fallback ? resolveRolePick(eng, roleOf(`steps.${key}`, { name: label }), { roles }) : null;
+    const role = pick && pick.kind !== 'cli-decides' ? pick : null;
     const roleModel = role ? modelForEngine(role.model, eng, { projectDir }) : undefined;
-    out[key] = { model: sel.model || fallback || roleModel || undefined, effort: sel.effort || (roleModel ? role.effort : undefined) };
+    out[key] = { model: modelForEngine(sel.model || undefined, eng, { projectDir }) || fallback || roleModel || undefined, effort: sel.effort || (roleModel ? role.effort : undefined) };
   }
   return out;
 }
@@ -1013,8 +1052,11 @@ function inheritOrSubagentModel(next, prev) {
 /**
  * Set (or clear) the model + effort for one agent step. An empty model => inherit
  * the global/CLI default; an empty effort => model default. Effort must be supported
- * by the chosen model. fanOut is preserved when the caller omits it (only the toggle
- * sends it) and set when a boolean. Returns the updated legacy view.
+ * by the chosen model. A model the catalog no longer holds is refused, except the
+ * step's stored one sent back with its stored effort or none and its stored harness
+ * or none (a save of another tunable): that pick is kept unchecked. fanOut is preserved
+ * when the caller omits it (only the toggle sends it) and set when a boolean. Returns
+ * the updated legacy view.
  * @returns {Promise<{steps:object, customModels:Array}>}
  */
 export async function setStep(projectDir, step, selection = {}) {
@@ -1023,15 +1065,11 @@ export async function setStep(projectDir, step, selection = {}) {
   const effort = typeof selection.effort === 'string' ? selection.effort.trim() : '';
 
   const models = await listModels(projectDir);
-  const entry = model ? models.find((m) => m.id === model) : null;
-  if (model && !entry) throw new Error(`unknown model "${model}"`);
-  if (effort) {
-    if (!ALL_EFFORTS.includes(effort)) throw new Error(`unknown effort "${effort}"`);
-    if (!entry) throw new Error('select a model before choosing an effort');
-    if (!entry.efforts.includes(effort)) {
-      throw new Error(`model "${model}" does not support effort "${effort}"`);
-    }
-  }
+  const cfg = readRaw(projectDir);
+  const prev = cfg.steps[step] || {};
+  // The harness the step's pick pins, by the absent / clear / keep rule (writtenEngine checks it, effort included).
+  const engine = writtenEngine(selection.engine, { model, effort, prevModel: prev.model, prevEngine: prev.engine, prevEffort: prev.effort, models });
+  if (!engine) assertCatalogPick(model, effort, models, null, { kept: { model: prev.model, effort: prev.effort } });
 
   {
     const issue = subagentModelIssue(selection.subagentModel);
@@ -1039,8 +1077,6 @@ export async function setStep(projectDir, step, selection = {}) {
   }
 
   const key = projectKey(projectDir);
-  const cfg = readRaw(projectDir);
-  const prev = cfg.steps[step] || {};
   // model/effort keep replace semantics (undefined => cleared); fanOut is preserved
   // when the caller omits it (only the toggle sends it), set when a boolean, and
   // CLEARED on an explicit null — the New-Pipeline accordion prunes a toggle back
@@ -1058,6 +1094,7 @@ export async function setStep(projectDir, step, selection = {}) {
   else steps[step] = {
     ...(model && { model }),
     ...(effort && { effort }),
+    ...(engine && { engine }),
     ...(subagentModel && { subagentModel }),
     ...(fanOut !== undefined && { fanOut }),
     ...(askQuestions !== undefined && { askQuestions }),
@@ -1154,8 +1191,8 @@ export async function promoteCustomModel(projectDir, id) {
 // nested shape from those rows. activeWorkflowId is project_config.active_workflow_id;
 // unknown top-level keys (e.g. webUiTesting) round-trip via project_config.extra.
 
-/** Coerce a per-node selection to a clean {model?,effort?,subagentModel?,fanOut?,askQuestions?}
- *  or null (all empty). */
+/** Coerce a per-node selection to a clean {model?,effort?,engine?,subagentModel?,fanOut?,askQuestions?}
+ *  or null (all empty). `engine` is kept only beside a model (pickEngine). */
 function cleanNodeSel(selection) {
   const model = typeof selection?.model === 'string' ? selection.model.trim() : '';
   const effort = typeof selection?.effort === 'string' ? selection.effort.trim() : '';
@@ -1163,9 +1200,11 @@ function cleanNodeSel(selection) {
   const fanOut = typeof selection?.fanOut === 'boolean' ? selection.fanOut : undefined;
   const askQuestions = typeof selection?.askQuestions === 'boolean' ? selection.askQuestions : undefined;
   if (!model && !effort && !subagentModel && fanOut === undefined && askQuestions === undefined) return null;
+  const engine = pickEngine({ model, engine: selection?.engine });
   return {
     ...(model && { model }),
     ...(effort && { effort }),
+    ...(engine && { engine }),
     ...(subagentModel && { subagentModel }),
     ...(fanOut !== undefined && { fanOut }),
     ...(askQuestions !== undefined && { askQuestions }),
@@ -1186,22 +1225,58 @@ function storedRolePicks(text) {
   return Object.keys(out).length ? out : null;
 }
 
-/** A node or role pick checked against the effective catalog (setStep's rules). */
-function assertCatalogPick(model, effort, models) {
+/** setStep's catalog rules, plus, with `engine`: a harness name (`unknown harness "<x>"`), a model beside it
+ *  (`select a model before choosing a harness`), a model that runs there (`model "<m>" does not run on <Harness>`,
+ *  skipped when `stored`), and an effort from pickEffortsOn(entry, engine). A model the catalog does not hold is
+ *  `unknown model "<m>"`, except `kept.model`, the one already stored, sent back with its stored effort (`kept.effort`)
+ *  or none and its stored harness (`stored`) or none: it cannot be checked, so it is kept unchecked. @throws {Error} */
+function assertCatalogPick(model, effort, models, engine = null, { stored = false, kept = null } = {}) {
   const entry = model ? models.find((m) => m.id === model) : null;
-  if (model && !entry) throw new Error(`unknown model "${model}"`);
+  if (model && !entry) {
+    if (kept?.model === model && (engine === null || stored) && (!effort || effort === kept.effort)) return;
+    throw new Error(`unknown model "${model}"`);
+  }
+  if (engine !== null) {
+    if (typeof engine !== 'string') throw new Error('engine must be a string');
+    if (!MODEL_ENGINE_NAMES.includes(engine)) throw new Error(`unknown harness "${engine.slice(0, 32)}"`);
+    if (!model) throw new Error('select a model before choosing a harness');
+    if (!stored && !runsOn(entry, engine)) throw new Error(`model "${model}" does not run on ${engineLabel(engine)}`);
+  }
   if (effort) {
     if (!ALL_EFFORTS.includes(effort)) throw new Error(`unknown effort "${effort}"`);
     if (!entry) throw new Error('select a model before choosing an effort');
-    if (!entry.efforts.includes(effort)) {
+    if (!(engine ? pickEffortsOn(entry, engine) : entry.efforts).includes(effort)) {
       throw new Error(`model "${model}" does not support effort "${effort}"`);
     }
   }
 }
 
+/** The engine a write leaves on a node or legacy-step pick (spec "The contract"):
+ *  absent: `prevEngine` when `model === prevModel`, unchecked (stored); else null.
+ *  null or '': null.  Not a string: throws 'engine must be a string'.
+ *  A string equal to `prevEngine` beside `model === prevModel`: kept, checked as `stored`.  Any other string: fully checked.
+ *  A kept or written engine is checked with the pick's effort (assertCatalogPick); a null one is left to the caller.
+ *  The stored pick (`prevModel`, `prevEffort`) is `kept`: a stored model the catalog lost passes with its stored
+ *  engine and effort, or none, and with no other. */
+function writtenEngine(raw, { model, effort, prevModel, prevEngine, prevEffort, models }) {
+  const sameModel = !!model && model === prevModel;
+  const prev = typeof prevEngine === 'string' && MODEL_ENGINE_NAMES.includes(prevEngine) ? prevEngine : null;
+  const kept = { model: prevModel, effort: prevEffort };
+  if (raw === undefined) {
+    if (!sameModel || !prev) return null;
+    assertCatalogPick(model, effort, models, prev, { stored: true, kept });
+    return prev;
+  }
+  if (raw === null || raw === '') return null;
+  if (typeof raw !== 'string') throw new Error('engine must be a string');
+  assertCatalogPick(model, effort, models, raw, { stored: sameModel && raw === prev, kept });
+  return raw;
+}
+
 const MAX_ROLE_PICKS = 12;
 
-/** `selection.roles` of setNodeModel, checked and cleaned: `{ key: { model?, effort? } }` (blank picks dropped). */
+/** `selection.roles` of setNodeModel, checked and cleaned: `{ key: { model?, effort?, engine? } }` (blank picks dropped).
+ *  A role's raw `engine` must be a string naming a harness that runs its model. */
 function cleanRolePicks(raw, models) {
   if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('roles must be an object keyed by role');
   const keys = Object.keys(raw);
@@ -1209,9 +1284,12 @@ function cleanRolePicks(raw, models) {
   const out = {};
   for (const k of keys) {
     if (!ROLE_KEY_RE.test(k)) throw new Error(`role key ${JSON.stringify(k.slice(0, 64))} must be 1–24 lowercase letters`);
+    const rawEngine = raw[k] && typeof raw[k] === 'object' ? raw[k].engine : undefined;
+    const engine = rawEngine === undefined || rawEngine === null || rawEngine === '' ? null : rawEngine;
+    if (engine !== null && typeof engine !== 'string') throw new Error('engine must be a string');
     const pick = cleanPick(raw[k]);
-    if (!pick) continue;
-    assertCatalogPick(pick.model || '', pick.effort || '', models);
+    if (!pick) { if (engine !== null) assertCatalogPick('', '', models, engine); continue; }
+    assertCatalogPick(pick.model || '', pick.effort || '', models, engine);
     out[k] = pick;
   }
   return out;
@@ -1237,11 +1315,13 @@ function readWorkflowsMap(key) {
     return workflows[wf];
   };
   for (const r of prepare(
-    'SELECT workflow_id, node_id, model, effort, fan_out, ask_questions, subagent_model, roles FROM config_workflow_nodes WHERE project_key = ?'
+    'SELECT workflow_id, node_id, model, effort, engine, fan_out, ask_questions, subagent_model, roles FROM config_workflow_nodes WHERE project_key = ?'
   ).all(key)) {
     const sel = {};
     if (r.model) sel.model = r.model;
     if (r.effort) sel.effort = r.effort;
+    const engine = pickEngine({ model: r.model, engine: r.engine });
+    if (engine) sel.engine = engine;
     if (isSubagentModelValue(r.subagent_model)) sel.subagentModel = r.subagent_model;
     if (r.fan_out !== null && r.fan_out !== undefined) sel.fanOut = !!r.fan_out;
     if (r.ask_questions !== null && r.ask_questions !== undefined) sel.askQuestions = !!r.ask_questions;
@@ -1314,8 +1394,8 @@ export async function readRunConfig(projectDir) {
  * row), set when a boolean, and cleared on an explicit null. Writes only the config_workflow_nodes table
  * (legacy view + extra untouched). Model/effort validate against the effective
  * catalog exactly like setStep (design §4.5 — the two write paths must not
- * disagree); rows persisted before this hardening are validated only when
- * next written.
+ * disagree), the stored model the catalog lost sent back unchanged included;
+ * rows persisted before this hardening are validated only when next written.
  * @param {string} projectDir
  * @param {string} workflowId
  * @param {string} nodeId
@@ -1326,7 +1406,13 @@ export async function setNodeModel(projectDir, workflowId, nodeId, selection = {
   const model = typeof selection.model === 'string' ? selection.model.trim() : '';
   const effort = typeof selection.effort === 'string' ? selection.effort.trim() : '';
   const models = await listModels(projectDir);
-  assertCatalogPick(model, effort, models);
+  const key = projectKey(projectDir);
+  getDb();
+  const prev = prepare(
+    'SELECT model, effort, engine, fan_out, ask_questions, subagent_model, roles FROM config_workflow_nodes WHERE project_key = ? AND workflow_id = ? AND node_id = ?'
+  ).get(key, workflowId, nodeId);
+  const engine = writtenEngine(selection.engine, { model, effort, prevModel: prev?.model, prevEngine: prev?.engine, prevEffort: prev?.effort, models });
+  if (!engine) assertCatalogPick(model, effort, models, null, { kept: { model: prev?.model, effort: prev?.effort } });
   const roles = selection.roles === undefined ? undefined : cleanRolePicks(selection.roles, models);
 
   {
@@ -1334,17 +1420,12 @@ export async function setNodeModel(projectDir, workflowId, nodeId, selection = {
     if (issue) throw new Error(issue);
   }
 
-  const key = projectKey(projectDir);
-  getDb();
-  const prev = prepare(
-    'SELECT fan_out, ask_questions, subagent_model, roles FROM config_workflow_nodes WHERE project_key = ? AND workflow_id = ? AND node_id = ?'
-  ).get(key, workflowId, nodeId);
   const prevFanOut = prev && prev.fan_out !== null && prev.fan_out !== undefined ? !!prev.fan_out : undefined;
   const fanOut = inheritOr(selection.fanOut, prevFanOut);
   const prevAsk = prev && prev.ask_questions !== null && prev.ask_questions !== undefined ? !!prev.ask_questions : undefined;
   const askQuestions = inheritOr(selection.askQuestions, prevAsk);
   const subagentModel = inheritOrSubagentModel(selection.subagentModel, prev && prev.subagent_model);
-  const sel = cleanNodeSel({ model: selection.model, effort: selection.effort, subagentModel, fanOut, askQuestions });
+  const sel = cleanNodeSel({ model: selection.model, effort: selection.effort, engine, subagentModel, fanOut, askQuestions });
   // Role picks are inherited when omitted; an empty map clears them. A row holding only role picks is kept.
   const rolesJson = roles === undefined ? (prev?.roles ?? null) : (Object.keys(roles).length ? JSON.stringify(roles) : null);
 
@@ -1356,16 +1437,17 @@ export async function setNodeModel(projectDir, workflowId, nodeId, selection = {
       return;
     }
     prepare(`
-      INSERT INTO config_workflow_nodes (project_key, workflow_id, node_id, model, effort, fan_out, ask_questions, subagent_model, roles)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO config_workflow_nodes (project_key, workflow_id, node_id, model, effort, engine, fan_out, ask_questions, subagent_model, roles)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(project_key, workflow_id, node_id)
-      DO UPDATE SET model = excluded.model, effort = excluded.effort,
+      DO UPDATE SET model = excluded.model, effort = excluded.effort, engine = excluded.engine,
                     fan_out = excluded.fan_out, ask_questions = excluded.ask_questions,
                     subagent_model = excluded.subagent_model, roles = excluded.roles
     `).run(
       key, workflowId, nodeId,
       sel?.model ?? null,
       sel?.effort ?? null,
+      sel?.engine ?? null,
       sel?.fanOut === undefined ? null : (sel.fanOut ? 1 : 0),
       sel?.askQuestions === undefined ? null : (sel.askQuestions ? 1 : 0),
       sel?.subagentModel ?? null,
@@ -1622,17 +1704,45 @@ export function writeActionsMeta(key, patch) {
   writeExtraKey(key, ACTIONS_META_KEY, { ...readActionsMeta(key), ...patch });
 }
 
-function writeExtraKey(key, name, value) {
+/** Read-modify-write ONE extra key in a single transaction: `mutate(current)` returns the new value. */
+function mutateExtraKey(key, name, mutate) {
+  let next;
   tx(() => {
     const row = prepare('SELECT extra FROM project_config WHERE project_key = ?').get(key);
     const extra = row ? parseJson(row.extra, {}) : {};
-    extra[name] = value;
+    next = mutate(extra[name]);
+    extra[name] = next;
     prepare(`
       INSERT INTO project_config (project_key, steps, custom_models, active_workflow_id, extra)
       VALUES (?, '{}', '[]', NULL, ?)
       ON CONFLICT(project_key) DO UPDATE SET extra = excluded.extra
     `).run(key, JSON.stringify(extra));
   });
+  return next;
+}
+function writeExtraKey(key, name, value) { mutateExtraKey(key, name, () => value); }
+
+// ── Execution environment (project_config.extra.execEnvProject) ─────────────
+// The project's execution-environment record (src/core/exec-env/project-env.mjs; plans/e2b-execution-design.md §18):
+// per-backend project fields (e.g. { e2b: { template } }), the environment spec, and the last SUCCESSFUL build per
+// backend. Lives in worca's DB, never in the repo. Same KEY-taking contract as the team-metrics pair.
+const EXEC_ENV_KEY = 'execEnvProject';
+const emptyExecEnv = () => ({ config: {}, spec: null, builds: {} });
+function execEnvOf(v) {
+  if (!v || typeof v !== 'object' || Array.isArray(v)) return emptyExecEnv();
+  const obj = (x) => (x && typeof x === 'object' && !Array.isArray(x) ? x : {});
+  return { config: obj(v.config), spec: v.spec && typeof v.spec === 'object' ? v.spec : null, builds: obj(v.builds) };
+}
+export function readProjectExecEnv(key) {
+  assertProjectKey(key);
+  const row = prepare('SELECT extra FROM project_config WHERE project_key = ?').get(key);
+  return execEnvOf((row ? parseJson(row.extra, {}) : {})[EXEC_ENV_KEY]);
+}
+/** Read-modify-write in ONE transaction: a template Save, a spec change and a finished build can race.
+ *  `mutate(record)` edits the record in place; it must never call another config writer (tx is not re-entrant). */
+export function updateProjectExecEnv(key, mutate) {
+  assertProjectKey(key);
+  return mutateExtraKey(key, EXEC_ENV_KEY, (cur) => { const next = execEnvOf(cur); mutate(next); return next; });
 }
 
 // ── Team-policy preferences (project_config.extra.teamPolicy) ──────────────

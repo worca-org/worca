@@ -1,14 +1,29 @@
 // test/ui-history-detail-diff.test.mjs
 // History detail, the Diff tab: file list, patch viewer, windowing and highlighting.
 // Shared boot and fixtures: helpers/history-detail-boot.mjs.
-import { test } from 'node:test';
+import { test, before, beforeEach, after } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  WINDOW, settle, go, KEY, ROW, DETAIL, ok, fail, bootDetail, openDetail, click, secOf, PATCH,
+  WINDOW, settle, go, KEY, ROW, DETAIL, ok, fail, openDetail, click, secOf, PATCH,
   diffResults, diffDetail, patchArm, filesOf, fileOf, paneOf, MAX_FILE_SECTION_CODE_UNITS,
-  MAX_HIGHLIGHT_INPUT_BYTES,
+  MAX_HIGHLIGHT_INPUT_BYTES, detailOn, historyFetch,
 } from './helpers/history-detail-boot.mjs';
 import { checkRows } from './helpers/rows.mjs';
+import { useSharedApp } from './helpers/shared-app-boot.mjs';
+import { createHljsLoader } from '../ui/public/hljs-loader.mjs';
+
+// app.js takes its highlighter once, when it loads (window.__worcaTestHooks.hljsLoader). The file's hands each language
+// to the test's own loader (bootDetail's hljsLoader), else to a new real one, as each boot of app.js made.
+let hljs = createHljsLoader();
+const app = useSharedApp({ before, beforeEach, after }, {
+  fetchHandler: historyFetch(),
+  hooks: { hljsLoader: { forLanguage: (lang) => hljs.forLanguage(lang) } },
+});
+const openDetailPage = detailOn(app).detail;
+const bootDetail = (opts = {}) => {
+  hljs = opts.hljsLoader ?? createHljsLoader();
+  return openDetailPage(opts);
+};
 
 // ---------------------------------------------------------------------------
 // Diff tab — file list + patch viewer
@@ -616,11 +631,9 @@ const addedFileResults = (path, n) => diffResults({
 const bodyOf = (doc) => doc.querySelector('#hist-detail .hd-diff-body');
 const rowsOf = (doc) => doc.querySelectorAll('#hist-detail .hd-dl-row');
 const moreOf = (doc) => doc.querySelector('#hist-detail .hd-dl-more');
-// The Diff tab's size knobs (window.__worcaTestHooks, read once per app.js instance): a
-// 50-row window and a 2,000-code-unit parse cap keep the windowing fixtures at ~60 rows.
-// The production values stay pinned hook-free (the 5,001-row test below and the cap test).
-const WIN = 50;
-const SMALL = { diffWindowLines: WIN, maxSectionCodeUnits: 2000 };
+// The Diff tab's size knobs (window.__worcaTestHooks) are read once, when app.js loads: the windowing tests that set
+// them are in test/ui-history-detail-diff-small-window.test.mjs and test/ui-history-detail-diff-section-cap.test.mjs.
+// The production window stays pinned hook-free here (the 5,001-row test below).
 
 test('the production window is 5,000 rows: 5,001 rows connect 5,000 plus a one-line show-more', async () => {
   const N = WINDOW + 1;
@@ -637,181 +650,123 @@ test('the production window is 5,000 rows: 5,001 rows connect 5,000 plus a one-l
   assert.equal(bodyOf(doc).style.getPropertyValue('--hd-gutter-width'), 'calc(4ch + 16px)');
 });
 
-test('a long diff connects one window plus an honest show-more row that steps one window at a time (running total, singular form)', async () => {
-  await checkRows([
-    { name: 'a long diff connects one window of rows plus an honest show-more row, never a truncation note', run: async () => {
-      const N = WIN + 10;
-      const ctx = await bootDetail({
-        detail: diffDetail(addedFileResults('many.js', N)), arms: patchArm(addedLinesPatch('many.js', N)), hooks: SMALL,
-      });
-      await openDetail(ctx);
-      await settle(ctx.window, 5);
-      const doc = ctx.window.document;
-      assert.equal(rowsOf(doc).length, WIN);
-      assert.equal(doc.querySelectorAll('#hist-detail .hd-dl-hunk').length, 1);
-      assert.equal(doc.querySelector('#hist-detail .hd-diff-trunc'), null, 'nothing was dropped, so no truncation note');
-      const more = moreOf(doc);
-      assert.ok(more, 'the hidden rows are one click away');
-      assert.equal(more.classList.contains('hd-dl-row'), false, 'a real grid row, not display:contents');
-      assert.equal(more.dataset.path, 'many.js', 'carries the same section identity as every other row');
-      assert.match(more.querySelector('.hd-dl-more-hint').textContent, /^50 of 60 lines shown$/);
-      const button = more.querySelector('button.hd-dl-more-btn');
-      assert.equal(button.type, 'button');
-      assert.equal(button.textContent, 'Show 10 more lines');
-      assert.equal(more, bodyOf(doc).lastElementChild);
-      // The gutter is sized for the WIDEST number in the whole file up front, so
-      // expanding never shifts the columns.
-      assert.equal(bodyOf(doc).style.getPropertyValue('--hd-gutter-width'), 'calc(3ch + 16px)');
+// ---------------------------------------------------------------------------
+// Diff tab — the file head's open-in-editor icon (diff-open-editor.mjs)
+// ---------------------------------------------------------------------------
 
-      click(ctx.window, button);
-      await settle(ctx.window);
-      assert.equal(rowsOf(doc).length, N);
-      assert.equal(moreOf(doc), null);
-      assert.equal(doc.querySelectorAll('#hist-detail .hd-dl-hunk').length, 1, 'the continued hunk gets no second header');
-      const last = [...rowsOf(doc)].at(-1);
-      assert.equal(last.dataset.new, String(N));
-      assert.equal(last.querySelector('.hd-dl-code').textContent, `+const n${N} = ${N};`);
-    } },
-    { name: 'show-more steps one window at a time, reporting the running total and the singular form', run: async () => {
-      const N = 2 * WIN + 1;
-      const ctx = await bootDetail({
-        detail: diffDetail(addedFileResults('big.js', N)), arms: patchArm(addedLinesPatch('big.js', N)), hooks: SMALL,
-      });
-      await openDetail(ctx);
-      await settle(ctx.window, 5);
-      const doc = ctx.window.document;
-      assert.equal(rowsOf(doc).length, WIN);
-      assert.equal(moreOf(doc).querySelector('button').textContent, `Show ${WIN} more lines`);
-
-      click(ctx.window, moreOf(doc).querySelector('button'));
-      await settle(ctx.window);
-      assert.equal(rowsOf(doc).length, 2 * WIN);
-      assert.equal(doc.querySelectorAll('#hist-detail .hd-dl-more').length, 1, 'the used control is replaced, not stacked');
-      assert.match(moreOf(doc).querySelector('.hd-dl-more-hint').textContent, /^100 of 101 lines shown$/);
-      assert.equal(moreOf(doc).querySelector('button').textContent, 'Show 1 more line');
-
-      click(ctx.window, moreOf(doc).querySelector('button'));
-      await settle(ctx.window);
-      assert.equal(rowsOf(doc).length, N);
-      assert.equal(moreOf(doc), null);
-    } },
-  ]);
-});
-
-test('a window boundary inside a hunk continues that hunk; later hunks still get their headers', async () => {
-  // hunk 1 fills the window exactly (WIN lines) and hunk 2 follows: the
-  // first window must not render hunk 2's header as a dangling last row.
-  const first = Array.from({ length: WIN }, (_, i) => `+a${i}`);
-  const second = ['+b1', '+b2', '+b3'];
-  const patch = `diff --git a/two.js b/two.js
---- a/two.js
-+++ b/two.js
-@@ -0,0 +1,${first.length} @@
-${first.join('\n')}
-@@ -10,0 +${first.length + 11},3 @@
-${second.join('\n')}
-`;
-  const ctx = await bootDetail({
-    detail: diffDetail(addedFileResults('two.js', first.length + 3)), arms: patchArm(patch), hooks: SMALL,
-  });
-  await openDetail(ctx);
-  await settle(ctx.window, 5);
-  const doc = ctx.window.document;
-  assert.equal(rowsOf(doc).length, WIN);
-  assert.equal(doc.querySelectorAll('#hist-detail .hd-dl-hunk').length, 1);
-  assert.equal(moreOf(doc).querySelector('button').textContent, 'Show 3 more lines');
-  click(ctx.window, moreOf(doc).querySelector('button'));
-  await settle(ctx.window);
-  const hunks = [...doc.querySelectorAll('#hist-detail .hd-dl-hunk')];
-  assert.equal(hunks.length, 2);
-  assert.equal(hunks[1].nextElementSibling.querySelector('.hd-dl-code').textContent, '+b1');
-  assert.equal(rowsOf(doc).length, WIN + 3);
-});
-
-test('the section-size cap still reports truncation, after the show-more row', async () => {
-  // The PRODUCTION cap (no maxSectionCodeUnits hook: the one hook-free pin of app.js's
-  // default). 91 code units per row, so N rows exceed MAX_FILE_SECTION_CODE_UNITS and the
-  // parser drops the tail (that loss is real and is said so); a 50-row window keeps the
-  // render cheap.
-  const W = 50;
-  const N = Math.ceil(MAX_FILE_SECTION_CODE_UNITS / 91) + 100;
-  const lines = Array.from({ length: N }, () => '+' + 'x'.repeat(89));
-  const patch = `diff --git a/huge.txt b/huge.txt
---- /dev/null
-+++ b/huge.txt
-@@ -0,0 +1,${N} @@
-${lines.join('\n')}
-`;
-  const ctx = await bootDetail({
-    detail: diffDetail(addedFileResults('huge.txt', N)), arms: patchArm(patch), hooks: { diffWindowLines: W },
-  });
-  await openDetail(ctx);
-  await settle(ctx.window, 5);
-  const doc = ctx.window.document;
-  assert.equal(rowsOf(doc).length, W);
-  const body = bodyOf(doc);
-  const note = body.querySelector('.hd-diff-trunc');
-  assert.equal(note.textContent, '(large file, diff truncated)');
-  assert.doesNotMatch(note.textContent, /KB/);
-  assert.equal(note, body.lastElementChild, 'the note stays the last row');
-  assert.equal(note.previousElementSibling, moreOf(doc), 'show-more sits just above it');
-  const shown = Number(/^(\d+) of (\d+) lines shown$/.exec(moreOf(doc).querySelector('.hd-dl-more-hint').textContent)[2]);
-  assert.ok(shown > 5_000 && shown < N, `the total counts parsed rows only (${shown})`);
-});
-
-test('rows connected by show-more are highlighted once both the rows and the highlighter exist', async () => {
-  // Hunk 1 is ineligible for highlighting (its header count is wrong, so it
-  // stays plain) and fills the first window; hunk 2 is eligible but only
-  // connects after a click. Both orders must end with hunk 2 enhanced.
-  const bulk = Array.from({ length: WIN + 5 }, (_, i) => `+x${i}`);
-  const patch = `diff --git a/src/a.js b/src/a.js
+const OPEN_PATCH = `diff --git a/src/a.js b/src/a.js
 --- a/src/a.js
 +++ b/src/a.js
-@@ -0,0 +1,2 @@
-${bulk.join('\n')}
-@@ -1 +1 @@
+@@ -10,3 +12,3 @@
+ keep
 -old
-+valid
++new
+diff --git a/src/b.js b/src/b.js
+--- a/src/b.js
++++ b/src/b.js
+@@ -1 +3 @@
+-x
++y
 `;
-  const results = diffResults({
-    summary: { linesAdded: bulk.length + 1, linesRemoved: 1 },
-    results: { changedFiles: [{ path: 'src/a.js', status: 'M', added: bulk.length + 1, removed: 1 }] },
-  });
-  const highlighter = {
-    lang: 'javascript',
-    highlight: (text) => text.replace(/valid/g, '<span class="hljs-keyword">valid</span>'),
-  };
-  const enhancedSources = (doc) => [...doc.querySelectorAll('#hist-detail .hd-dl-src')]
-    .filter((source) => source.querySelector('.hljs-keyword'))
-    .map((source) => source.textContent);
+const editorModel = (member = {}, over = {}) => ({ enabled: true, finished: true, workspace: false, checkoutBlocked: null,
+  members: [{ projectKey: KEY, state: 'checked-out', builtins: [{ key: 'editor', label: 'Cursor' }], ...member }], ...over });
+const twoFiles = () => diffResults({ summary: { filesChanged: 2, linesAdded: 2, linesRemoved: 2 },
+  results: { changedFiles: [{ path: 'src/a.js', status: 'M', added: 1, removed: 1 }, { path: 'src/b.js', status: 'M', added: 1, removed: 1 }] } });
 
-  // Order A: the highlighter finishes first, the click comes later.
-  const ready = await bootDetail({
-    detail: diffDetail(results), arms: patchArm(patch), hooks: SMALL,
-    hljsLoader: { async forLanguage() { return highlighter; } },
-  });
-  await openDetail(ready);
-  await settle(ready.window, 6);
-  assert.deepEqual(enhancedSources(ready.window.document), []);
-  click(ready.window, moreOf(ready.window.document).querySelector('button'));
-  await settle(ready.window);
-  assert.deepEqual(enhancedSources(ready.window.document), ['valid']);
-  assert.equal(rowsOf(ready.window.document).length, bulk.length + 2);
+/** Boot the Diff tab with an Actions model and recorded POSTs; `open` answers the open route. Each boot opens a run of
+ *  its own (`id`): app.js keeps a run's Actions model, which draws the editor button, for the life of the shared app. */
+let opens = 0;
+async function bootOpen({ model, detail = diffDetail(twoFiles()), open = () => ok({ ok: true }), actions = null } = {}) {
+  const id = `fcec${String(++opens).padStart(4, '0')}`;
+  const posts = [];
+  const ctx = await bootDetail({ rows: [{ ...ROW, id }], detail: { ...detail, state: { ...detail.state, id } }, arms: (url, opts, box) => {
+    if (url.endsWith('/diff')) return Promise.resolve({ ok: true, status: 200, text: async () => OPEN_PATCH });
+    if (url.endsWith(`/api/history/${KEY}/${id}`)) return ok(box.detail);
+    if (url.startsWith(`/api/runs/${id}/actions?`)) return actions ? actions() : ok(model);
+    if (url.startsWith(`/api/runs/${id}/checkout?`) && opts.method === 'POST') { posts.push({ url, body: JSON.parse(opts.body) }); return ok({ members: [] }); }
+    if (url.startsWith(`/api/runs/${id}/open-in-editor?`)) { posts.push({ url, body: JSON.parse(opts.body) }); return open(); }
+    return null;
+  } });
+  go(ctx.window, `history/${KEY}/${id}/details/diff`);   // openDetail, for this run
+  await settle(ctx.window);
+  await settle(ctx.window, 6);
+  return { ctx, doc: ctx.window.document, posts, id };
+}
+const openBtn = (doc) => paneOf(doc).querySelector('.hd-diff-pane-head .hd-diff-head-end > .hd-diff-open');
 
-  // Order B: the click lands while the grammar is still loading.
+test("file head: a checked-out run's file opens at its first changed line", async () => {
+  const { ctx, doc, posts, id } = await bootOpen({ model: editorModel() });
+  const b = openBtn(doc);
+  assert.ok(b, 'the icon sits in the head end, after the counts');
+  assert.ok(b.previousElementSibling, 'the counts come first');
+  assert.equal(b.title, 'Open a.js in Cursor');
+  assert.equal(b.getAttribute('aria-label'), 'Open a.js in Cursor');
+  assert.doesNotMatch(paneOf(doc).querySelector('.hd-diff-pane-head').textContent, /Cursor/, 'the editor name is only in the tooltip');
+  click(ctx.window, b);
+  await settle(ctx.window, 4);
+  assert.deepEqual(posts.map((p) => [p.url.split('?')[0], p.body]), [[`/api/runs/${id}/open-in-editor`, { file: 'src/a.js', line: 12 }]]);
+  assert.match(posts[0].url, new RegExp(`projectKey=${KEY}`));
+});
+
+test('file head: not checked out → Check out, then open (one click)', async () => {
+  const { ctx, doc, posts, id } = await bootOpen({ model: editorModel({ state: 'not-checked-out' }) });
+  const b = openBtn(doc);
+  assert.equal(b.title, 'Check out this run, then open a.js in Cursor');
+  click(ctx.window, b);
+  await settle(ctx.window, 6);
+  assert.deepEqual(posts.map((p) => [p.url.split('?')[0], p.body]), [
+    [`/api/runs/${id}/checkout`, { members: [KEY] }],
+    [`/api/runs/${id}/open-in-editor`, { file: 'src/a.js', line: 12 }],
+  ]);
+  assert.equal(doc.querySelector('dialog[open]'), null, 'no confirm dialog');
+});
+
+test('file head: a held branch → Use that folder, then open', async () => {
+  const { ctx, doc, posts } = await bootOpen({ model: editorModel({ state: 'not-checked-out', heldBy: '/me/clone' }) });
+  const b = openBtn(doc);
+  assert.equal(b.title, 'Use the folder that has this branch, then open a.js in Cursor');
+  click(ctx.window, b);
+  await settle(ctx.window, 6);
+  assert.deepEqual(posts.map((p) => p.body), [{ members: [KEY], useExisting: true }, { file: 'src/a.js', line: 12 }]);
+});
+
+test('file head: no icon for a deleted file / an archived run / a blocked checkout', async () => {
+  const deleted = diffResults({ summary: { filesChanged: 0, filesDeleted: 1 },
+    results: { changedFiles: [{ path: 'src/a.js', status: 'D', added: 0, removed: 2 }] } });
+  const cases = [
+    ['deleted', { model: editorModel(), detail: diffDetail(deleted) }],
+    ['archived', { model: editorModel(), detail: { ...diffDetail(twoFiles()), state: { ...DETAIL.state, archivedAt: '2026-08-18T00:00:00Z' } } }],
+    ['blocked', { model: editorModel({ state: 'not-checked-out' }, { checkoutBlocked: 'git is not installed' }) }],
+    ['no editor', { model: editorModel({ builtins: [{ key: 'terminal', label: 'Terminal' }] }) }],
+    ['actions off', { model: editorModel({}, { enabled: false }) }],
+  ];
+  for (const [name, opts] of cases) {
+    const { doc } = await bootOpen(opts);
+    assert.ok(paneOf(doc).querySelector('.hd-diff-pane-head'), `${name}: the head painted`);
+    assert.equal(openBtn(doc), null, name);
+  }
+});
+
+test("file head: a launch failure shows the route's error", async () => {
+  const { ctx, doc } = await bootOpen({ model: editorModel(), open: () => fail(409, { error: 'Editor did not open: boom', code: 'LAUNCH_FAILED' }) });
+  click(ctx.window, openBtn(doc));
+  await settle(ctx.window, 4);
+  const err = paneOf(doc).querySelector('.hd-diff-pane-head + .field-error[role="alert"]');
+  assert.ok(err, 'the error sits directly under the pane head');
+  assert.equal(err.querySelector('.fe-text').textContent, 'Editor did not open: boom');
+});
+
+test('file head: switching files before the model answers puts no icon on the new file… only its own', async () => {
   let release;
-  const gate = new Promise((resolve) => { release = resolve; });
-  const late = await bootDetail({
-    detail: diffDetail(results), arms: patchArm(patch), hljsLoader: { forLanguage: () => gate }, hooks: SMALL,
-  });
-  await openDetail(late);
-  await settle(late.window, 5);
-  click(late.window, moreOf(late.window.document).querySelector('button'));
-  await settle(late.window);
-  assert.deepEqual(enhancedSources(late.window.document), []);
-  release(highlighter);
-  await settle(late.window, 6);
-  assert.deepEqual(enhancedSources(late.window.document), ['valid']);
-  const plain = [...late.window.document.querySelectorAll('#hist-detail .hd-dl-src')][0];
-  assert.equal(plain.children.length, 0, 'the ineligible hunk stays plain');
+  const gate = new Promise((r) => { release = r; });
+  const { ctx, doc } = await bootOpen({ model: editorModel(), actions: () => gate.then(() => ok(editorModel())) });
+  assert.equal(openBtn(doc), null, 'still waiting for the model');
+  click(ctx.window, fileOf(doc, 'src/b.js'));
+  await settle(ctx.window, 4);
+  release();
+  await settle(ctx.window, 6);
+  const icons = paneOf(doc).querySelectorAll('.hd-diff-open');
+  assert.equal(icons.length, 1);
+  assert.equal(icons[0].title, 'Open b.js in Cursor');
+  assert.equal(paneOf(doc).querySelector('.hd-diff-path').textContent, 'src/b.js');
 });

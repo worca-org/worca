@@ -57,6 +57,11 @@ export function helperEngineFor(engine) { return RUN_ENGINES.includes(engine) &&
 export const OWN_SIGNIN_ENGINES = [...SIGN_IN_ENGINE_NAMES];
 const OWN_SIGNIN_NOTE = Object.freeze({ cursor: 'cursor-agent connects with its own sign-in', gemini: 'gemini connects with its own sign-in',
   goose: 'Goose connects through its own providers', opencode: 'OpenCode connects through its own providers', qwen: 'qwen connects with its own sign-in' });
+/** OpenCode Zen's provider: its free models (`opencode/…`, served by opencode.ai) accept no reasoning
+ *  variant at all — OpenCode 2.3.1+ refuses a `#variant` outright (`Variant unavailable for opencode/<id>: …`),
+ *  where 1.x ignored it. Shared by engines/opencode.mjs (spawn argv), run-harness.mjs (never the run's default model) and settings.mjs (a Zen catalog entry
+ *  advertises no efforts, so pickers and the spawn never attach a variant). */
+export const OPENCODE_ZEN_RE = /^opencode\//i;
 /** 'a cursor model' / 'an opencode model', for the messages that name an engine's catalog entry. */
 export function aModelOf(engine) { return `${/^[aeiou]/i.test(String(engine)) ? 'an' : 'a'} ${engine} model`; }
 /** How an OWN_SIGNIN_ENGINES model connects, for the messages that refuse its env or upstream. */
@@ -240,6 +245,10 @@ export function modelEnvRef(value) {
   return m ? m[1] : null;
 }
 
+// A Worca vault reference (src/core/secrets/refs.mjs VAULT_REF_PREFIX + 22 base64url characters), kept here so
+// this leaf imports nothing.
+const VAULT_REF_RE = /^worca:vault:v1:[A-Za-z0-9_-]{22}$/;
+
 /**
  * Defensive spawn-time pass over a model entry's env (§4.4): drops reserved
  * keys and non-string values, and expands whole-value ${VAR} refs from
@@ -248,16 +257,25 @@ export function modelEnvRef(value) {
  * (#374) reaches `--model` verbatim, so a stray-whitespace or empty value must
  * not survive. The user catalog rejects reserved keys at write time and plugin
  * manifests strip them at normalize time, so a drop here means a hand-edited
- * settings file — the caller owns warning about `dropped`.
+ * settings file — the caller owns warning about `dropped`. A Worca vault
+ * reference resolves only through the injected `resolveRef(value, key)` (this
+ * module imports nothing); one that does not resolve, or any reference with no
+ * `resolveRef`, drops the key, so a reference never reaches a spawn as a value.
  * @param {Record<string,*>|undefined} modelEnv
  * @param {Record<string,string|undefined>} [sourceEnv]
+ * @param {{resolveRef?: (value:string, key:string) => string}} [opts]
  * @returns {{env: Record<string,string>, dropped: string[]}}
  */
-export function prepareModelEnv(modelEnv, sourceEnv = process.env) {
+export function prepareModelEnv(modelEnv, sourceEnv = process.env, { resolveRef } = {}) {
   const env = {};
   const dropped = [];
   for (const [k, v] of Object.entries(modelEnv || {})) {
     if (isReservedModelEnvKey(k) || isMcpRegistryEnvKey(k) || typeof v !== 'string') { dropped.push(k); continue; }
+    if (VAULT_REF_RE.test(v)) {
+      const t = resolveRef ? resolveRef(v, k) : '';
+      if (t) env[k] = t; else dropped.push(k);
+      continue;
+    }
     const ref = modelEnvRef(v);
     if (ref !== null) {
       const resolved = sourceEnv ? sourceEnv[ref] : undefined;
@@ -699,6 +717,6 @@ export function bridgeExcludedTools(upstream) {
 }
 
 // ── providers: account-level state shared by bridged entries (§6.2) ─────────
-export const COPILOT_ACCOUNT_TYPES = Object.freeze(['individual', 'business', 'enterprise']);
+export const COPILOT_ACCOUNT_TYPES = Object.freeze(['individual', 'business', 'enterprise', 'ghe-com']);
 export const DEFAULT_PROVIDER_CONCURRENCY = Object.freeze({ copilot: 4, openai: 8, anthropic: 8 });
 export const MAX_PROVIDER_CONCURRENCY = 64;

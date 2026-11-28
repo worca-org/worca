@@ -16,7 +16,7 @@ export const WEB_LIMITS = Object.freeze({
   urlMaxChars: 2048, queryMaxChars: 256, pathMaxChars: 512, dataRunChars: 64,
   searchQueryMaxChars: 200, searchMaxBytes: 1024 * 1024, searchMaxResults: 10,
 });
-const USER_AGENT = 'worca-ask/1 (+https://github.com/SinishaDjukic/worca-cc)';
+const USER_AGENT = 'worca-ask/1 (+https://github.com/worca-org/worca)';
 const FETCH_HEADERS = Object.freeze({ 'user-agent': USER_AGENT, accept: 'text/html,application/xhtml+xml,text/plain;q=0.9,application/json;q=0.8,*/*;q=0.1', 'accept-encoding': 'gzip, deflate, br' });
 const REDIRECTS = new Set([301, 302, 303, 307, 308]);
 
@@ -180,15 +180,15 @@ export function openTunnel(proxyUrl, host, { signal } = {}) {
 }
 
 /** `env` and `ca` exist for tests: the proxy variables (read per call, so a runtime change applies) and an extra trusted CA. */
-export async function httpsTransport({ url, signal, lookup = guardedLookup, headers, env = process.env, ca }) {
+export async function httpsTransport({ url, signal, lookup = guardedLookup, headers, env = process.env, ca, method = 'GET' }) {
   const host = url.hostname;
   const proxy = httpsProxyFor(host, { env });
-  if (!proxy) return get(url, { headers, lookup, signal, agent: false, ca });
+  if (!proxy) return get(url, { method, headers, lookup, signal, agent: false, ca });
   const blocked = await refusedByLookup(host, lookup, signal);
   if (blocked) throw blocked;
   const socket = await openTunnel(proxy, host, { signal });
   // No agent: the request runs on this one TLS socket (a global proxy agent never sees it).
-  return get(url, { headers, signal, ca, createConnection: () => tlsConnect({ socket, host, servername: host, ca, ALPNProtocols: ['http/1.1'] }) });
+  return get(url, { method, headers, signal, ca, createConnection: () => tlsConnect({ socket, host, servername: host, ca, ALPNProtocols: ['http/1.1'] }) });
 }
 
 async function readCapped(body, max) {

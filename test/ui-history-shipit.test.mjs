@@ -1,177 +1,68 @@
 // test/ui-history-shipit.test.mjs
-import { test, afterEach } from 'node:test';
+import { test, before, beforeEach, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { fileURLToPath, pathToFileURL } from 'node:url';
-import { JSDOM } from 'jsdom';
-import { useDomRelease } from './helpers/jsdom-release.mjs';
+import { useSharedApp, restoreAfter } from './helpers/shared-app-boot.mjs';
 import { cardAlertOf } from './helpers/feedback.mjs';
 import { checkRows } from './helpers/rows.mjs';
 import { ICONS } from '../ui/public/icons.mjs';
 import { backdropClick, pressEscape, discardPrompt, keepEditing, discardChanges } from './helpers/popups.mjs';
-import { readIndexHtml } from '../src/core/read-index-html.mjs';
-
-// Release each booted window after its test (see test/helpers/jsdom-release.mjs).
-const trackDom = useDomRelease(afterEach);
+import {
+  PROJECT, settle, go, KEY, WKS_KEY, ROW, row, DETAIL, RESULTS, okBudget, ok, fail, remote, REMOTES,
+  historyArms as shipArms, groupsArm, hello,
+} from './helpers/history-shipit-fixtures.mjs';
 
 // Behavior tests for the "Ship it?" confirm modal and the History DETAIL header's
 // PR control: one shared eligibility predicate (histPrEligible), a modal that
 // summarizes the change and POSTs /api/pr, and the tri-state header (Create PR /
 // OPEN link / MERGED link) kept in step with the list card behind it.
 //
-// boot()/settle()/go() are a deliberate local copy of
-// test/ui-history-detail.test.mjs:25-96 — the suites do not import each other.
-// prTokens()/dispatchPr() mirror test/ui-history-pr-phase.test.mjs:45-46.
+// The run, its detail, the remotes answer and the route table are test/helpers/history-shipit-fixtures.mjs's, shared
+// with test/ui-history-shipit-slice-breadcrumb.test.mjs. prTokens()/dispatchPr() mirror
+// test/ui-history-pr-phase.test.mjs:45-46.
 //
-// Each test gets a fresh DOM + a fresh module import (cache-busted) so module
-// top-level state (pendingShipIt, shipItClose, histDetailState) can't leak.
+// The app is booted once for the file (test/helpers/shared-app-boot.mjs) and reset before each test, which closes
+// the modal and the detail screen a test left open. The real marked + DOMPurify for the description's Preview tab
+// are a load-time hook (app.js reads __worcaTestHooks.askMarkdown once), so they are the file's.
 
-const appPath = fileURLToPath(new URL('../ui/public/app.js', import.meta.url));
+const realMarkdown = async () => ({ marked: (await import('marked')).marked, createDOMPurify: (await import('dompurify')).default });
 
-const PROJECT = '/tmp/proj';
-
-async function boot({ fetchHandler, url = 'http://localhost:4317/', hooks = null } = {}) {
-  const dom = trackDom(new JSDOM(readIndexHtml(), { url }));
-  const { window } = dom;
-  if (hooks) window.__worcaTestHooks = hooks;   // e.g. the real marked + DOMPurify for the Preview tab
-
-  // jsdom doesn't implement scrollIntoView; the viewer modal calls it on open.
-  window.Element.prototype.scrollIntoView = function () {};
-
-  const wsBox = { ws: null };
-  window.WebSocket = class {
-    constructor() {
-      this.readyState = 1;
-      this._listeners = {};
-      wsBox.ws = this;
-    }
-    send() {}
-    close() {}
-    addEventListener(type, fn) {
-      (this._listeners[type] ||= []).push(fn);
-    }
-    dispatch(type, evt) {
-      (this._listeners[type] || []).forEach((fn) => fn(evt));
-    }
-  };
-
-  const calls = [];
-  window.fetch = (u, opts) => {
-    calls.push({ url: String(u), opts: opts || {} });
-    if (fetchHandler) {
-      const r = fetchHandler(String(u), opts || {});
-      if (r) return r;
-    }
-    if (String(u).includes('/api/projects')) {
-      return Promise.resolve({
-        ok: true,
-        status: 200,
-        json: async () => ({ projects: [{ name: 'proj', path: PROJECT, exists: true }] }),
-      });
-    }
-    return Promise.resolve({
-      ok: true,
-      status: 200,
-      json: async () => ({ config: { steps: {}, customModels: [] }, models: [], efforts: [] }),
-    });
-  };
-
-  for (const k of ['window', 'document', 'location', 'localStorage', 'WebSocket', 'fetch', 'navigator']) {
-    try {
-      Object.defineProperty(globalThis, k, { value: window[k], configurable: true, writable: true });
-    } catch {
-      /* read-only global already present — leave it */
-    }
-  }
-  globalThis.window = window;
-  globalThis.document = window.document;
-
-  await import(pathToFileURL(appPath).href + `?b=${Date.now()}_${Math.random()}`);
-  await new Promise((r) => setTimeout(r, 0)); // let loadProjects/loadConfig settle
-
-  return { window, calls, wsBox };
-}
-
-async function settle(window, n = 3) {
-  for (let i = 0; i < n; i++) await new Promise((r) => setTimeout(r, 0));
-}
-
-function go(window, hash) {
-  window.location.hash = hash;
-  window.dispatchEvent(new window.Event('hashchange'));
-}
-
-const KEY = 'proj-alpha-abcd1234';
-const WKS_KEY = 'workspaces/team-a';
-const ROW = {
-  id: 'fcec04e8', projectKey: KEY, projectName: 'Alpha', projectDir: '/tmp/proj',
-  title: 'Implement Log-UX Review Fixes', status: 'done',
-  startedAt: '2026-08-17T20:54:42Z', branch: 'worca-cc/log-ux-fcec04e8',
-  sourceBranch: 'feat/log-ux', survived: true, added: 12, removed: 3,
-  totalCostUsd: 153.21, totalActiveMs: 6000000, mtime: 1,
-  pauseReason: null, retainedWork: null, pr: null,     // resolved: no PR yet
-};
-// Fresh object per boot: a successful ship MUTATES the row it is handed
-// (`record.pr = pr`, and the record IS the object in state.historyAll), so a
-// shared const would hand the next test a run that already has an open PR.
-const row = (over = {}) => ({ ...ROW, ...over });
-const DETAIL = {
-  state: {
-    id: ROW.id, title: ROW.title, status: 'done', startedAt: ROW.startedAt,
-    stepper: null, steps: [], subAgents: [], totalCostUsd: 153.21, totalActiveMs: 6000000,
-    branch: { source: 'feat/log-ux', feature: ROW.branch, worktreeDir: '/tmp/wt' },
-    prompt: 'Fix the log UX.',
-  },
-  results: null, overview: null, clarify: { questions: [], answers: [] },
-  reviews: [], stepQuestions: [], artifacts: [], auditMarkdown: '# saved',
-};
-const RESULTS = {
-  summary: {
-    filesNew: 1, filesChanged: 13, filesDeleted: 0,
-    linesAdded: 412, linesRemoved: 188, blockingIssues: 0, nitpicks: 0,
-  },
-  newFiles: [], changedFiles: [], keyThingsToCheck: [], nitpicks: [],
-};
-
-const DAY = 86400000;
-const okBudget = () => ({
-  pipelineLimitUsd: 5, totalLimitUsd: 50, resetPeriod: 'monthly',
-  windowStartMs: Date.now() - 3 * DAY, windowEndMs: Date.now() + 4 * DAY,
-  msUntilReset: 4 * DAY, windowSpendUsd: 12.5, allTimeSpendUsd: 12.5,
-  remainingUsd: 37.5, blocked: false,
+const app = useSharedApp({ before, beforeEach, after }, {
+  hooks: { askMarkdown: realMarkdown },
+  fetchHandler: (u) => Promise.resolve(String(u).includes('/api/projects')
+    ? { ok: true, status: 200, json: async () => ({ projects: [{ name: 'proj', path: PROJECT, exists: true }] }) }
+    : { ok: true, status: 200, json: async () => ({ config: { steps: {}, customModels: [] }, models: [], efforts: [] }) }),
 });
 
-const ok = (body) => Promise.resolve({ ok: true, status: 200, json: async () => body });
-const fail = (status, body) => Promise.resolve({ ok: false, status, json: async () => body });
-
-const DETAIL_URL = `/api/history/${KEY}/${ROW.id}`;
-const WKS_DETAIL_URL = `/api/workspaces/team-a/runs/${ROW.id}`;
-const detailHash = `history/${KEY}/${ROW.id}`;
-const wksDetailHash = `history/${WKS_KEY}/${ROW.id}`;
-
-// ARM ORDER IS LOAD-BEARING (ui-history-routing.test.mjs:119-127): the detail URL
-// is a PREFIX of the /log and /diff URLs, and `/api/history` is a prefix of the
-// POST /api/history/pr enrichment call. Most-specific first, and every history arm
-// matches with endsWith, never includes — except the remotes arm, whose URL carries
-// a query string (it can never collide with the `/api/pr` endsWith matchers).
-function historyArms(box) {
-  return (url) => {
-    if (/\/api\/pr\/remotes\?/.test(url)) return box.remotes ? ok(box.remotes) : fail(500, { error: 'git remote failed' });
-    if (url.endsWith('/api/history/pr')) return ok({ ok: true });
-    if (url.endsWith('/diff')) return fail(404, { error: 'no diff' });
-    if (url.endsWith('/log')) return fail(404, { error: 'no log' });
-    if (url.endsWith('/api/history')) return ok({ pipelines: box.rows, ghAvailable: box.gh, ...(box.prHosts ? { prHosts: box.prHosts } : {}) });
-    if (url.endsWith(DETAIL_URL) || url.endsWith(WKS_DETAIL_URL)) return ok(box.detail);
-    if (url.endsWith('/api/budget')) return ok(box.budget);
-    return null;
-  };
+async function boot({ fetchHandler, hooks = null } = {}) {
+  await app.fresh({ fetchHandler, ...(hooks ? { hooks } : {}) });
+  return { window: app.window, calls: app.calls, wsBox: app.wsBox };
 }
 
-async function bootShip({ rows = [row()], detail = DETAIL, gh = true, prHosts = null, arms = null, deepLink = false, remotes = REMOTES, hooks = null } = {}) {
+let DETAIL_URL, WKS_DETAIL_URL, detailHash, wksDetailHash;
+
+// Each test's own run id (D3): the app keeps PR states, slice answers and the open screen by run id for the life of
+// the file. ROW and DETAIL take it, and the addresses built from it follow.
+// newRun() also starts each further boot inside one test (a loop, a second dialog) as a run of its own (C3).
+const newRun = () => {
+  ROW.id = app.uid('fcec04e8-');
+  DETAIL.state.id = ROW.id;
+  DETAIL_URL = `/api/history/${KEY}/${ROW.id}`;
+  WKS_DETAIL_URL = `/api/workspaces/team-a/runs/${ROW.id}`;
+  detailHash = `history/${KEY}/${ROW.id}`;
+  wksDetailHash = `history/${WKS_KEY}/${ROW.id}`;
+  ovHash = `${detailHash}/details/overview`;
+  SLICE_URL = `/api/shape/pipelines/${ROW.id}/slice`;
+};
+beforeEach(newRun);
+
+// The shared route table, answering the detail at this test's run id (newRun) under History and a workspace.
+const historyArms = (box) => shipArms(box, () => [DETAIL_URL, WKS_DETAIL_URL]);
+
+async function bootShip({ rows = [row()], detail = DETAIL, gh = true, prHosts = null, arms = null, remotes = REMOTES, hooks = null } = {}) {
   const box = { rows, detail, gh, prHosts, remotes, budget: okBudget() };
   const base = historyArms(box);
   const ctx = await boot({
     fetchHandler: (url, opts) => (arms && arms(url, opts, box)) || base(url, opts),
-    url: deepLink ? `http://localhost:4317/#${detailHash}` : 'http://localhost:4317/',
     hooks,
   });
   ctx.box = box;
@@ -204,13 +95,6 @@ const prArm = (body) => (url, opts) => (
   url.endsWith('/api/pr') && opts.method === 'POST' ? ok(body) : null);
 const PR_OK = { ok: true, url: 'https://x/pull/7', mergeable: 'MERGEABLE', existed: false };
 
-// Shapes mirror GET /api/pr/remotes.
-const remote = (name, owner, url) => ({ name, fetchUrl: url, pushUrl: url, host: 'github.com', owner, repo: 'repo', slug: `${owner}/repo` });
-// A run outside a chain: `chain` is just its source; `branches` are each remote's
-// remote-tracking branches (the server drops HEAD and the run's own branch only).
-const REMOTES = { ok: true, remotes: [remote('origin', 'me', 'https://github.com/me/repo.git')],
-  defaults: { pushRemote: 'origin', baseRemote: 'origin' }, remembered: null,
-  chain: ['feat/log-ux'], defaultBase: 'feat/log-ux', branches: { origin: ['feat/log-ux', 'main'] } };
 const FORK_REMOTES = { ok: true,
   remotes: [remote('origin', 'me', 'https://github.com/me/repo.git'), remote('upstream', 'up', 'git@github.com:up/repo.git')],
   defaults: { pushRemote: 'origin', baseRemote: 'upstream' }, remembered: null,
@@ -436,7 +320,7 @@ test('confirm POSTs /api/pr and swaps the header control to a link + merge pill;
   ]);
 });
 
-test('UNKNOWN mergeability schedules exactly one recheck; a later recheck updates the pill or hides it if still UNKNOWN', async () => {
+test('UNKNOWN mergeability schedules exactly one recheck; a later recheck updates the pill or hides it if still UNKNOWN', async (t) => {
   await checkRows([
     { name: 'UNKNOWN mergeability schedules exactly one recheck', run: async () => {
       const ctx = await bootShip({
@@ -448,6 +332,7 @@ test('UNKNOWN mergeability schedules exactly one recheck; a later recheck update
       });
       // prMergeRecheckMs() (app.js:8880) reads the seam at CALL time, so setting it on
       // the RETURNED window after boot is enough — the helper builds the JSDOM itself.
+      restoreAfter(t, ctx.window, '__prMergeRecheckMs');
       ctx.window.__prMergeRecheckMs = 0;
       const modal = await openModal(ctx);
       click(ctx.window, modal.querySelector('.shipit-ok'));
@@ -475,6 +360,7 @@ test('UNKNOWN mergeability schedules exactly one recheck; a later recheck update
           return null;
         },
       });
+      restoreAfter(t, ctx.window, '__prMergeRecheckMs');
       ctx.window.__prMergeRecheckMs = 0;   // fire on the next tick (no fake timers)
       const modal = await openModal(ctx);
       click(ctx.window, modal.querySelector('.shipit-ok'));
@@ -500,6 +386,7 @@ test('UNKNOWN mergeability schedules exactly one recheck; a later recheck update
           return null;
         },
       });
+      restoreAfter(t, ctx.window, '__prMergeRecheckMs');
       ctx.window.__prMergeRecheckMs = 0;
       const modal = await openModal(ctx);
       click(ctx.window, modal.querySelector('.shipit-ok'));
@@ -509,6 +396,91 @@ test('UNKNOWN mergeability schedules exactly one recheck; a later recheck update
       releaseRecheck();
       await settle(ctx.window, 4);
       assert.equal(pill.hidden, true, 'still-unknown pill is hidden, not left stuck');
+    } },
+  ]);
+});
+
+// The header pill is ONE static node reused by every run's detail: it is painted from the open run only, and a
+// merged or closed PR is final (no pill).
+test('the merge pill belongs to its run: another run, a merged PR or a late re-check never shows a stale one', async (t) => {
+  const MERGED_PR = { state: 'MERGED', url: 'https://x/pull/9', number: 9 };
+  const otherUrl = (id) => `/api/history/${KEY}/${id}`;
+  // A second saved run with its own detail (the arm is ahead of the shared detail arm).
+  const bootTwo = (other, recheck) => bootShip({ rows: [row(), other], arms: (url, opts) => {
+    if (url.endsWith(otherUrl(other.id))) return ok({ ...DETAIL, state: { ...DETAIL.state, id: other.id } });
+    if (url.endsWith('/api/pr/mergeable') && opts.method === 'POST') return recheck();
+    if (url.endsWith('/api/pr') && opts.method === 'POST') return ok({ ...PR_OK, mergeable: recheck.first || 'CONFLICTING' });
+    return null;
+  } });
+  const ship = async (ctx) => {
+    restoreAfter(t, ctx.window, '__prMergeRecheckMs');
+    ctx.window.__prMergeRecheckMs = 0;
+    const modal = await openModal(ctx);
+    click(ctx.window, modal.querySelector('.shipit-ok'));
+    await settle(ctx.window, 4);
+  };
+  await checkRows([
+    { name: 'a merged run opened after a run that showed "conflicts" shows no pill; reopening the first does not bring it back', run: async () => {
+      const merged = row({ id: 'bbbb2222', title: 'Shipped run', pr: MERGED_PR });
+      const ctx = await bootTwo(merged, () => ok({ ok: true, mergeable: 'CONFLICTING' }));
+      await ship(ctx);
+      assert.equal(hdMerge(ctx.window).hidden, false);
+      assert.match(hdMerge(ctx.window).textContent, /conflicts/);
+      go(ctx.window, `history/${KEY}/${merged.id}`);
+      await settle(ctx.window, 6);
+      assert.equal(hdMerge(ctx.window).hidden, true, 'the merged run shows no pill');
+      assert.equal(hdMerge(ctx.window).textContent, '', 'nothing of the previous run is left in it');
+      await openDetail(ctx);
+      await settle(ctx.window, 4);
+      assert.equal(hdMerge(ctx.window).hidden, true, 'a reopen paints from the data, which has no mergeability');
+    } },
+    // Today a detail hop clones a fresh screen (openHistDetail's `#hist-detail-tpl` clone), so this row holds even
+    // without paintHdMergePill's owner comparison; it pins the behaviour should the header node ever be kept.
+    { name: 'a run with its own OPEN PR opened after a run that showed "conflicts" shows no pill of the first', run: async () => {
+      const open = row({ id: 'ffff6666', title: 'Open PR run', pr: { state: 'OPEN', url: 'https://x/pull/8', number: 8 } });
+      const ctx = await bootTwo(open, () => ok({ ok: true, mergeable: 'CONFLICTING' }));
+      await ship(ctx);
+      assert.match(hdMerge(ctx.window).textContent, /conflicts/);
+      go(ctx.window, `history/${KEY}/${open.id}`);
+      await settle(ctx.window, 6);
+      assert.equal(hdMerge(ctx.window).hidden, true, 'the pill belongs to the first run, not to every open PR');
+      assert.equal(hdMerge(ctx.window).textContent, '');
+    } },
+    { name: 'the open run\'s PR becoming MERGED hides its pill', run: async () => {
+      const ctx = await bootTwo(row({ id: 'cccc3333' }), () => ok({ ok: true, mergeable: 'CONFLICTING' }));
+      await ship(ctx);
+      assert.match(hdMerge(ctx.window).textContent, /conflicts/);
+      ctx.dispatchPr({ token: ctx.prTokens().at(-1), items: [{ projectKey: KEY, id: ROW.id, pr: MERGED_PR }] });
+      await settle(ctx.window, 4);
+      assert.equal(hdMerge(ctx.window).hidden, true);
+    } },
+    { name: 'a re-check that answers after the detail moved to another run paints nothing', run: async () => {
+      let release; const gate = new Promise((r) => { release = r; });
+      const recheck = () => gate.then(() => ok({ ok: true, mergeable: 'CONFLICTING' }));
+      recheck.first = 'UNKNOWN';
+      const other = row({ id: 'dddd4444', title: 'Another run' });
+      const ctx = await bootTwo(other, recheck);
+      await ship(ctx);
+      assert.match(hdMerge(ctx.window).textContent, /checking/);
+      go(ctx.window, `history/${KEY}/${other.id}`);
+      await settle(ctx.window, 6);
+      assert.equal(hdMerge(ctx.window).hidden, true);
+      release();
+      await settle(ctx.window, 6);
+      assert.equal(ctx.calls.filter((c) => c.url.endsWith('/api/pr/mergeable')).length, 1, 'the re-check did answer');
+      assert.equal(hdMerge(ctx.window).hidden, true, 'run A\'s late answer never lands on run B');
+    } },
+    { name: 'a re-check that answers after the PR merged paints nothing', run: async () => {
+      let release; const gate = new Promise((r) => { release = r; });
+      const recheck = () => gate.then(() => ok({ ok: true, mergeable: 'CONFLICTING' }));
+      recheck.first = 'UNKNOWN';
+      const ctx = await bootTwo(row({ id: 'eeee5555' }), recheck);
+      await ship(ctx);
+      ctx.dispatchPr({ token: ctx.prTokens().at(-1), items: [{ projectKey: KEY, id: ROW.id, pr: MERGED_PR }] });
+      await settle(ctx.window, 4);
+      release();
+      await settle(ctx.window, 6);
+      assert.equal(hdMerge(ctx.window).hidden, true);
     } },
   ]);
 });
@@ -1007,8 +979,6 @@ const describeCalls = (ctx) => ctx.calls.filter((c) => c.url.endsWith('/api/pr/d
 const typeInto = (window, ta, value) => { ta.value = value; ta.dispatchEvent(new window.Event('input', { bubbles: true })); };
 const confirmOpen = (w) => !w.document.getElementById('confirm-modal').classList.contains('hidden');
 const escape = (w) => w.document.dispatchEvent(new w.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
-const realMarkdown = async () => ({ marked: (await import('marked')).marked, createDOMPurify: (await import('dompurify')).default });
-
 // A describe request that hangs until released. With `honorAbort` it rejects the
 // way fetch does once its signal aborts; without, the response can still land
 // late (a server that answered anyway) so the stale-response guards are exercised.
@@ -1640,50 +1610,67 @@ test('s4: Ship it shows the Watch PR help line, named by the switch', async () =
   assert.equal(watchBox(modal).getAttribute('aria-describedby'), 'shipit-watch-help');
 });
 
-// The Overview tab's PR row (paintHdOvPrs -> paintRdPrStatus): GitHub's verdict, what the watch is doing,
-// and the Watch switch. One GET /api/pr/checks answers all three.
-const ovHash = `${detailHash}/details/overview`;
+// One level: the Overview has no PR row. The card head reads the PR (its hidden .rd-pr-feed): GitHub's verdict in the
+// status line, the checks and what the watch is doing on the route's pull request row, and the Watch switch in the
+// View PR ▾ menu. One GET /api/pr/checks answers all three.
+let ovHash;   // set with the test's run id (beforeEach above)
 const ovPr = (w) => w.document.querySelector('#hist-detail .hd-ov-pr');
-const ovStatus = (w) => ovPr(w)?.querySelector('.rd-pr-status');
-const ovSwitch = (w) => ovStatus(w)?.querySelector('.rd-prs-watch');
+const prRoute = (w) => w.document.querySelector('#hist-detail .rd-route .rd-route-row.is-review');
+const prMenu = (w) => w.document.querySelector('#hist-detail .rd-pr-menu');
+const openPrMenu = async (ctx) => {
+  if (!prMenu(ctx.window)) click(ctx.window, ctx.window.document.querySelector('#hist-detail .rd-head-acts .rd-pr-split .rd-pr-more'));
+  await settle(ctx.window, 6);
+  return prMenu(ctx.window);
+};
+const menuSwitch = (w) => prMenu(w)?.querySelector('[role="menuitemcheckbox"]');
 const checksGets = (ctx) => ctx.calls.filter((c) => /\/api\/pr\/checks\?/.test(c.url));
 const CHECKS = (over = {}) => ({ checks: { state: 'passing', total: 12, failed: 0, pending: 0, skipped: 0 }, mergeable: 'MERGEABLE',
   status: { tone: 'ok', label: 'Ready to merge', detail: 'All 12 checks passed' }, watch: WATCH(), ...over });
+const bootAdvanced = async (opts) => {
+  const ctx = await bootShip(opts);
+  ctx.window.document.documentElement.dataset.level = 'advanced';
+  return ctx;
+};
 
-test('Overview: an open PR row shows GitHub\'s verdict and the watch, words only while it acts; the header has no switch', async () => {
+test('an open PR: no Overview row; the head words GitHub\'s verdict, the route the watch, the ▾ the switch', async () => {
+  // The route has no switch, so an idle watch still says Watching there; an unwatched PR says nothing.
   for (const [state, label, pressed] of [
-    [WATCH(), '', 'true'],
+    [WATCH(), 'Watching', 'true'],
     [WATCH({ status: 'fixing', activePipelineId: 'f1' }), 'Fixing', 'true'],
     [WATCH({ status: 'fixing', activePipelineId: 'f1', mergingBase: 'dev' }), 'Merging dev in', 'true'],
     [WATCH({ status: 'fixing', activePipelineId: 'f1', resolving: true }), 'Resolving conflicts', 'true'],
     [WATCH({ watching: false, status: 'publishing' }), 'Disabled (finishing)', 'false'],
-    [WATCH({ status: 'needs-person', reason: 'cap' }), 'Needs a person', 'true'],
+    [WATCH({ status: 'needs-person', reason: 'cap' }), 'Watch stopped', 'true'],
     [WATCH({ watching: false, status: null }), '', 'false'],
   ]) {
-    const ctx = await bootShip({ rows: [openRow()], arms: (url) => (/\/api\/pr\/checks\?/.test(url) ? ok(CHECKS({ watch: state })) : null) });
-    await openDetail(ctx, ovHash); await settle(ctx.window);
-    assert.equal(ovStatus(ctx.window).hidden, false);
-    assert.match(ovPr(ctx.window).textContent, /^Pull request/);
-    // Two lines: the headline alone, then its notes with no separator in front.
-    assert.equal(ovStatus(ctx.window).querySelector('.rd-prs-sum > .rd-prs-lead').textContent, 'Ready to merge');
-    assert.equal(ovStatus(ctx.window).querySelector('.rd-prs-sum > .rd-prs-notes').firstElementChild.textContent, 'All 12 checks passed');
-    if (label) assert.ok(ovStatus(ctx.window).textContent.includes(label), label);
-    else assert.doesNotMatch(ovStatus(ctx.window).textContent, /Watching|Fixing|Needs a person|Disabled/);
-    assert.equal(ovSwitch(ctx.window).querySelector('[role="switch"]').getAttribute('aria-checked'), pressed);
-    assert.equal(ovSwitch(ctx.window).dataset.minLevel, 'advanced');
+    newRun();
+    const ctx = await bootAdvanced({ rows: [openRow()], arms: (url) => (/\/api\/pr\/checks\?/.test(url) ? ok(CHECKS({ watch: state })) : null) });
+    await openDetail(ctx, ovHash); await settle(ctx.window, 6);
+    assert.equal(ovPr(ctx.window), null, 'no PR row on the Overview');
+    assert.equal(ctx.window.document.querySelector('#hist-detail .rd-sheet .run-status').dataset.line, 'In review · ready to merge');
+    const route = prRoute(ctx.window).querySelector('.rd-route-second').textContent;
+    assert.match(route, /All 12 checks passed/);
+    if (label) assert.ok(route.includes(label), label);
+    else assert.doesNotMatch(route, /Watch|Fixing|Disabled/);
+    await openPrMenu(ctx);
+    assert.equal(menuSwitch(ctx.window).getAttribute('aria-checked'), pressed);
     assert.equal(ctx.window.document.querySelector('#hist-detail .hd-pr-watch'), null, 'the Watch switch left the header');
     const q = new URL(checksGets(ctx)[0].url, 'http://x').searchParams;
     assert.deepEqual([q.get('id'), q.get('projectKey'), q.get('memberKey')], [ROW.id, KEY, null]);
   }
 });
 
-test('Overview: a PR GitHub cannot answer for (another host, older server) shows no row', async () => {
-  const ctx = await bootShip({ rows: [openRow()], arms: (url) => (/\/api\/pr\/checks\?/.test(url) ? fail(400, { error: 'an open github.com pull request is required' }) : null) });
-  await openDetail(ctx, ovHash); await settle(ctx.window);
-  assert.equal(ovStatus(ctx.window).hidden, true);
+test('a PR GitHub cannot answer for (another host, older server): the ▾ says Watch unavailable', async () => {
+  const ctx = await bootAdvanced({ rows: [openRow()], arms: (url) => (/\/api\/pr\/checks\?/.test(url) ? fail(400, { error: 'an open github.com pull request is required' }) : null) });
+  await openDetail(ctx, ovHash); await settle(ctx.window, 6);
+  const menu = await openPrMenu(ctx);
+  assert.equal(menuSwitch(ctx.window), null, 'no Watch switch');
+  const na = [...menu.querySelectorAll('[role^="menuitem"]')].find((b) => /Watch unavailable/.test(b.textContent));
+  assert.ok(na, 'Watch unavailable');
+  assert.equal(na.getAttribute('aria-disabled'), 'true');
 });
 
-test('Overview: the Watch switch POSTs the flip and repaints; a failure keeps the shown state and says why', async () => {
+test('the ▾ Watch switch POSTs the flip and repaints; a failure keeps the shown state and says why', async () => {
   let failPost = false;
   const arms = (url, opts) => {
     if (/\/api\/pr\/checks\?/.test(url)) return ok(CHECKS({ watch: WATCH({ watching: false, status: null }) }));
@@ -1692,22 +1679,23 @@ test('Overview: the Watch switch POSTs the flip and repaints; a failure keeps th
     }
     return null;
   };
-  const ctx = await bootShip({ rows: [openRow()], arms });
-  await openDetail(ctx, ovHash); await settle(ctx.window);
-  click(ctx.window, ovSwitch(ctx.window)); await settle(ctx.window);
+  const ctx = await bootAdvanced({ rows: [openRow()], arms });
+  await openDetail(ctx, ovHash); await settle(ctx.window, 6);
+  await openPrMenu(ctx);
+  click(ctx.window, menuSwitch(ctx.window)); await settle(ctx.window);
   assert.deepEqual(JSON.parse(watchPosts(ctx)[0].opts.body), { id: ROW.id, projectKey: KEY, watch: true });
-  assert.equal(ovSwitch(ctx.window).querySelector('[role="switch"]').getAttribute('aria-checked'), 'true');
+  assert.equal(menuSwitch(ctx.window).getAttribute('aria-checked'), 'true');
   failPost = true;
-  click(ctx.window, ovSwitch(ctx.window)); await settle(ctx.window);
+  click(ctx.window, menuSwitch(ctx.window)); await settle(ctx.window);
   assert.equal(JSON.parse(watchPosts(ctx)[1].opts.body).watch, false);
-  assert.equal(ovSwitch(ctx.window).querySelector('[role="switch"]').getAttribute('aria-checked'), 'true', 'a failed toggle keeps the shown state');
-  assert.match(ovSwitch(ctx.window).title, /Could not change Watch: disk full/);
+  assert.equal(menuSwitch(ctx.window).getAttribute('aria-checked'), 'true', 'a failed toggle keeps the shown state');
+  assert.match(menuSwitch(ctx.window).title, /Could not change Watch: disk full/);
 });
 
-test('Overview: a change announced while a read is in flight reads again, so the older answer never sticks', async () => {
+test('the head: a change announced while a read is in flight reads again, so the older answer never sticks', async () => {
   const pending = [];
   const arms = (url) => (/\/api\/pr\/checks\?/.test(url) ? new Promise((resolve) => pending.push(resolve)) : null);
-  const ctx = await bootShip({ rows: [openRow()], arms });
+  const ctx = await bootAdvanced({ rows: [openRow()], arms });
   await openDetail(ctx, ovHash); await settle(ctx.window);
   assert.equal(pending.length, 1);
   ctx.wsBox.ws.dispatch('message', { data: JSON.stringify({ type: 'pr-watch-changed', projectKey: KEY, pipelineId: ROW.id, memberKey: null }) });
@@ -1717,8 +1705,8 @@ test('Overview: a change announced while a read is in flight reads again, so the
   await settle(ctx.window);
   assert.equal(pending.length, 2, 'the announced change is read once the first answer lands');
   pending[1]({ ok: true, status: 200, json: async () => CHECKS({ watch: WATCH({ status: 'fixing' }) }) });
-  await settle(ctx.window);
-  assert.match(ovStatus(ctx.window).textContent, /Fixing/);
+  await settle(ctx.window, 6);
+  assert.match(prRoute(ctx.window).querySelector('.rd-route-second').textContent, /Fixing/);
 });
 
 test('Overview: pr-watch-changed rereads only the exact PR', async () => {
@@ -1740,10 +1728,9 @@ test('Overview: pr-watch-changed rereads only the exact PR', async () => {
 // D16/D22: a slice's place in its feature (the History glance line and the Ship it note)
 // ---------------------------------------------------------------------------
 
-const SLICE_URL = `/api/shape/pipelines/${ROW.id}/slice`;
+let SLICE_URL;   // set with the test's run id (beforeEach above)
 const SLICE_INFO = { featureId: 'feat_1', title: 'Charts', index: 1, total: 3, sliceTitle: 'Store tags', state: 'done',
   next: { index: 2, title: 'Slice 2', state: 'planned' } };
-const hello = (ctx) => ctx.wsBox.ws.dispatch('message', { data: JSON.stringify({ type: 'hello', runs: [] }) });
 /** A slice endpoint stub; `hold` keeps the answer until `release()`. */
 function sliceArm({ info = SLICE_INFO, hold = false } = {}) {
   const a = { calls: 0, release: null };
@@ -1755,27 +1742,6 @@ function sliceArm({ info = SLICE_INFO, hold = false } = {}) {
   };
   return a;
 }
-
-// Runs redesign slice 4 (D18): a slice's History glance has no group row and no kind chip; its breadcrumb links the group.
-const CHARTS = { groups: [{ id: 'feat_1', kind: 'feature', title: 'Charts', projectKey: null, planning: null, cost: { usd: 0, byPipeline: {} },
-  members: [1, 2, 3].map((i) => ({ position: i, title: `Slice ${i}`, pipelineId: i === 1 ? ROW.id : null, ticketId: i === 1 ? null : `t${i}`,
-    status: i === 1 ? 'done' : null, pr: null, ticket: i === 1 ? null : { id: `t${i}`, status: 'scheduled', runAt: null, after: true }, adhoc: false, after: i === 1 ? null : i - 1 })) }] };
-const groupsArm = (groups) => (url) => (url.startsWith('/api/run-groups') ? ok(groups) : null);
-
-test('a done slice\'s History page: the breadcrumb links the feature page, no group row, no chip; a repaint keeps it so', async () => {
-  const ctx = await bootShip({ arms: groupsArm(CHARTS) });
-  hello(ctx);
-  await openDetail(ctx);
-  await settle(ctx.window, 4);
-  const doc = ctx.window.document;
-  assert.equal(doc.querySelector('#hist-detail .hd-glance .rd-kv [data-fact="group"]').hidden, true, 'no Feature row');
-  assert.equal(doc.querySelector('#hist-detail .hd-glance .rd-page-head .kind-chip'), null, 'no kind chip');
-  assert.equal(doc.querySelector('#hist-detail .hd-bar .rd-crumbs a.rd-crumb[href="#feature/feat_1"]').textContent, 'Charts');
-  assert.equal(doc.querySelector('#hist-detail .rd-slice-line'), null, 'no slice line either');
-  await openDetail(ctx);                                 // the same detail again: painted in place
-  assert.equal(doc.querySelector('#hist-detail .hd-glance .rd-page-head .kind-chip'), null);
-  assert.equal(doc.querySelectorAll('#hist-detail .hd-bar .rd-crumbs .rd-crumb').length, 3);
-});
 
 test('a plain run (in no group) shows no group link; at Expert it offers "Add to group…"', async () => {
   const ctx = await bootShip({ arms: groupsArm({ groups: [] }) });
@@ -1798,6 +1764,7 @@ test('Ship it for a slice with a next slice says to merge this PR first, on the 
   assert.equal(note.hidden, false);
   assert.equal(note.textContent, 'Slice 2 builds on this branch: merge this PR first.');
 
+  newRun();
   const plain = await bootShip({ arms: sliceArm({ info: null }).arm });
   hello(plain);
   const m2 = await openModal(plain);
@@ -1855,3 +1822,4 @@ test('the release row: an invalid typed version posts nothing and leaves OK and 
   assert.equal(modal.querySelector('.shipit-push-remote').disabled, false);
   assert.equal(modal.querySelector('.shipit-base-remote').disabled, false);
 });
+

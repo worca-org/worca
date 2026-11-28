@@ -1,8 +1,14 @@
 // test/ui-no-project-run-page.test.mjs — P3: a run without a project in History and on the run page.
-import { test } from 'node:test';
+import { test, before, beforeEach, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { boot, go, settle, ROW, DETAIL, ok, click, secOf } from './helpers/history-detail-boot.mjs';
-import { bootApp, helloRun } from './helpers/run-page-boot.mjs';
+import { go, settle, ROW, DETAIL, ok, click, secOf, detailOn, historyFetch } from './helpers/history-detail-boot.mjs';
+import { runPageOn, helloRun } from './helpers/run-page-boot.mjs';
+import { useSharedApp } from './helpers/shared-app-boot.mjs';
+
+// The Runs list's View (Group by Project) is read when app.js loads, so it is the file's.
+const app = useSharedApp({ before, beforeEach, after }, { fetchHandler: historyFetch(), local: { 'worca-cc.runs.view': JSON.stringify({ show: 'all', groupBy: 'project', person: '' }) } });
+const bootApp = runPageOn(app);
+const boot = detailOn(app).page;
 
 const NP_KEY = 'no-project-00000000';
 const NP_DIR = '/h/.worca-cc/runs/abcd1234/work';
@@ -45,7 +51,7 @@ test('a finished run without a project: its Overview never says it did not compl
   click(ctx.window, doc.querySelector('#hist-detail .hd-tab[data-sec="overview"]'));
   await settle(ctx.window, 4);
   const sec = secOf(doc, 'overview');
-  assert.ok(sec && sec.querySelector('.hd-ov-grid'), 'the Overview painted');
+  assert.ok(sec && sec.querySelector('.rd-sheet') && sec.querySelector('.hd-ov-below'), 'the Overview painted: the run card and the lists below it');
   assert.equal(sec.querySelector('.hd-ov-verdict'), null, 'no results.json: its files are the result, no verdict line');
   assert.doesNotMatch(sec.textContent, /did not complete/);
   assert.equal(doc.querySelector('#hist-detail .rd-sheet .run-status').dataset.text, 'Finished', 'never Ready to ship');
@@ -75,7 +81,7 @@ test('an archived run without a project: Restore says its files were removed, wi
 });
 
 test('the Runs list groups it under No project with the No project chip', async () => {
-  const ctx = await boot({ local: { 'worca-cc.runs.view': JSON.stringify({ show: 'all', groupBy: 'project', person: '' }) }, fetchHandler: (u) => arms(u) || ok({}) });
+  const ctx = await boot({ fetchHandler: (u) => arms(u) || ok({}) });
   go(ctx.window, 'history');
   await settle(ctx.window, 6);
   const head = ctx.window.document.querySelector(`.runs-sec[data-section="project:${NP_KEY}"] .runs-sec-head`);   // View › Group by Project
@@ -97,10 +103,14 @@ test('a live run without a project: Artifacts first; its saved data reads the re
   assert.equal(doc.querySelector('#run-detail .rd-after').hidden, true, 'no Run after on the live page either');
   assert.ok(seen.some((u) => u.endsWith(`/api/history/${NP_KEY}/abcd1234`)), seen.join('\n'));
   assert.equal(doc.querySelector('#run-detail .rd-meta .rd-project'), null, 'its work folder is never named as a project (P3-D10)');
+  click(ctx.window, doc.querySelector('#run-detail .rd-tab[data-sec="task"]'));
+  await settle(ctx.window, 6);
+  const tags = [...doc.querySelectorAll('#run-detail .rd-sec[data-sec="task"] .run-task .hd-ov-chips .hd-ov-tag')].map((t) => t.textContent);
+  assert.ok(tags.includes('No project') && !tags.includes('work'), tags.join(' | '));
   click(ctx.window, doc.querySelector('#run-detail .rd-tab[data-sec="overview"]'));
   await settle(ctx.window, 6);
-  const tags = [...doc.querySelectorAll('#run-detail .hd-ov-chips .hd-ov-tag')].map((t) => t.textContent);
-  assert.ok(tags.includes('No project') && !tags.includes('work'), tags.join(' | '));
+  assert.equal(doc.querySelector('#run-detail .rd-sec[data-sec="overview"] .run-task, #run-detail .rd-sec[data-sec="overview"] .hd-ov-tag'), null,
+    'the task chips live in the Task tab only');
 });
 
 test('a live run first seen as a git run, then found to have no project, reopens on Artifacts (the rebuild drops the auto-opened Overview)', async () => {
@@ -134,4 +144,96 @@ test('a resume ticket of a run without a project says No project in Schedules, n
   const text = ctx.window.document.getElementById('schedules-once').textContent;
   assert.match(text, /No project · Default/);
   assert.doesNotMatch(text, /Project · work/);
+});
+
+// Workflow tests Task 12 (G6, board 25): the saved run page's ⋯ keeps a finished no-project run of a saved workflow as a test example.
+const WF_DETAIL = { ...NP_DETAIL, state: { ...NP_DETAIL.state, status: 'done', stepper: { template: { id: 'wf_b', name: 'Product brief writer' } } } };
+const PAST = { pipelineId: 'abcd1234', workflowId: 'wf_b', workflowName: 'Product brief writer', title: 'Q3 Hiring Deck', request: 'Make the deck.',
+  files: [], qa: [], use: 4, useLabel: 'v4', testable: true, reason: null, reasonText: null };
+async function moreItems({ flags, detail = WF_DETAIL }) {
+  const reads = [];
+  const ctx = await boot({ fetchHandler: (u) => {
+    if (u.endsWith(`/api/history/${NP_KEY}/abcd1234`)) return ok(detail);
+    if (u.includes('/api/workflow-tests/past-run/abcd1234')) { reads.push(u); return ok(PAST); }
+    return arms(u) || ok({});
+  } });
+  ctx.window.document.documentElement.dataset.flags = flags;
+  go(ctx.window, `history/${NP_KEY}/abcd1234/details`);
+  await settle(ctx.window, 6);
+  const doc = ctx.window.document;
+  click(ctx.window, doc.querySelector('#hist-detail .hd-bar-more'));
+  await settle(ctx.window);
+  return { ctx, doc, reads, items: [...doc.querySelectorAll('body > .wfv-menu .menu-item')] };
+}
+
+test('G6: More › Use as test example, before Terminal, opens "Use this run as a test example" for this run', async () => {
+  const { ctx, doc, reads, items } = await moreItems({ flags: 'workflowTests' });
+  const texts = items.map((b) => b.textContent.trim());
+  // Merge with dev's Rerun (#1519): Rerun comes first, then this item, still right before Terminal (board 25).
+  const at = texts.indexOf('Use as test example');
+  assert.ok(at >= 0, texts.join(' | '));
+  assert.match(texts[at + 1], /^Terminal/, 'board 25: the real items stay, Terminal next');
+  click(ctx.window, items[at]);
+  await settle(ctx.window, 6);
+  assert.equal(reads.length, 1, 'GET /api/workflow-tests/past-run/abcd1234');
+  assert.equal(doc.querySelector('#mk-dialog-title').textContent, 'Use this run as a test example');
+  assert.equal(doc.querySelector('#wft-fr-name').value, 'Q3 Hiring Deck');
+  [...doc.querySelectorAll('#mk-dialog button')].find((b) => b.textContent === 'Cancel').click();
+  await settle(ctx.window);
+});
+
+test('G6: no Use as test example with the flag off, or for a built-in workflow', async () => {
+  const off = await moreItems({ flags: '' });
+  assert.equal(off.items.some((b) => b.textContent.trim() === 'Use as test example'), false, 'flag off');
+  const auto = await moreItems({ flags: 'workflowTests', detail: { ...WF_DETAIL, state: { ...WF_DETAIL.state, stepper: { template: { id: 'wf_default', name: 'Default' } } } } });
+  assert.equal(auto.items.some((b) => b.textContent.trim() === 'Use as test example'), false, 'a built-in workflow has no tests');
+  // An Auto run that matched no saved workflow keeps template.id 'wf_auto' (auto/proposal.mjs): the server would only refuse it.
+  const auto2 = await moreItems({ flags: 'workflowTests', detail: { ...WF_DETAIL, state: { ...WF_DETAIL.state, stepper: { template: { id: 'wf_auto', name: 'Auto' } } } } });
+  assert.equal(auto2.items.some((b) => b.textContent.trim() === 'Use as test example'), false, 'an Auto run of no saved workflow');
+});
+
+// Workflow tests 3a Task 13 (D65, board 38): a single-project git run is offered too; a Folder or a workspace run is not.
+const GIT_DETAIL = { ...DETAIL, state: { ...DETAIL.state, status: 'done', workMode: 'git', stepper: { template: { id: 'wf_b', name: 'Fix a bug from a ticket' } } } };
+const PAST_PROJ = { pipelineId: ROW.id, workflowId: 'wf_b', workflowName: 'Fix a bug from a ticket', title: ROW.title, request: 'Fix it.', files: [], qa: [],
+  use: 4, useLabel: 'v4', testable: true, reason: null, reasonText: null,
+  project: { key: ROW.projectKey, name: 'Alpha', startSha: 'abc1234'.padEnd(40, '0'), short: 'abc1234', startRef: 'feat/log-ux', startAt: '2026-08-17T20:54:42Z', setupCmd: 'npm ci' } };
+async function gitMoreItems({ row = ROW, detail = GIT_DETAIL } = {}) {
+  const reads = [];
+  const ctx = await boot({ fetchHandler: (u) => {
+    if (u.endsWith('/diff') || u.endsWith('/log')) return { ok: false, status: 404, json: async () => ({ error: 'none' }) };
+    if (u.endsWith(`/api/history/${row.projectKey}/${row.id}`)) return ok(detail);
+    if (u.endsWith('/api/history')) return ok({ pipelines: [row], ghAvailable: false });
+    if (u.includes(`/api/workflow-tests/past-run/${row.id}`)) { reads.push(u); return ok(PAST_PROJ); }
+    return ok({});
+  } });
+  ctx.window.document.documentElement.dataset.flags = 'workflowTests';
+  go(ctx.window, `history/${row.projectKey}/${row.id}/details`);
+  await settle(ctx.window, 6);
+  const doc = ctx.window.document;
+  click(ctx.window, doc.querySelector('#hist-detail .hd-bar-more'));
+  await settle(ctx.window);
+  return { ctx, doc, reads, items: [...doc.querySelectorAll('body > .wfv-menu .menu-item')] };
+}
+
+test('G6 (3a, D65): a finished single-project git run offers Use as test example; its dialog shows where it starts and the setup', async () => {
+  const { ctx, doc, reads, items } = await gitMoreItems();
+  const use = items.find((b) => b.textContent.trim() === 'Use as test example');
+  assert.ok(use, 'a git run of a saved workflow');
+  click(ctx.window, use);
+  await settle(ctx.window, 6);
+  assert.equal(reads.length, 1);
+  assert.equal(doc.querySelector('#mk-dialog .wft-fr-intro').textContent, 'Worca keeps the request and where the run started, so every new version of Fix a bug from a ticket can be tried on exactly the same thing.');
+  // U-T14 (F26): a start point reads "{branch} · {date}"; the commit id is for developers only.
+  assert.match(doc.querySelector('#mk-dialog .wft-startbox').textContent, /^Where it startsStarts from where this run started: feat\/log-ux · Aug 17/);
+  assert.doesNotMatch(doc.querySelector('#mk-dialog .wft-startbox').textContent, /abc1234/);
+  assert.equal(doc.querySelector('#wft-fr-setup').value, 'npm ci');
+  [...doc.querySelectorAll('#mk-dialog button')].find((b) => b.textContent === 'Cancel').click();
+  await settle(ctx.window);
+});
+
+test('G6 (3a): no Use as test example for a Folder run or a workspace run', async () => {
+  const folder = await gitMoreItems({ row: { ...ROW, workMode: 'folder' }, detail: { ...GIT_DETAIL, state: { ...GIT_DETAIL.state, workMode: 'folder' } } });
+  assert.equal(folder.items.some((b) => b.textContent.trim() === 'Use as test example'), false, 'a Folder run');
+  const ws = await gitMoreItems({ row: { ...ROW, target: 'workspace' } });
+  assert.equal(ws.items.some((b) => b.textContent.trim() === 'Use as test example'), false, 'a workspace run');
 });

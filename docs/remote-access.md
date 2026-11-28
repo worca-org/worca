@@ -9,8 +9,9 @@ Nothing here changes a local install. With none of the variables below set, worc
 as before.
 
 For a complete hosted setup (the container on Railway plus everything on this page), follow
-[deploy-railway.md](deploy-railway.md). This page covers the Cloudflare side and worca's settings,
-which are the same wherever worca runs.
+[deploy-railway.md](deploy-railway.md). For a team's instance on a Linux server or VM, with the
+broker, agent users and the allow-list on, follow [Shared instance](shared-instance.md). This page
+covers the Cloudflare side and worca's settings, which are the same wherever worca runs.
 
 ## How it fits together
 
@@ -186,8 +187,6 @@ each run. This is attribution, not permissions: everyone keeps the same rights.
 - People are shown only when each viewer signs in as themselves (Cloudflare Access or
   `WORCA_IDENTITY_HEADER`). A local install, or a self-hosted worca with only
   `WORCA_IDENTITY_NAME`, records the name but shows none of it: there is only one person.
-- A pull request opened from a run ends with *Started by ada@example.com via worca*, so a PR
-  authored by a shared bot or GitHub App still names the person.
 - Chat sees the signed-in person in its context and answers "who started this", "what did ada
   run", "who paused it" and "who scheduled this" from the recorded names (`list_runs` with a
   `startedBy` filter, `list_people`, and the actions `get_run` lists). "My runs" works only with a
@@ -349,6 +348,13 @@ task sources and chat channels, and a `worca` CLI started under it. `NO_PROXY` i
 loopback only, so no other host goes around the proxy. worca's own outbound calls (`fetch`) go
 through it too. The overlay's default allowlist never applies under a mode. If the proxy can't
 start, worca does not start (exit 78). `open` or no mode: no proxy, nothing changes.
+
+In `allow` mode worca also adds the GitHub Copilot **GHE.com tenant** configured on its Providers
+page (`<t>.ghe.com` and `.<t>.ghe.com`: GitHub's documented Copilot allowlist), live when the
+setting changes, and logs each addition (`Egress: allowing … for the GitHub Copilot GHE.com
+tenant`). `WORCA_EGRESS_DENY` still wins: set `WORCA_EGRESS_DENY=.ghe.com` to refuse it. `block`
+mode and no mode need nothing. Anyone who can write worca's `settings.json` can name a tenant, so
+a platform that does not want that sets the DENY entry.
 
 A refused host gets a `403` whose body names the host and says the organization's outbound
 network policy blocked it, so an agent's tool error says why (`curl`, `git` and `npm` show it as

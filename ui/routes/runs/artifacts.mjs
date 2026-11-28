@@ -4,6 +4,7 @@ import { findPipelineRowById, listArtifacts, listRunArtifacts, lookupPipelineRow
 import { ASK_LIMITS } from '../../../src/core/ask/limits.mjs';
 import { failedBecauseSignedOut } from '../../../src/core/claude-auth.mjs';
 import { listModels, modelCostConfig } from '../../../src/core/config.mjs';
+import { protectedSectionKeys } from '../../../src/core/diff-anchor.mjs';
 import { requireFlag } from '../../../src/core/flags.mjs';
 import { helperEngineFor } from '../../../src/core/model-env.mjs';
 import { modelFacts } from '../../../src/core/model-tiers.mjs';
@@ -15,7 +16,7 @@ import { TELEMETRY_FILE } from '../../../src/core/telemetry/recorder.mjs';
 import { summarizeTelemetry } from '../../../src/core/telemetry/summary.mjs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
-import { askFilesRunDir, badRequest, liveDiffOf, liveRunEntry, resolveProjectDir, resolveRunScope, sendArtifactRaw, serveAskFile } from '../../server.mjs';
+import { askFilesRunDir, badRequest, liveDiffOf, liveRunEntry, rawOpts, resolveProjectDir, resolveRunScope, sendArtifactRaw, serveAskFile } from '../../server.mjs';
 
 export function register(app) {
 
@@ -104,7 +105,7 @@ app.get('/api/runs/:id/artifact-raw/*splat', async (req, res) => {
   try {
     const row = findPipelineRowById(req.params.id);
     if (!row) return res.status(404).json({ error: 'pipeline not found' });
-    await sendArtifactRaw(res, row, req.params.splat.join('/'), { download: req.query.download === '1' });
+    await sendArtifactRaw(res, row, req.params.splat.join('/'), rawOpts(req));
   } catch (err) { res.status(500).json({ error: err && err.message ? err.message : String(err) }); }
 });
 app.get('/api/runs/:id/live-diff', async (req, res) => {
@@ -115,7 +116,8 @@ app.get('/api/runs/:id/live-diff', async (req, res) => {
   try {
     const out = await liveDiffOf(entry);
     if (!out) return res.status(404).json({ error: 'no worktree yet' });
-    res.json(out);
+    // Spread, never written onto `out`: it is the object liveDiffOf caches on the entry.
+    res.json({ ...out, protectedPaths: protectedSectionKeys(out.patch || '') });
   } catch (err) {
     res.status(500).json({ error: err && err.message ? err.message : String(err) });
   }

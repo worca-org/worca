@@ -2,7 +2,7 @@
 // in-process server, `runs` from the module, its `api(method, path, body)` helper). Then:
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import http from 'node:http';
+import { appServer } from './helpers/app-server.mjs';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { writeFileSync, mkdtempSync, rmSync, mkdirSync, existsSync, readFileSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -28,7 +28,7 @@ before(async () => {
   const mod = await import('../ui/server.mjs');
   runs = mod.runs;
   T = mod._testing;
-  srv = http.createServer(mod.app);
+  srv = appServer(mod.app);
   await new Promise((r) => srv.listen(0, '127.0.0.1', r));
   base = `http://127.0.0.1:${srv.address().port}`;
 });
@@ -282,4 +282,26 @@ test('#693: a workspace with an unregistered (git-mode) member nested in a repos
   assert.equal(r.body.code, 'NESTED_IN_REPO');
   assert.ok(r.body.error.startsWith(`workspace member ${inner} is inside the git repository at `), r.body.error);
   assert.equal(existsSync(join(inner, '.git')), false);
+});
+
+test('Chat runs: source branch: a Folder project card and a git project card with git off are never refused for a branch', async () => {
+  const { createThread, appendMessage } = await import('../src/core/ask/store.mjs');
+  const card = (projectDir, n) => {
+    const thread = createThread();
+    appendMessage(thread.id, { role: 'assistant', text: '', status: 'done',
+      blocks: [{ kind: 'card', id: `card_5f00000${n}`, state: 'proposed', card: { projectDir, brief: 'x', workflowId: 'wf_default', guardrailsId: 'normal' } }] });
+    return { askThreadId: thread.id, askCardId: `card_5f00000${n}` };
+  };
+  const later = new Date(Date.now() + 86_400_000).toISOString();
+  const folder = plain({ 'f.txt': 'f\n' });
+  await api('POST', '/api/projects', { name: 'srcbranch-folder', path: folder });
+  const f = await api('POST', '/api/run', { projectDir: folder, prompt: 'x', scheduledFor: later, ...card(folder, 1) });
+  assert.equal(f.status, 202, JSON.stringify(f.body));
+  const repo = await runDir(); gitInit(repo);
+  await api('POST', '/api/projects', { name: 'srcbranch-git', path: repo });
+  process.env.WORCA_GIT = '0';
+  try {
+    const g = await api('POST', '/api/run', { projectDir: repo, prompt: 'x', scheduledFor: later, ...card(repo, 2) });
+    assert.equal(g.status, 202, JSON.stringify(g.body));
+  } finally { process.env.WORCA_GIT = '1'; gitTesting.reset(); }
 });

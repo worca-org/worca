@@ -2,6 +2,46 @@
 
 ## Unreleased
 
+### Worca moved to worca-org
+
+- Worca moved to [github.com/worca-org/worca](https://github.com/worca-org/worca). Old links, clones and forks keep working.
+- Update your remote: `git remote set-url origin https://github.com/worca-org/worca`.
+- The image is now `ghcr.io/worca-org/worca`. Change `image:` in your compose file.
+- The old name, `ghcr.io/sinishadjukic/worca`, gets the same releases for a while. A later release says when it stops. Older versions stay there.
+- The built-in plugin marketplace moves with the repo. Plugins installed from it keep their update notices.
+- To check an image signature, accept both repositories: see [Verify](docs/docker.md).
+
+### Set up any chat engine from Chat
+
+- **Every chat engine has its own setup dialog now**, not only Claude Code. In Chat's model picker, the row of an engine that is not installed here (under **More harnesses**, or the whole menu when the button says **Set up a harness**) opens that engine's setup dialog: **Connect OpenAI Codex**, **Connect GitHub Copilot CLI**, **Connect Gemini CLI**, **Connect Goose**, **Connect OpenCode**, **Connect Qwen Code**, and **Connect Claude Code** as before. It used to open that engine's section of the docs in a new tab.
+- **One dialog for all of them**: the install command, the `WORCA_<ENGINE>_BIN` variable for a binary elsewhere, the sign-in step, a link to the engine's section in [Models](docs/models.md#chat), and **Check again**. The words and commands are the ones docs/models.md gives each engine, which now spells out the install command for Codex (`npm install -g @openai/codex`) and OpenCode (`npm install -g @opencode/cli`).
+- **Check again asks the server** whether the engine's program is installed (the picker's own look, never a start) and, once it is, whether the engine is ready, as Models › Jobs reports it: `GET /api/engines/<engine>/setup`, with `?recheck=1` to skip the 60-second readiness cache. Claude Code's dialog still checks Getting started's status. The browser extension has no dialog, so its rows still open the docs.
+
+### No silent Claude Code default model (#1450)
+
+- **An empty role now runs Worca's default**, not the CLI's own: Opus 5.5 / Sonnet 5.5 / Haiku 5.5 on Claude Code, and models derived by tier on Codex. No settings are migrated. A new per-role choice, **Let Claude Code decide** (Codex: **Let Codex decide**), keeps the old behaviour. On the other harnesses (and Claude Code signed out) Models › Jobs, the run card and the run log say the tool decides. See [When a role is empty](docs/models.md#when-a-role-is-empty).
+- **The Models page, the run card and the Agents tab show what "Default" resolves to**, and the Agents tab shows the model a step actually started when no one named one.
+- **Fable 5.2 is in the catalog** (premium, $8 / $40). A step about to run on a premium model nobody chose, or whose `[init]` model is premium and unchosen or differs from the requested one, **pauses** until you choose **Continue on <model>** or **Switch model and continue…**. A paused run started before this change resumes on the defaults.
+- **A usage limit scoped to one model** ("Fable limit") offers the other models on the same sign-in. The setup assistant preselects a model per role, and existing installs with an empty role see a one-time notice. The sub-agent `auto` rubric no longer offers Fable, the title retry runs on Haiku 5.5, and the broker preflight checks the default it will really use.
+
+### Remotes through an SSH Host alias (#1476)
+
+- A remote through a `~/.ssh/config` Host alias (`git@github-work:me/repo.git`) now counts as the host the alias names: Worca asks `ssh -G` (no connection) and re-parses the URL with the real host, so a pull request from a fork cloned that way goes to `upstream` instead of failing with "Head ref must be a branch", and an Azure DevOps alias gets its org and project. git keeps the URL as written. ssh missing, failing or slow keeps the alias host, and the next lookup asks again; real answers are cached per process.
+- Behaviour change: with a fork cloned through an alias as `origin`, Automations watch the fork instead of `upstream` (the same as a fork cloned without an alias). See [Git automations](docs/git-automations.md).
+
+### GitHub Copilot on a GHE.com tenant (data residency)
+
+- **A fourth Copilot account type, GHE.com tenant** (`accountType: ghe-com`), with a required **GHE.com host** (`acme.ghe.com`) on the Providers page, in `worca models set copilot accountType=ghe-com enterpriseHost=acme.ghe.com` and in Ask Worca's provider card. The host is validated (a bare `<tenant>.ghe.com`, no path, port or credentials) and stored normalized.
+- **Every GitHub-side call goes to the tenant:** the device-flow sign-in (and the address the sign-in link shows), `/user`, the token exchange, the model list, the quota, the bridge's requests and the reachability probe. A trusted `endpoints.api` (`*.<tenant>.ghe.com` or `*.githubcopilot.com`) is used; anything else falls back to `copilot-api.<tenant>.ghe.com`. The cached Copilot token is keyed by host. Nothing changes without a tenant, and a `ghe-com` config without a valid host refuses instead of falling back to github.com.
+- **A host change signs you out in the same write** (a sign-in belongs to one GitHub host), the card asks first, and a sign-in that finishes after the host changed stores nothing. Individual, Business and Enterprise keep the sign-in.
+- **Credential broker:** a Copilot slot whose `exchangeUrl` / `deviceBaseUrl` name a tenant trusts that tenant's gateway (`https://*.<tenant>.ghe.com`) as well as `*.githubcopilot.com`; slots naming two different tenants are refused. See [Credential broker](docs/credential-broker.md).
+- **Platform egress policy:** in `allow` mode, worca's own proxy adds the configured tenant (`<t>.ghe.com`, `.<t>.ghe.com`), live and logged; `WORCA_EGRESS_DENY` still wins. The Docker egress overlay needs `.<t>.ghe.com` added by hand.
+- **Honest errors when GitHub refuses Copilot after sign-in.** A 401/403 from the token exchange now shows GitHub's own reason and link, including a single-sign-on requirement. During sign-in the card says the sign-in on `<host>` worked but GitHub refused Copilot access, and what to ask your admin, instead of "rejected the stored token — sign in again"; that wording is kept for a token that was stored and later fails. The server log records the status, URL and GitHub's message (never a token), once per ten minutes per distinct refusal. The credential broker's key page does the same.
+
+### Pull a feature from Requirements into a run
+
+- **Pull from Requirements** on New run and **Pull feature** in Chat start a run from a feature you have specified, through the same path as Start in Worca. The run setup takes an optional note for that run (it goes to the end of the task, and wins over the spec for that run), checked against the spec by an advisory contradiction check you can start anyway; a feature that already has a run in progress asks first. See [Requirements](docs/requirements.md#pull-from-requirements).
+
 ### Instance contract for hosting platforms
 
 - New [Instance contract](docs/instance-contract.md) page: what a hosted Worca instance is made of (the `worca`, `broker` and `cloudflared` containers, their start commands, ports and volumes) and everything a management interface sets or expects: every variable per container, the identity token, the heartbeat and what a receiver should do with it, stopping and draining, rotation and versions. For running Worca for others without a hosting platform, or for building a management interface of your own.

@@ -2,13 +2,21 @@
 // the nudge (open decisions, both choices with estimates) on a nudged one; the facts line and the
 // lead sentence on either. null when the card has neither.
 import { buildPerspectiveChips } from './chips.mjs';
-import { chipsHiddenFor, PERSPECTIVES } from '../../../src/shared/shape/perspectives.mjs';
+import { chipsHiddenFor, perspectivesFor } from '../../../src/shared/shape/perspectives.mjs';
 import { shapeRequirementsEligible } from '../../../src/shared/shape/requirements.mjs';
-import { ANSWERER_LEAD_KEYS } from '../../../src/shared/answerer.mjs';
+import { answererLeadKeys } from '../../../src/shared/answerer.mjs';
+import { flagOn } from '../flags.mjs';
 import { loadAnswerer, saveAnswerer, leadLabel } from '../answerer.mjs';
 import { notify } from '../feedback.mjs';
 import { toggleMenu } from '../workflows/menu.mjs';
 import { icon } from '../icons.mjs';
+import { segmented } from '../ask/widgets-input.mjs';
+import { buildFacts, factRow, setFactText, syncFacts } from '../run-page-head.mjs';
+import { fold, buildCheckFold } from './check-row.mjs';
+import { splitIntentLead } from '../chat/intent.mjs';
+import { stepHead, stepSender, errLine, ownButton } from './step-card.mjs';
+import { careRunCount } from '../../../src/shared/shape/slices.mjs';
+import { CARE_LABELS, CARE_POSITIONS, CARE_TABLE, careCell, careGivesUp, careGivesUpSentence } from '../../../src/shared/shape/feature-record.mjs';
 
 /** The facts line: `Large task · ≈ $31 · ~84 min` (the shaped choice's estimate), or `no estimate yet`. */
 function factsLine(n) {
@@ -29,20 +37,23 @@ const noop = () => {};
  *  "You lead as [lead ▾], supported by [supporters ▾]." — quiet ▾ buttons, each opening the menu (toggleMenu).
  *  Otherwise the facts line and today's chips, `chipsEl` for a host that places them apart. `blocked()` is
  *  true until a lead is picked; `commit()` saves a lead the profile does not hold. */
-function requirementsCard(doc, card, h, fetchFn) {
+function requirementsCard(doc, card, h, fetchFn, sentRole) {
   const n = card.shape || card.nudge;
   const el = h('div', 'shape-card');
   el.appendChild(h('div', 'shape-nudge-head shape-facts', factsLine(n)));
   const picked = n.perspectives;
   const hidden = chipsHiddenFor(picked);
+  // Small runs B3 (D21, D22): the live flag offers Compliance as a chip and as a lead (no run exists yet).
+  const smallRuns = flagOn('shaperSmallRuns', doc);
   if (!shapeRequirementsEligible(n)) {
-    const chips = buildPerspectiveChips(doc, { picked, hidden, collapsed: true });
+    const chips = buildPerspectiveChips(doc, { picked, hidden, collapsed: true, smallRuns });
     el.appendChild(chips.el);
     return { el, chipsEl: chips.el, requirements: false, blocked: () => false, commit: noop, body: () => bodyOf(card, chips.value()) };
   }
 
-  const offered = PERSPECTIVES.filter((p) => !hidden.includes(p.key)).map((p) => p.key);
+  const offered = perspectivesFor({ smallRuns }).filter((p) => !hidden.includes(p.key)).map((p) => p.key);
   const supporters = new Set(picked.filter((k) => k !== 'product' && offered.includes(k)));
+  if (smallRuns) return roleFactsCard(doc, card, h, fetchFn, { el, offered, supporters, sentRole });
   let lead = null;          // the pick
   let saved = null;         // the profile's lead
   let saving = null;        // the lead whose PUT is in flight
@@ -72,7 +83,7 @@ function requirementsCard(doc, card, h, fetchFn) {
   function paintSentence() {
     leadBtn = picker('shape-lead', 'pick a role', 'The role that leads the requirements');
     suppBtn = picker('shape-supporters', 'no one else', 'The roles that support the lead');
-    leadBtn.addEventListener('click', () => toggleMenu({ doc, anchor: leadBtn, label: 'You lead as', items: ANSWERER_LEAD_KEYS.map((k) => ({
+    leadBtn.addEventListener('click', () => toggleMenu({ doc, anchor: leadBtn, label: 'You lead as', items: answererLeadKeys({ smallRuns }).map((k) => ({
       label: leadLabel(k), checked: k === lead, ...(k === saved ? { hint: 'you, last time' } : {}),
       onSelect: () => { lead = k; paint(); emit(); },
     })) }));
@@ -111,11 +122,116 @@ function requirementsCard(doc, card, h, fetchFn) {
   };
 }
 
-/** `opts.fetch`: the host's fetch for the answerer profile (default: the page's). */
-export function shapeCardExtras(doc, card, { fetch: fetchFn } = {}) {
+/** Under shaperSmallRuns, a requirements card shows two fact rows: "Your role" (the role sent with the message as
+ *  plain text, else the lead picker) and "Supported by" (the supporters picker). It never blocks; the body names the
+ *  lead the card shows (sent, else picked, else the saved preset); with none shown yet the server fills the saved lead,
+ *  else Product. A sent
+ *  role reads no profile and is never written back; `commit()` saves only a card pick the profile does not hold. */
+function roleFactsCard(doc, card, h, fetchFn, { el, offered, supporters, sentRole }) {
+  const sent = typeof sentRole === 'string' && sentRole ? sentRole : null;
+  let picked = null;        // a lead chosen on the card's menu
+  let saved = null;         // the profile's lead (the preset, "you, last time")
+  let saving = null;        // the lead whose PUT is in flight
+  let leadBtn = null;
+  let suppBtn = null;
+  const labelId = `shape-lead-label-${++leadSeq}`;
+  const shown = () => sent ?? picked ?? saved;
+  const emit = () => el.dispatchEvent(new doc.defaultView.CustomEvent('shape-lead-change'));
+  const setText = (btn, text) => { btn.firstChild.textContent = text; };
+  const supportersText = () => {
+    const names = offered.filter((k) => supporters.has(k) && k !== shown()).map(leadLabel);
+    if (!names.length) return 'no one else';
+    return names.length === 1 ? names[0] : `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`;
+  };
+  const picker = (id, text, tip) => {
+    const b = h('button', 'btn btn-sm btn-quiet shape-lead-pick', text);
+    b.type = 'button';
+    b.title = tip;
+    b.dataset.menu = id;
+    b.dataset.key = `pick:${id}`;
+    b.setAttribute('aria-haspopup', 'menu');
+    b.setAttribute('aria-expanded', 'false');
+    b.appendChild(icon(doc, 'chevron-down', 12));
+    return b;
+  };
+  const paint = () => {
+    if (leadBtn) setText(leadBtn, shown() ? leadLabel(shown()) : 'pick a role');
+    setText(suppBtn, supportersText());
+  };
+
+  const kv = buildFacts(doc, [['role', 'Your role'], ['support', 'Supported by']]);
+  kv.classList.add('shape-lead-facts');
+  const roleRow = factRow(kv, 'role');
+  roleRow.querySelector('.rd-kv-k').id = labelId;
+  const roleValue = roleRow.querySelector('.rd-kv-v');
+  if (sent) {
+    roleValue.textContent = leadLabel(sent);
+    roleValue.title = 'Sent with your message';
+  } else {
+    leadBtn = picker('shape-lead', 'pick a role', 'The role that leads the requirements');
+    leadBtn.addEventListener('click', () => toggleMenu({ doc, anchor: leadBtn, label: 'Your role', items: answererLeadKeys({ smallRuns: true }).map((k) => ({
+      label: leadLabel(k), checked: k === shown(), ...(k === saved ? { hint: 'you, last time' } : {}),
+      onSelect: () => { picked = k; paint(); emit(); },
+    })) }));
+    roleValue.appendChild(leadBtn);
+  }
+  suppBtn = picker('shape-supporters', 'no one else', 'The roles that support the lead');
+  suppBtn.addEventListener('click', () => toggleMenu({ doc, anchor: suppBtn, label: 'Supported by', items: offered
+    .filter((k) => k !== 'product' && k !== shown()).map((k) => ({
+      switch: true, label: leadLabel(k), checked: supporters.has(k),
+      onToggle: (b) => {
+        if (supporters.has(k)) supporters.delete(k); else supporters.add(k);
+        b.setAttribute('aria-checked', String(supporters.has(k)));
+        paint();
+      },
+    })) }));
+  factRow(kv, 'support').querySelector('.rd-kv-v').appendChild(suppBtn);
+  paint();
+  syncFacts(kv);
+  el.appendChild(kv);
+  emit();
+  if (!sent) loadAnswerer(fetchFn).then((p) => { saved = p.lead; paint(); emit(); }, noop);
+
+  return {
+    el, requirements: true, labelId,
+    blocked: () => false,
+    commit() {
+      if (!picked || sent || picked === saved || picked === saving) return;
+      const chosen = picked;
+      saving = chosen;
+      const settle = () => { if (saving === chosen) saving = null; };
+      saveAnswerer(chosen, fetchFn).then(() => { settle(); saved = chosen; },
+        () => { settle(); notify({ tone: 'err', title: 'Could not save your lead role. It is used for this run only.' }, { doc }); });
+    },
+    body: () => {
+      const l = shown();
+      return bodyOf(card, offered.filter((k) => k === 'product' || k === l || (supporters.has(k) && k !== l)), l ? { lead: l } : {});
+    },
+  };
+}
+
+/** The Shaper role sent with the user message a card answers (`Asking as: compliance.` after the Shaper lead): the
+ *  nearest earlier `role:'user'` row that is not a synthetic notice, before the row holding card `blockId`. null when
+ *  the card, its user row or the role paragraph is missing. */
+export function sentShapeRole(rows, blockId) {
+  const list = Array.isArray(rows) ? rows : [];
+  const at = list.findIndex((r) => Array.isArray(r?.blocks) && r.blocks.some((b) => b && b.kind === 'card' && b.id === blockId));
+  if (at < 0) return null;
+  for (let i = at - 1; i >= 0; i -= 1) {
+    const r = list[i];
+    if (!r || r.role !== 'user') continue;
+    if (Array.isArray(r.blocks) && r.blocks.some((b) => b && b.kind === 'notice' && b.synthetic)) continue;
+    return splitIntentLead(r.text).role || null;
+  }
+  return null;
+}
+
+/** `opts.fetch`: the host's fetch for the answerer profile (default: the page's). `opts.sentRole`: the role sent with
+ *  the message the card answers (`sentShapeRole`), used only under shaperSmallRuns. */
+export function shapeCardExtras(doc, card, { fetch: fetchFn, sentRole = null } = {}) {
   if (!card || (!card.shape && !card.nudge)) return null;
   const h = (tag, cls, text) => { const e = doc.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
-  return requirementsCard(doc, card, h, fetchFn);
+  return requirementsCard(doc, card, h, fetchFn, sentRole);
 }
 
 /** The shaped card's one line on what happens next (D20). `likelySlices` is filled from slice 4 (#730) on. */
@@ -134,4 +250,140 @@ export function shapeAdvancedSummary({ engine = '', guardrails = '', agents = 0,
     parts.push(overrides ? `${a}, ${overrides} changed from workflow defaults` : `${a} on workflow defaults`);
   }
   return parts.join(' · ');
+}
+
+// ---- Shaper small runs B2: the Start step's body (the one card's `.chat-rc-q`, ask kind `care`) ----
+const CARE_ROWS = [['size', 'Size'], ['care', 'Care'], ['does', 'Does'], ['estimate', 'Estimate'], ['gives', 'Gives up'], ['history', 'History'], ['models', 'Models']];
+const CARE_EVERY = 'In every position: every requirement is owned by one run or confirmed by a person; no agent approves its own work.';
+const NOT_ENOUGH = 'not enough history yet';
+const capOf = (doc, text) => { const c = doc.createElement('div'); c.className = 'cap'; c.textContent = text; return c; };
+const lineOf = (doc, text) => { const d = doc.createElement('div'); d.textContent = text; return d; };
+/** `.rd-kv-v` is one flex line: a value of several lines goes in one block child, so its lines stack. */
+const stackOf = (doc, nodes) => { const d = doc.createElement('div'); d.append(...nodes); return d; };
+const usd = (n) => (n < 10 ? n.toFixed(2) : String(Math.round(n)));
+let careSeq = 0;
+
+/**
+ * The Start step (B2): the size, the Care dial preselected on Worca's pick with its reason, what the selected position
+ * does, the estimates, what it gives up below the pick (one sentence, the full list in a fold), the History per
+ * position, the models a person set, the "What … does" fold and one "Start requirements". With shaperSmallRuns the Size
+ * row adds the runs at Worca's pick (`careRunCount`) and the reason drops its "about N requirements" clause.
+ * `deps` = the step card's (`title`, `chip`, `submit`) plus `onPick`.
+ * @returns {{el: HTMLElement, render: (panel: HTMLElement) => void, collect: () => object, setErrors: (errors: object[]) => void}}
+ */
+export function renderCareStart(doc, pq, deps = {}) {
+  const start = (pq && pq.care) || {};
+  const pick = start.pick && CARE_POSITIONS.includes(start.pick.position) ? start.pick.position : 'balanced';
+  const names = start.names || {};
+  const positions = start.positions || {};
+  const history = start.history || {};
+  let sel = pick;
+  const el = doc.createElement('div');
+  el.className = 'care-start';
+  el.appendChild(stepHead(doc, deps.title || 'Your turn: how much care?', deps.chip || 'Start'));
+  const kv = buildFacts(doc, CARE_ROWS);
+  const value = (key) => factRow(kv, key).querySelector('.rd-kv-v');
+  const careKey = factRow(kv, 'care').querySelector('.rd-kv-k');
+  careKey.id = `care-k-${++careSeq}`;
+
+  const facts = start.facts || {};
+  // shaperSmallRuns (ask screens slice 9): the Size row is the one place with a number of runs, at Worca's pick, so the
+  // reason leaves the requirement count to it. Set once: the count does not follow the selection.
+  const smallRuns = flagOn('shaperSmallRuns', doc);
+  const runs = smallRuns ? careRunCount(facts.requirements, pick) : null;
+  const runsPart = runs === null ? '' : runs === 1 ? ' · one run' : ` · about ${runs} runs`;
+  value('size').textContent = start.size
+    ? `${start.size[0].toUpperCase()}${start.size.slice(1)} · about ${facts.requirements} requirements${runsPart}` : 'Size not known yet';
+  const reason = start.pick && start.pick.reason ? start.pick.reason : '';
+
+  const err = errLine(doc);
+  const seg = segmented({ doc, readonly: false }, CARE_POSITIONS.map((p) => ({ value: p, label: CARE_LABELS[p] })), pick,
+    (p) => { sel = p; paint(); if (deps.onPick) deps.onPick(p); }, { idBase: `${careKey.id}-seg`, labelledBy: careKey.id });
+  const pickBtn = seg.children[CARE_POSITIONS.indexOf(pick)];
+  value('care').append(stackOf(doc, [seg, capOf(doc, smallRuns ? reason.replace(/, about \d+ requirements\b|\babout \d+ requirements(?:, | )/, '') : reason), err]));
+
+  const foldBtn = doc.createElement('button');
+  foldBtn.type = 'button';
+  foldBtn.className = 'btn plan-fold care-fold';
+  const foldText = doc.createElement('span');
+  foldText.className = 'plan-fold-text';
+  const chev = doc.createElement('span');
+  chev.className = 'plan-chev'; chev.textContent = '›'; chev.setAttribute('aria-hidden', 'true');
+  foldBtn.append(foldText, chev);
+  const region = doc.createElement('div');
+  region.className = 'care-fold-body';
+  region.hidden = true;
+  fold(foldBtn, region);
+  const tableKv = buildFacts(doc, CARE_TABLE.map((r) => [r.key, r.label]));
+  region.append(tableKv, capOf(doc, CARE_EVERY));
+
+  // Gives up: one sentence with "Recorded as your choice" on the same line, then every differing row in a fold,
+  // closed by default (owner direction d9a830854). Built once, so the fold stays as the person left it.
+  const givesLine = doc.createElement('div');
+  givesLine.className = 'care-gives';
+  const givesText = doc.createTextNode('');
+  const givesCap = doc.createElement('span');
+  givesCap.className = 'cap';
+  givesCap.textContent = ' Recorded as your choice';
+  givesLine.append(givesText, givesCap);
+  const givesFold = buildCheckFold(doc, [], '', { text: (g) => `All ${g.length} differences`, rows: (d, g) => g.map((x) => lineOf(d, x)) });
+  const givesBlock = stackOf(doc, [givesLine, givesFold.line, givesFold.rows]);
+
+  function paint() {
+    value('does').textContent = positions[sel] ? positions[sel].description : '';
+    const est = value('estimate');
+    const priced = CARE_POSITIONS.map((p) => (positions[p] && positions[p].estimate) || null);
+    if (priced.every((e) => !e)) est.replaceChildren(doc.createTextNode(NOT_ENOUGH));
+    else {
+      const parts = [];
+      CARE_POSITIONS.forEach((p, i) => {
+        if (i) parts.push(doc.createTextNode(' · '));
+        const t = priced[i] ? `${CARE_LABELS[p]} ≈ $${usd(priced[i].costUsd)}` : `${CARE_LABELS[p]}: ${NOT_ENOUGH}`;
+        if (p === sel) { const b = doc.createElement('b'); b.textContent = t; parts.push(b); } else parts.push(doc.createTextNode(t));
+      });
+      const cap = doc.createElement('span');
+      cap.className = 'cap';
+      cap.textContent = ` ${start.size ? 'the whole build, from recorded step costs' : 'one run, from recorded step costs'}`;
+      est.replaceChildren(stackOf(doc, [stackOf(doc, [...parts, cap]), ...(start.estimateCap ? [capOf(doc, start.estimateCap)] : [])]));
+    }
+    const gives = careGivesUp(sel, pick, names);
+    if (gives.length) { givesText.textContent = careGivesUpSentence(sel, pick) || gives[0]; givesFold.update(gives); }
+    value('gives').replaceChildren(...(gives.length ? [givesBlock] : []));
+    if (gives.length) delete pickBtn.dataset.preset; else if (sel === pick) pickBtn.dataset.preset = '1';
+    const hist = CARE_POSITIONS.map((p) => history[p] || { enough: false, line: `${CARE_LABELS[p]}: ${NOT_ENOUGH}` });
+    value('history').replaceChildren(hist.every((x) => !x.enough)
+      ? lineOf(doc, `Quality figures per position: ${NOT_ENOUGH}`) : stackOf(doc, hist.map((x) => lineOf(doc, x.line))));
+    value('models').textContent = start.modelsLine ? start.modelsLine.replace(/^Models: /, '') : '';
+    syncFacts(kv);
+    foldText.textContent = `What ${CARE_LABELS[sel]} does`;
+    for (const r of CARE_TABLE) setFactText(tableKv, r.key, careCell(r.key, sel, names));
+    syncFacts(tableKv);
+  }
+  paint();
+  el.append(kv, foldBtn, region);
+
+  // The step card's sending state: the button is disabled while the answer posts, and enabled again before stepSender
+  // gives the focus back to it after a failure (focus-after-disable).
+  let go = null;
+  const send = stepSender({ ...deps, doc, submit: (payload) => {
+    go.disabled = true;
+    return Promise.resolve().then(() => deps.submit(payload)).finally(() => { go.disabled = false; });
+  } }, err);
+  go = ownButton(doc, 'btn-sm btn-primary care-go', 'Start requirements', () => send({ care: { position: sel } }));
+  const foot = doc.createElement('div');
+  foot.className = 'qpanel-foot plan-actions';
+  foot.appendChild(go);
+  el.appendChild(foot);
+  return {
+    el,
+    render: (panel) => panel.appendChild(el),
+    collect: () => ({ care: { position: sel } }),
+    setErrors: (errors) => {
+      const first = Array.isArray(errors) && errors.find((e) => e && e.message);
+      if (!first) return;
+      err.classList.remove('ok');
+      err.textContent = first.message;
+      err.hidden = false;
+    },
+  };
 }

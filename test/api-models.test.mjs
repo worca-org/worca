@@ -6,7 +6,7 @@
 // HOME (settings.json) and opts into the catalog guard.
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import http from 'node:http';
+import { appServer } from './helpers/app-server.mjs';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -48,7 +48,7 @@ before(async () => {
   _resetForTests();
   proj = await mkdtemp(join(tmpdir(), 'worca-cc-apimodels-proj-'));
   const { app } = await import('../ui/server.mjs'); // imported => does not bind a port
-  srv = http.createServer(app);
+  srv = appServer(app);
   await new Promise((r) => srv.listen(0, '127.0.0.1', r));
   base = `http://127.0.0.1:${srv.address().port}`;
 });
@@ -729,6 +729,23 @@ test('no exported list is mutated', async () => {
   assert.ok([...CODEX_BUILTIN_MODELS, ...COPILOT_BUILTIN_MODELS].every((m) => !('testable' in m)));
 });
 
+test('an OpenCode Zen entry advertises no efforts — a Zen model takes no reasoning variant, so pickers and the spawn must not offer one', async () => {
+  await checkRows([
+    { name: 'POST an engine:opencode Zen model (`opencode/*`): its efforts come back empty', run: async () => {
+      const r = await post('/api/models', { id: 'opencode/big-pickle', label: 'Big Pickle (Zen)', engine: 'opencode', efforts: ['low', 'high'] });
+      assert.equal(r.status, 200, JSON.stringify(r.body));
+      assert.deepEqual(r.body.model.efforts, [], 'a Zen free model advertises no efforts (it takes no variant)');
+      assert.deepEqual(listGlobalModels().find((m) => m.id === 'opencode/big-pickle').efforts, []);
+    } },
+    { name: 'POST an engine:opencode model of another provider keeps its chosen efforts', run: async () => {
+      const r = await post('/api/models', { id: 'openrouter/z-ai/glm-5.3-prime', label: 'GLM', engine: 'opencode', efforts: ['low', 'high'] });
+      assert.equal(r.status, 200, JSON.stringify(r.body));
+      assert.deepEqual(r.body.model.efforts, ['low', 'high']);
+      assert.deepEqual(listGlobalModels().find((m) => m.id === 'openrouter/z-ai/glm-5.3-prime').efforts, ['low', 'high']);
+    } },
+  ]);
+});
+
 // ── the pricing override over HTTP (what the editor form actually sends) ──────
 
 test('POST/PATCH /api/models carry `cost` end-to-end (GET unmasked) and reject a malformed `cost` with the form message', async () => {
@@ -1130,4 +1147,14 @@ test('DELETE: a job clear that fails after the entry is gone still answers 200, 
   assert.deepEqual((await jfetch('/api/settings')).body.modelRoles.claude?.everyday, { model: 'half-gone' }, 'the role the failed clear left');
   const reset = await post('/api/settings', { modelRoles: { claude: { everyday: null } } });
   assert.equal(reset.status, 200, JSON.stringify(reset.body));
+});
+
+test('PATCH /api/config: a node\'s engine sets, an absent one keeps, a bad one is a 400; POST takes it for a step', async () => {
+  const at = (r) => r.body.config.workflows.wf_x.nodes.s9_0;
+  assert.equal(at(await patch('/api/config', { projectDir: proj, workflowId: 'wf_x', nodes: { s9_0: { model: 'gpt-5.5', engine: 'codex' } } })).engine, 'codex');
+  assert.equal(at(await patch('/api/config', { projectDir: proj, workflowId: 'wf_x', nodes: { s9_0: { model: 'gpt-5.5', effort: 'low' } } })).engine, 'codex');
+  const bad = await patch('/api/config', { projectDir: proj, workflowId: 'wf_x', nodes: { s9_0: { model: 'gpt-5.5', engine: 'codx' } } });
+  assert.deepEqual([bad.status, bad.body.error], [400, 'unknown harness "codx"']);
+  const step = await post('/api/config', { projectDir: proj, step: 'planner', model: 'gpt-5.5', engine: 'codex' });
+  assert.equal(step.body.config.steps.planner.engine, 'codex');
 });

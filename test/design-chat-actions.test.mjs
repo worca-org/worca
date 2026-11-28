@@ -29,7 +29,7 @@ test('safeAttachmentName: nothing leaves the folder or collides, on any OS', () 
     ['logo-final-1.png', 'evil.png', 'win.png', 'file-con.png', 'logo-final-1-2.png', 'logo-final-1-3.png', 'file.png', 'file.env', 'a.b.c.txt', 'x'.repeat(60) + '.png']);
 });
 test('copyThreadAttachments: uploads only, stable across rounds, names returned', async () => {
-  const t = createThread({ mode: 'design', title: 'x' });
+  const t = createThread({ title: 'x' });
   const m = appendMessage(t.id, { role: 'user', text: 'x' });
   addAttachment(t.id, m.id, { name: 'Logo.png', kind: 'image', mime: 'image/png', data: Buffer.from('a') });
   addAttachment(t.id, m.id, { name: 'logo.png', kind: 'image', mime: 'image/png', data: Buffer.from('b') });
@@ -54,7 +54,7 @@ function rig(over = {}) {
   return { a, calls, posted, rows, holds };
 }
 const withPlan = (d) => writeFileSync(join(designWorkDir(d.id), 'plan.json'), JSON.stringify({ v: 1, kind: 'web', title: 'T', canvas: { w: 1440 }, notes: '', sections: [{ id: 'hero', job: 'Hero', brief: 'b', parts: ['html'], estHeight: 600 }] }));   // createDesign made work/; web sections need estHeight
-const made = (kind = 'web') => { const d = createDesign({ kind, title: 'ShipRadar' }, { by: 'local' }); const t = createThread({ mode: 'design', title: d.title }); updateDesign(d.id, { threadId: t.id }); return { d, t }; };
+const made = (kind = 'web') => { const d = createDesign({ kind, title: 'ShipRadar' }, { by: 'local' }); const t = createThread({ title: d.title }); updateDesign(d.id, { threadId: t.id }); return { d, t }; };
 
 test('a start hands over the brief and returns a running receipt', async () => {
   const { d, t } = made(); const { a, calls, posted } = rig();
@@ -230,7 +230,7 @@ test('safeAttachmentName: accents fold to ASCII, a cut never ends on a separator
   ['cafe-menu.png', 'resume.pdf', 'pic.png', 'a'.repeat(59) + '.png', 'y'.repeat(60) + '.png', 'file-con.tar.gz']);
 });
 test('copyThreadAttachments: a body that is gone is skipped; a link at a name is replaced, a linked folder refused', { skip: process.platform === 'win32' }, async () => {
-  const t = createThread({ mode: 'design', title: 'x' });
+  const t = createThread({ title: 'x' });
   const m = appendMessage(t.id, { role: 'user', text: 'x' });
   const gone = addAttachment(t.id, m.id, { name: 'gone.md', text: 'lost' });
   rmSync(attachmentPath(t.id, gone.id));
@@ -327,7 +327,7 @@ test('M-1: a folder planted at an upload\'s name is a taken name, and a link at 
 
 /** A thread with one upload `brief.md` and a source folder whose `assets/att` exists. */
 function oneUpload() {
-  const t = createThread({ mode: 'design', title: 'x' });
+  const t = createThread({ title: 'x' });
   addAttachment(t.id, appendMessage(t.id, { role: 'user', text: 'x' }).id, { name: 'brief.md', text: 'hello' });
   const work = mkdtempSync(join(tmpdir(), 'dca-'));
   after(() => rmSync(work, { recursive: true, force: true }));
@@ -675,4 +675,24 @@ test('M3: the receipt\'s baseVersion is the version the round starts from, read 
   const s = rig({ brokerRefusal: async () => { updateDesign(d.id, { version: 3 }); return null; } });   // a restore ended meanwhile
   const r = await s.a.apply({ kind: 'design-start', brief: 'x' }, { threadId: t.id, by: 'local' });
   assert.equal(r.block.card.baseVersion, 3);
+});
+
+test('C1 (D6): startHeldRound stages the kit, makes the folders, starts the round, and answers refusalNotice\'s words on 409 and 403', async () => {
+  const { startHeldRound, refusalNotice } = await import('../src/core/design/chat-actions.mjs');
+  const d = createDesign({ kind: 'web', title: 'Prototype · Charts' }, { by: 'ann' });
+  const staged = []; const started = [];
+  const designBuilds = (start) => ({ whileStarting: async (id, fn) => fn(), start });
+  const ok = await startHeldRound({ designBuilds: designBuilds(async (o) => { started.push(o); return { buildId: 'b_0123456789ab', round: 1, kind: 'first' }; }),
+    stageKit: async (o) => { staged.push(o); }, design: d, what: 'build', opts: { designId: d.id, brief: 'Build it', by: 'ann' } });
+  assert.deepEqual(ok, { ok: true, started: { buildId: 'b_0123456789ab', round: 1, kind: 'first' }, baseVersion: 0 });
+  assert.deepEqual(staged, [{ kind: 'web', workDir: designWorkDir(d.id) }]);
+  assert.deepEqual(started, [{ designId: d.id, brief: 'Build it', by: 'ann' }]);
+  const busy = new DesignRefusal(409, 'This design already has a build open: continue or stop it first');
+  const cap = new DesignRefusal(403, 'total cost limit reached');
+  for (const err of [busy, cap]) {
+    const r = await startHeldRound({ designBuilds: designBuilds(async () => { throw err; }), stageKit: async () => {}, design: d, what: 'build', opts: {} });
+    assert.deepEqual(r, { ok: false, notice: refusalNotice(err, 'build'), status: err.status });
+  }
+  assert.equal(refusalNotice(cap, 'build'), 'Total cost limit reached: no build started.');
+  assert.equal(refusalNotice(busy, 'build'), 'A build is already open: wait for it, or press Resume or Stop.');
 });

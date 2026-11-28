@@ -8,7 +8,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
-  connectionOf, harnessesOf, runsOn, effortOn, effortsOn, connectionLabel, connectionKey, suggestModelHandle, runsOnText, codexReaches,
+  connectionOf, harnessesOf, runsOn, effortOn, effortsOn, connectionLabel, connectionKey, suggestModelHandle, runsOnText, codexReaches, pickEffortsOn,
 } from '../src/shared/connections.mjs';
 import { listModels, enginesOfModel, engineOfModel, modelRunsOn, modelForEngine, foreignRunModel, catalogHasModel, modelConnection } from '../src/core/config.mjs';
 import { addGlobalModel } from '../src/core/settings.mjs';
@@ -127,4 +127,29 @@ test('Chat knows the engines: list_models carries harnesses; the prompt keeps be
   assert.match(prompt, /Leave engine out and the run starts on the default engine \(the project's, else the user's, else the team's\)/);
   assert.equal(prompt.includes("the user's default engine"), false, 'one engine order in the prompt (rule 18, propose_run): project, user, team');
   assert.match(prompt, /never pick a beta engine on your own/);
+});
+
+test('a Copilot provider row on a GHE.com tenant names the tenant in its connection label; github.com does not', async () => {
+  assert.equal(connectionLabel({ id: 'x', upstream: { provider: 'copilot', api: 'anthropic', model: 'x' } }), 'GitHub Copilot');
+  assert.equal(connectionLabel({ id: 'x', bridged: 'copilot', bridgedHost: 'acme.ghe.com' }), 'GitHub Copilot · acme.ghe.com');
+  assert.equal(connectionLabel({ id: 'x', bridged: 'openai', bridgedHost: 'acme.ghe.com' }), 'OpenAI-compatible', 'only Copilot has a GitHub host');
+  const { updateProvider } = await import('../src/core/settings.mjs');
+  await addGlobalModel({ id: 'copilot-claude-sonnet-5.5', label: 'Claude Sonnet 5.5 (Copilot)', upstream: { provider: 'copilot', api: 'anthropic', model: 'claude-sonnet-5.5' } });
+  let row = (await listModels('')).find((r) => r.id === 'copilot-claude-sonnet-5.5');
+  assert.equal(row.bridgedHost, undefined);
+  assert.equal(connectionLabel(row), 'GitHub Copilot');
+  await updateProvider('copilot', { accountType: 'ghe-com', enterpriseHost: 'acme.ghe.com' });
+  row = (await listModels('')).find((r) => r.id === 'copilot-claude-sonnet-5.5');
+  assert.equal(row.bridgedHost, 'acme.ghe.com');
+  assert.equal(connectionLabel(row), 'GitHub Copilot · acme.ghe.com');
+  assert.equal(connectionKey(row), 'provider:copilot', 'the tenant does not split the connection');
+  const { askCatalog } = await import('../src/core/ask/models.mjs');
+  const ask = (await askCatalog()).models.find((r) => r.id === 'copilot-claude-sonnet-5.5');
+  assert.equal(ask.bridgedHost, 'acme.ghe.com', 'the chat catalog (GET /api/ask/models) carries it');
+});
+
+test('pickEffortsOn: the model\'s own efforts, then the ones the harness maps them to', () => {
+  assert.deepEqual(pickEffortsOn({ efforts: ['minimal', 'low'] }, 'claude'), ['minimal', 'low', 'medium']);
+  assert.deepEqual(pickEffortsOn({ efforts: ['medium', 'high', 'xhigh', 'max'] }, 'codex'), ['medium', 'high', 'xhigh', 'max']);
+  assert.deepEqual(pickEffortsOn({ efforts: ['high'] }, 'cursor'), ['high'], 'a harness with no efforts adds none');
 });

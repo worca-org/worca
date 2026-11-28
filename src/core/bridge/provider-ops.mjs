@@ -10,24 +10,27 @@ import {
   providerConfig, allProviders, updateProvider, resolveProviderSecret, providerSecretSet,
   clearCopilotSignIn,
   listGlobalModels, addGlobalModel, updateGlobalModel, updateSpeech, updateImages, updateSound,
-  openRouterConfig, updateOpenRouter,
+  openRouterConfig, updateOpenRouter, maskStoredSecret,
 } from '../settings.mjs';
 import { speechState } from '../speech.mjs';
 import { imagesState } from '../images.mjs';
 import { soundState } from '../sound.mjs';
 import { speechAssetStore } from '../speech-assets.mjs';
-import { modelEnvRef, maskModelEnvValue, UPSTREAM_PROVIDERS, isUpstreamBaseUrl, isOpenRouterBaseUrl, EFFORTS } from '../model-env.mjs';
+import { modelEnvRef, UPSTREAM_PROVIDERS, isUpstreamBaseUrl, isOpenRouterBaseUrl, EFFORTS } from '../model-env.mjs';
 import {
   startDeviceFlow, pollDeviceFlow, githubLogin, copilotToken, invalidateCopilotToken,
   listCopilotModels, copilotUsage, catalogEntryForCopilotModel, copilotApiFor,
-  copilotHeaders, normalizeCopilotModel, copilotCatalogId,
+  copilotHeaders, normalizeCopilotModel, copilotCatalogId, copilotAccountHost,
+  copilotRefusalText,
 } from './providers/copilot.mjs';
 import { keyOptional, openRouterKeyFor, providerKeyFor } from './registry.mjs';
+import { copilotBlockHost } from '../ghe-host.mjs';
 import { listEndpointModels, catalogEntryForEndpointModel, importableModel } from './providers/endpoint.mjs';
 import { brokerEnabled, brokerInfo, cachedBrokerInfo, mintSpawnToken, revokeSpawnToken, slotBaseUrl, personSlots } from '../broker-client.mjs';
 import { routeUpstream } from '../broker-routing.mjs';
 import { resolveBillTo } from '../billing.mjs';
 import { harnessesOf } from '../../shared/connections.mjs';
+import { opencodeModelIds } from '../engines/opencode.mjs';
 
 export { copilotCatalogId };
 
@@ -79,13 +82,16 @@ function sweepSessions(now = Date.now()) {
 
 /**
  * Begin a Copilot sign-in (the device flow).
- * @returns {Promise<{deviceCode, userCode, verificationUri, interval, expiresIn}>}
+ * The GitHub host (github.com or the GHE.com tenant) is resolved once and bound to the session;
+ * a ghe-com config without a valid host refuses with NO_HOST before any request.
+ * @returns {Promise<{deviceCode, userCode, verificationUri, interval, expiresIn, host}>}
  */
 export async function beginCopilotLogin({ fetch: f } = {}) {
   refuseWithBroker('sign in to GitHub Copilot');
+  const enterpriseHost = copilotAccountHost(providerConfig('copilot'));
   sweepSessions();
-  const flow = await startDeviceFlow({ fetch: f });
-  sessions.set(flow.deviceCode, { startedAt: Date.now(), expiresAt: Date.now() + Math.min(flow.expiresIn * 1000, SESSION_TTL_MS), interval: flow.interval });
+  const flow = await startDeviceFlow({ fetch: f, enterpriseHost });
+  sessions.set(flow.deviceCode, { startedAt: Date.now(), expiresAt: Date.now() + Math.min(flow.expiresIn * 1000, SESSION_TTL_MS), interval: flow.interval, enterpriseHost });
   return flow;
 }
 
@@ -98,29 +104,43 @@ export async function pollCopilotLogin(deviceCode, { fetch: f } = {}) {
   sweepSessions();
   const s = sessions.get(deviceCode);
   if (!s) return { error: 'unknown or expired sign-in session — start again' };
-  const r = await pollDeviceFlow(deviceCode, { fetch: f });
+  const eh = s.enterpriseHost;
+  const r = await pollDeviceFlow(deviceCode, { fetch: f, enterpriseHost: eh });
   if (r.pending) { if (r.interval) s.interval = r.interval; return { pending: true, interval: s.interval }; }
   sessions.delete(deviceCode);
   if (r.error) return { error: r.error };
   let login = '';
-  try { login = await githubLogin(r.token, { fetch: f }); } catch { login = ''; }
+  try { login = await githubLogin(r.token, { fetch: f, enterpriseHost: eh }); } catch { login = ''; }
   // Prove the account has Copilot before storing: a token without Copilot
   // access would only fail later, mid-run.
   try {
-    await copilotToken(r.token, { fetch: f, force: true });
+    await copilotToken(r.token, { fetch: f, force: true, enterpriseHost: eh });
   } catch (err) {
+    // Nothing is stored on a refusal; the token was never kept, so it is not a "stored token" that "failed".
+    if (err && err.code === 'AUTH') return { error: copilotRefusalText({ host: eh || 'github.com', status: err.status, login, github: err.github, via: 'sign-in' }) };
     return { error: err && err.code === 'EXCHANGE' ? `signed in as ${login || 'GitHub user'}, but the account has no Copilot access — ${err.message}` : (err.message || String(err)) };
   }
-  await updateProvider('copilot', { githubToken: r.token, ...(login ? { login } : {}) });
+  try {
+    // Re-checks the host where the token is committed: the person may have changed it since the sign-in began.
+    await updateProvider('copilot', { githubToken: r.token, ...(login ? { login } : {}) }, { expectCopilotHost: eh });
+  } catch (err) {
+    return { error: err && err.message ? err.message : String(err) };
+  }
   return { ok: true, login };
 }
 
 /** Sign out of Copilot: forget the token, drop the cached exchange. */
 export async function copilotLogout() {
   const cfg = providerConfig('copilot');
-  const tok = resolveProviderSecret(cfg.githubToken);
-  if (tok) invalidateCopilotToken(tok);
+  const tok = resolveProviderSecret(cfg.githubToken, process.env, 'providers.copilot.githubToken');
+  if (tok) invalidateCopilotToken(tok, { enterpriseHost: safeAccountHost(cfg) });
   await clearCopilotSignIn();
+}
+
+/** The config's token-cache host: null for github.com and for a ghe-com block without a usable host (never throws). */
+function safeAccountHost(cfg) {
+  const h = copilotBlockHost(cfg);
+  return h === 'github.com' ? null : h;
 }
 
 // ── state payloads (never a secret) ──────────────────────────────────────────
@@ -135,28 +155,30 @@ const secretSource = (v) => (!v ? null : modelEnvRef(v) ? 'env' : 'stored');
 export async function providersState({ quota = false, fetch: f, person = resolveBillTo(null) } = {}) {
   const all = allProviders();
   const c = all.copilot;
-  const token = resolveProviderSecret(c.githubToken);
+  const token = resolveProviderSecret(c.githubToken, process.env, 'providers.copilot.githubToken');
   const copilot = {
     connected: !!token,
     login: c.login || null,
     accountType: c.accountType,
+    enterpriseHost: c.enterpriseHost || null,
+    githubHost: copilotBlockHost(c),
     maxConcurrent: c.maxConcurrent,
     tokenSource: secretSource(c.githubToken),
     tokenRef: modelEnvRef(c.githubToken) ? c.githubToken : null,
     quota: null,
   };
   if (quota && token) {
-    try { copilot.quota = await copilotUsage(token, { fetch: f }); } catch { copilot.quota = null; }
+    try { copilot.quota = await copilotUsage(token, { fetch: f, enterpriseHost: copilotAccountHost(c) }); } catch { copilot.quota = null; }
   }
   const keyed = (name) => {
     const p = all[name];
     return {
-      configured: !!resolveProviderSecret(p.apiKey),
+      configured: !!resolveProviderSecret(p.apiKey, process.env, `providers.${name}.apiKey`),
       keyOptional: keyOptional(name, p.baseUrl),
       keySet: providerSecretSet(name),
       keySource: secretSource(p.apiKey),
       keyRef: modelEnvRef(p.apiKey) ? p.apiKey : null,
-      keyMasked: p.apiKey && !modelEnvRef(p.apiKey) ? maskModelEnvValue(p.apiKey) : null,
+      keyMasked: p.apiKey && !modelEnvRef(p.apiKey) ? maskStoredSecret(p.apiKey, `providers.${name}.apiKey`) : null,
       baseUrl: p.baseUrl,
       maxConcurrent: p.maxConcurrent,
     };
@@ -178,7 +200,7 @@ function openRouterState() {
     keySet: !!k.value,
     keySource: secretSource(text),
     keyRef: modelEnvRef(text) ? text : null,
-    keyMasked: text && !modelEnvRef(text) ? maskModelEnvValue(text) : null,
+    keyMasked: text && !modelEnvRef(text) ? maskStoredSecret(text, k.source === 'openai-legacy' ? 'providers.openai.apiKey' : 'providers.openrouter.apiKey') : null,
     legacyKey: k.source === 'openai-legacy',
     maxConcurrent, order, sort, allowFallbacks,
   };
@@ -229,7 +251,14 @@ export async function patchProvider(name, patch = {}) {
   for (const k of ['apiKey', 'githubToken']) if (typeof p[k] === 'string' && p[k].startsWith('••')) delete p[k];
   // Credential broker: keys are per person, on the key page; worca stores none.
   if (brokerEnabled() && ['apiKey', 'githubToken'].some((k) => typeof p[k] === 'string' && p[k].trim())) refuseWithBroker('store a provider key');
-  return updateProvider(name, p);
+  if (name !== 'copilot') return updateProvider(name, p);
+  const was = providerConfig('copilot');
+  const out = await updateProvider(name, p);
+  // A host change signs out (settings drops the token): evict the exchanged token it held. Memory only —
+  // the cache is keyed by host, so it could never be reused on the new one.
+  const oldTok = resolveProviderSecret(was.githubToken, process.env, 'providers.copilot.githubToken');
+  if (oldTok && !out.githubToken) invalidateCopilotToken(oldTok, { enterpriseHost: safeAccountHost(was) });
+  return out;
 }
 
 /** Downloaded in-browser speech models on disk; null where there is no worca home (tests). */
@@ -315,9 +344,9 @@ export async function copilotModelsForImport({ fetch: f } = {}) {
     });
   } else {
     const c = providerConfig('copilot');
-    const token = resolveProviderSecret(c.githubToken);
+    const token = resolveProviderSecret(c.githubToken, process.env, 'providers.copilot.githubToken');
     if (!token) throw Object.assign(new Error('not signed in to GitHub Copilot'), { code: 'NOT_SIGNED_IN' });
-    list = await listCopilotModels(token, { accountType: c.accountType, fetch: f });
+    list = await listCopilotModels(token, { accountType: c.accountType, enterpriseHost: copilotAccountHost(c), fetch: f });
   }
   const have = new Set(listGlobalModels().map((m) => m.id.toLowerCase()));
   return list.map((m) => { const catalogId = copilotCatalogId(m.id); return { ...m, api: copilotApiFor(m), catalogId, inCatalog: have.has(catalogId.toLowerCase()) }; })
@@ -393,7 +422,7 @@ export async function endpointModelsForImport({ baseUrl, apiKey: entryKey = '', 
   const base = endpointBase(baseUrl || p.baseUrl);
   const ownKey = typeof entryKey === 'string' ? entryKey.trim() : '';
   if (ownKey && brokerEnabled()) refuseWithBroker('store a model key');
-  if (ownKey && modelEnvRef(ownKey) && !resolveProviderSecret(ownKey)) throw new Error(`${ownKey} is not set in worca's environment — export it where worca starts`);
+  if (ownKey && modelEnvRef(ownKey) && !resolveProviderSecret(ownKey, process.env, null)) throw new Error(`${ownKey} is not set in worca's environment — export it where worca starts`);
   let out;
   const route = brokerEnabled() ? routeUpstream({ provider: 'openai', baseUrl: base }, { slots: (await brokerInfo()).slots || [] }) : null;
   if (route && route.error) throw new Error(route.error);
@@ -405,7 +434,7 @@ export async function endpointModelsForImport({ baseUrl, apiKey: entryKey = '', 
   } else {
     // Keyless local endpoints are reached directly, as without the broker. OpenRouter is listed with the key its
     // calls carry (registry.mjs openRouterKeyFor; `p` keeps the setup overlay); that key is never stored on an entry.
-    const key = brokerEnabled() ? '' : ownKey ? resolveProviderSecret(ownKey)
+    const key = brokerEnabled() ? '' : ownKey ? resolveProviderSecret(ownKey, process.env, null)
       : isOpenRouterBaseUrl(base) ? openRouterKeyFor({ provider: 'openai', baseUrl: base }, { openrouter: openRouterConfig(), openai: p }).value
         : providerKeyFor({ baseUrl: base }, p);
     out = await listEndpointModels(base, { apiKey: key, fetch: f });
@@ -517,6 +546,64 @@ export async function pendingImportIds({ copilot = null, openai = null } = {}, {
   return { pending, unreachable };
 }
 
+// ── OpenCode: what your installed opencode can run, for Add model ───────────
+// Unlike Copilot or an OpenAI-compatible endpoint, there is no server to ask:
+// the models live in the clicking machine's own opencode (its configured
+// providers, its `opencode auth`), so the list is the CLI's, like the local
+// endpoint's. A model is added as `{ id: provider/model, engine: 'opencode' }`
+// — the same id `opencode run -m` takes — with nothing to pin from the CLI, so
+// a re-import of an existing entry is a no-op, never a refresh.
+
+/** The models `opencode models` lists, each with `inCatalog` (the Add-model sheet marks the ones already there). */
+export async function opencodeModelsForImport() {
+  const ids = await opencodeModelIds();
+  const have = new Set(listGlobalModels().map((m) => m.id.toLowerCase()));
+  return ids.map((id) => {
+    const hub = id.indexOf('/');
+    const provider = hub > 0 ? id.slice(0, hub) : '';
+    return { id, provider, name: hub > 0 ? id.slice(hub + 1) : id, catalogId: id, inCatalog: have.has(id.toLowerCase()) };
+  });
+}
+
+/** The catalog entry for an OpenCode model: id `provider/model`, the maker's short name labelled after its harness. */
+function catalogEntryForOpencodeModel(m) {
+  return { id: m.id, label: `${m.name} (OpenCode)`, engine: 'opencode' };
+}
+
+/**
+ * Import OpenCode models into the catalog (§8.4's Copilot import, for the models your opencode runs). A new id is
+ * added as its own sign-in engine's entry (no upstream, no env); an id already in the catalog is skipped — an
+ * OpenCode entry has nothing to refresh, and one under another engine's id is refused. One the catalogue will not
+ * take is skipped with its reason: the rest are still imported, and what was imported is still reported.
+ * @param {string[]} ids  `opencode models` ids (provider/model)
+ * @param {{add?: (entry: object) => Promise<unknown>}} [deps]  the catalogue write (tests)
+ * @returns {Promise<{created:string[], updated:string[], skipped:Array<{id:string, why:string}>}>}
+ */
+export async function importOpencodeModels(ids, { add = addGlobalModel } = {}) {
+  const wanted = new Set((Array.isArray(ids) ? ids : []).map((s) => String(s).trim()).filter(Boolean));
+  if (!wanted.size) throw new Error('pick at least one model to import');
+  const list = await opencodeModelsForImport();
+  const byId = new Map(list.map((m) => [m.id, m]));
+  const created = []; const skipped = [];
+  for (const id of wanted) {
+    const m = byId.get(id);
+    if (!m) { skipped.push({ id, why: 'your opencode does not list it' }); continue; }
+    const entry = catalogEntryForOpencodeModel(m);
+    const current = m.inCatalog ? listGlobalModels().find((x) => x.id.toLowerCase() === entry.id.toLowerCase()) : null;
+    if (current) {
+      if (current.engine !== 'opencode') skipped.push({ id, why: `"${current.id}" already exists and is not an OpenCode model` });
+      continue;   // an OpenCode entry already in the catalog: nothing to refresh, so no "updated" either
+    }
+    try {
+      await add(entry);
+      created.push(entry.id);
+    } catch (err) {
+      skipped.push({ id, why: String((err && err.message) || err) });
+    }
+  }
+  return { created, updated: [], skipped };
+}
+
 // ── OpenRouter: the key's own limits ────────────────────────────────────────
 
 const finiteOrNull = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
@@ -615,15 +702,15 @@ export async function testProviderConnection(name, { fetch: f = globalThis.fetch
   }
   if (name === 'copilot') {
     const c = providerConfig('copilot');
-    const token = resolveProviderSecret(c.githubToken);
+    const token = resolveProviderSecret(c.githubToken, process.env, 'providers.copilot.githubToken');
     if (!token) return { ok: false, message: 'not signed in' };
-    try { await copilotToken(token, { fetch: f, force: true }); return { ok: true }; } catch (err) { return { ok: false, message: err.message || String(err) }; }
+    try { await copilotToken(token, { fetch: f, force: true, enterpriseHost: copilotAccountHost(c) }); return { ok: true }; } catch (err) { return { ok: false, message: err.message || String(err) }; }
   }
   if (name === 'openrouter') {
     const typed = typeof apiKey === 'string' && !apiKey.startsWith('••') ? apiKey.trim() : null;
     const { base, key, text } = typed === null
       ? openRouterAccount()
-      : { base: OPENROUTER_BASE_URL, key: { value: resolveProviderSecret(typed) }, text: typed };
+      : { base: OPENROUTER_BASE_URL, key: { value: resolveProviderSecret(typed, process.env, null) }, text: typed };
     if (!key.value && modelEnvRef(text)) return { ok: false, message: `the key's ${text} is not set in worca's environment` };
     return testOpenRouterKey(base, key.value, f);
   }
@@ -635,7 +722,7 @@ export async function testProviderConnection(name, { fetch: f = globalThis.fetch
     ...(baseUrl && isUpstreamBaseUrl(baseUrl) ? { baseUrl: baseUrl.trim().replace(/\/+$/, '') } : {}),
     ...(typedKey === null ? {} : { apiKey: typedKey }),
   };
-  const key = resolveProviderSecret(p.apiKey);
+  const key = resolveProviderSecret(p.apiKey, process.env, typedKey === null ? `providers.${name}.apiKey` : null);
   const keyIsSet = typedKey === null ? providerSecretSet(name) : !!typedKey;
   if (!key && (keyIsSet || !keyOptional(name, p.baseUrl))) return { ok: false, message: keyIsSet ? 'the key\'s ${VAR} is not set in worca\'s environment' : `no API key configured for ${p.baseUrl}` };
   const base = (p.baseUrl || '').replace(/\/+$/, '');

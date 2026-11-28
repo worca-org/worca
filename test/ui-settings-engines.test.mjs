@@ -123,6 +123,13 @@ test('enginePatchToSettingsBody: Command summaries saves onto commandSummaryMode
   assert.deepEqual(enginePatchToSettingsBody({ 'models.codex.utility.commandSummary': { model: 'gpt-5.5' } }), {});
 });
 
+test('enginePatchToSettingsBody: Guide saves onto guideModel (Claude only)', () => {
+  assert.deepEqual(enginePatchToSettingsBody({ 'models.claude.utility.guide': { model: 'claude-opus-5-5', effort: 'high' } }),
+    { guideModel: { model: 'claude-opus-5-5', effort: 'high' } });
+  assert.deepEqual(enginePatchToSettingsBody({ 'models.claude.utility.guide': null }), { guideModel: null });
+  assert.deepEqual(enginePatchToSettingsBody({ 'models.codex.utility.guide': { model: 'gpt-5.5' } }), {});
+});
+
 // Scale: one engine card at a time (the default engine's first), and each card lists only the slots set at this
 // level; the rest are summed up in one line, "+ Override a step…" reveals one, Show all reveals every slot.
 test('renderEngineSection: one card at a time, only the changed steps, one-line summary, override and show all', () => {
@@ -185,4 +192,37 @@ test('enginePatchToSettingsBody: the Second-opinion reviewer saves onto secondOp
   assert.deepEqual(enginePatchToSettingsBody({ 'models.claude.secondOpinion': null }), { secondOpinionModel: null });
   assert.deepEqual(enginePatchToSettingsBody({ 'models.codex.secondOpinion': { model: 'gpt-5.5', effort: 'low' } }),
     { utilityModels: { codex: { secondOpinion: { model: 'gpt-5.5', effort: 'low' } } } });
+});
+
+test('#1450 renderRolesSection: an empty role reads as its Worca default, offers "Let Claude Code decide", and reads it back as { cliDecides: true }', async () => {
+  const { readRolesValues } = await import('../ui/public/engine-settings-view.mjs');
+  const doc = new JSDOM('<!doctype html><div id="h"></div>').window.document;
+  const host = doc.getElementById('h');
+  const catalog = [{ id: 'claude-opus-5-5', label: 'Opus 5.5', engine: 'claude', harnesses: ['claude'], efforts: ['medium'] }];
+  const roleDefaults = { claude: { deep: { model: 'claude-opus-5-5' }, everyday: { model: 'claude-opus-5-5' }, quick: { model: 'claude-opus-5-5' } } };
+  renderRolesSection(host, { roles: { claude: { everyday: { cliDecides: true } } }, catalog, engines: ['claude'], roleDefaults });
+  const sel = (r) => host.querySelector(`.inherit-field[data-setting="models.claude.roles.${r}"] .inherit-model`);
+  assert.equal(sel('deep').options[0].textContent, 'Worca\'s default (Opus 5.5)');
+  assert.equal(sel('deep').options[1].textContent, 'Let Claude Code decide');
+  assert.deepEqual(readRolesValues(host).claude.everyday, { cliDecides: true }, 'a saved cliDecides is selected');
+  assert.equal(readRolesValues(host).claude.deep, null);
+  sel('deep').value = '__cli__';
+  assert.deepEqual(readRolesValues(host).claude.deep, { cliDecides: true });
+});
+
+test('#1450 renderRolesSection: signed out, a saved "Let Claude Code decide" stays selected and survives a change elsewhere', async () => {
+  const { readRolesValues } = await import('../ui/public/engine-settings-view.mjs');
+  const { window } = new JSDOM('<!doctype html><div id="h"></div>');
+  const host = window.document.getElementById('h');
+  const catalog = [{ id: 'claude-opus-5-5', label: 'Opus 5.5', engine: 'claude', harnesses: ['claude'], efforts: ['medium'] }];
+  const roleDefaults = { claude: { deep: { model: 'claude-opus-5-5' }, everyday: { model: 'claude-opus-5-5' }, quick: { model: 'claude-opus-5-5' } } };
+  let last = null;
+  renderRolesSection(host, { roles: { claude: { everyday: { cliDecides: true } } }, catalog, engines: ['claude'], roleDefaults,
+    claudeAuth: 'signed-out', onChange: (next) => { last = next; } });
+  const sel = (r) => host.querySelector(`.inherit-field[data-setting="models.claude.roles.${r}"] .inherit-model`);
+  assert.equal(sel('everyday').value, '__cli__');
+  assert.equal(sel('deep').querySelector('option[value="__cli__"]'), null, 'an empty role offers no default to decide over signed out');
+  sel('deep').value = 'claude-opus-5-5'; sel('deep').dispatchEvent(new window.Event('change', { bubbles: true }));
+  assert.deepEqual(last.claude.everyday, { cliDecides: true });
+  assert.deepEqual(last.claude.deep, { model: 'claude-opus-5-5' });
 });

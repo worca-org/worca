@@ -3,7 +3,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
-import { prFormState, prBodyOf, renderRunPrFact, mountWorkspacePrSetting, createRunPrFields, paintRunPrAuto, prRowText } from '../ui/public/pr-auto-view.mjs';
+import { prFormState, prBodyOf, renderRunPrFact, mountWorkspacePrSetting, createRunPrFields, paintRunPrAuto, prRowText, knownPrExempt } from '../ui/public/pr-auto-view.mjs';
+// A namespace read, so a missing new export (outcomeReasonText) fails only its own tests, not the whole file.
+import * as PR_AUTO from '../src/shared/pr-auto.mjs';
 
 const PROJECT = { pr: { scope: 'project', open: { value: 'draft', source: 'project' }, slices: { value: 'each', source: 'default' } } };
 const WORKSPACE = { pr: { scope: 'workspace', open: { value: 'none', source: 'team' }, slices: null } };
@@ -48,6 +50,37 @@ test('renderRunPrFact: normal / slice (from the feature, read-only) / exempt / o
   assert.equal(text(fact(null)), '');
 });
 
+// ---- A stored outcome keeps its old reason; only the display says it in the new words (R-arch-6) ----
+const OLD_REASON = 'small runs ship a PR per run';
+const NEW_LINE = 'Not opened: each run of this feature ships its own pull request';
+
+test('outcomeReasonText: the old reason maps to the new words; any other reason, and an empty one, pass through', () => {
+  assert.equal(PR_AUTO.outcomeReasonText(OLD_REASON), 'each run of this feature ships its own pull request');
+  assert.equal(PR_AUTO.outcomeReasonText('the run ended with status error'), 'the run ended with status error');
+  assert.equal(PR_AUTO.outcomeReasonText(''), '');
+  assert.equal(PR_AUTO.outcomeReasonText('toString'), 'toString', 'only the stored legacy reasons are mapped');
+  assert.deepEqual(PR_AUTO.LEGACY_OUTCOME_REASONS, { [OLD_REASON]: 'each run of this feature ships its own pull request' });
+  assert.equal(Object.isFrozen(PR_AUTO.LEGACY_OUTCOME_REASONS), true);
+});
+
+test('a stored skipped outcome with the old reason shows the new words with the flag on, the old ones off, and keeps its reason', () => {
+  const w = dom();
+  const flagged = dom();
+  flagged.document.documentElement.dataset.flags = 'shaperSmallRuns';
+  for (const status of ['skipped', 'failed', 'blocked']) {
+    const own = { open: 'ready', slices: 'each', source: { open: 'run' }, outcome: { status, reason: OLD_REASON, final: true } };
+    const feature = { open: 'ready', slices: 'one', source: { open: 'feature' }, feature: { id: 'f1', source: { open: 'team' }, outcome: { status, reason: OLD_REASON } } };
+    for (const prAuto of [own, feature]) {
+      const stored = Object.freeze(structuredClone(prAuto));
+      assert.equal(renderRunPrFact(flagged.document, prAuto).querySelector('.hd-pr-auto-outcome').textContent, NEW_LINE, status);
+      assert.equal(renderRunPrFact(w.document, prAuto).querySelector('.hd-pr-auto-outcome').textContent, `Not opened: ${OLD_REASON}`,
+        `${status}, flag off: the words as before`);
+      assert.deepEqual(prAuto, stored, 'the record is not rewritten');
+      assert.equal((prAuto.outcome || prAuto.feature.outcome).reason, OLD_REASON);
+    }
+  }
+});
+
 test('paintRunPrAuto fills the fact row, hides it for a run from before v86, and drops an answer for another run', async () => {
   const w = dom('<div class="rd-kv-row" hidden><dt>Pull request</dt><dd class="rd-kv-v"></dd></div>');
   const row = w.document.querySelector('.rd-kv-row');
@@ -64,6 +97,17 @@ test('paintRunPrAuto fills the fact row, hides it for a run from before v86, and
   const old = dom('<div class="rd-kv-row"><dd class="rd-kv-v">x</dd></div>').document.querySelector('.rd-kv-row');
   await paintRunPrAuto(old, 'abcd0003', 'done', () => true, { fetchFn: async () => ({ ok: true, json: async () => ({ prAuto: null }) }) });
   assert.equal(old.hidden, true);
+});
+
+test('knownPrExempt: a fetched exempt answer is known for the run whatever its status', async () => {
+  const w = dom('<div class="rd-kv-row" hidden><dd class="rd-kv-v"></dd></div>');
+  const row = w.document.querySelector('.rd-kv-row');
+  assert.equal(knownPrExempt('ver00001'), null);
+  const fetchFn = async () => ({ ok: true, json: async () => ({ prAuto: { exempt: 'verify' } }) });
+  await paintRunPrAuto(row, 'ver00001', 'running', () => true, { fetchFn });
+  assert.equal(knownPrExempt('ver00001'), 'verify');
+  assert.equal(knownPrExempt('ver0000'), null, 'another id never matches by prefix');
+  assert.equal(knownPrExempt('abcd0001'), null, 'an answer without an exemption');
 });
 
 test('paintRunPrAuto: a waiting slice answer is asked again after RECHECK_MS and shows the feature\'s PR once it is set', async () => {

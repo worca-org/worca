@@ -12,10 +12,11 @@ import { useTempHome } from './helpers/temp-home.mjs';
 import { createOrchestrator } from '../src/core/orchestrator.mjs';
 import { readPipelineForResume, readPipelineStateById, listPipelines } from '../src/core/artifacts.mjs';
 import { getDb } from '../src/core/db.mjs';
-import { SWITCH_ENGINES, ENGINE_NAMES, MODEL_ENGINE_NAMES, otherEngines, usageLimitSwitches, engineLabel, engineList, engineReportsCost, engineSwitchNote, runCostLabel, SIGN_IN_ENGINE_NAMES } from '../src/shared/engine-switch.mjs';
+import { SWITCH_ENGINES, ENGINE_NAMES, MODEL_ENGINE_NAMES, otherEngines, usageLimitSwitches, engineLabel, engineList, engineReportsCost, engineSwitchNote, runCostLabel, runCostKnown, SIGN_IN_ENGINE_NAMES } from '../src/shared/engine-switch.mjs';
 import { ENGINES } from '../src/shared/engine-switch.mjs';
 import { MODEL_ENGINES, RUN_ENGINES, HELPER_ENGINES, ASK_ENGINES, helperEngineFor, CURSOR_EFFORTS, effortsForEngine, OWN_SIGNIN_ENGINES } from '../src/core/model-env.mjs';
 import { listEngines } from '../src/core/engines/index.mjs';
+import { fmtRunCost } from '../src/core/chat/renderers.mjs';
 
 useTempHome(after);
 process.env.WORCA_RECOVERY_BACKOFF_MS = '0';
@@ -131,6 +132,28 @@ test('a usage limit an agent hit records its engine on every copy of the pause',
   assert.equal(orch2.getState().limitEngine, null);
 });
 
+test('#1450: a usage limit records its scope and model — a Fable limit is the model\'s, a session limit the connection\'s; a resume clears both', async () => {
+  for (const [message, scope] of [["You've hit your Fable limit · resets 3pm (Europe/Berlin)", 'model'], ["You've hit your session limit · resets 3pm (Europe/Berlin)", 'connection']]) {
+    const dir = gitDir();
+    const orch = createOrchestrator({
+      projectDir: dir, prompt: 'demo', auto: true, claude: { mock: true },
+      runners: { producer: async () => { throw Object.assign(new Error(message), { errorClass: 'usage_limit' }); }, verifier: okVerifier },
+    });
+    const res = await orch.run();
+    assert.equal(res.reason, 'usage_limit', message);
+    const saved = readPipelineForResume(orch.state.id);
+    assert.equal(saved.resumePoint.limitScope, scope);
+    assert.equal(typeof saved.resumePoint.limitModel, 'string', 'the model the step was spawned with');
+    assert.equal(readPipelineStateById(orch.state.id).limitScope, scope, 'the saved row\'s state reads it back');
+    const row = (await listPipelines(dir)).find((p) => p.id === orch.state.id);
+    assert.equal(row.limitScope, scope, 'the history list row too');
+    const orch2 = createOrchestrator({ projectDir: dir, auto: true, claude: { mock: true }, runners: { producer: async () => ({ status: 'ok', summary: 'done' }), verifier: okVerifier }, resume: saved });
+    await orch2.resume();
+    assert.equal(orch2.getState().limitScope, null);
+    assert.equal(orch2.getState().limitModel, null);
+  }
+});
+
 test('a spent free-model allowance and an error pause record no engine', async () => {
   for (const err of [FREE_DAILY_ERR, () => new Error('boom: a plain bug')]) {
     const dir = gitDir();
@@ -184,8 +207,33 @@ test('resume with another model: every remaining step runs on it, and later resu
     resume: saved,
   });
   await orch2.resume();
-  assert.deepEqual(seen[0], { model: 'claude-haiku-4-5', effort: 'high' }, 'a node pinned to another model runs on the picked one');
+  assert.deepEqual(seen[0], { model: 'claude-haiku-4-5', effort: 'high', source: 'run' }, 'a node pinned to another model runs on the picked one');
   const again = readPipelineForResume(orch2.state.id);
   assert.equal(again.resumePoint.claude.model, 'claude-haiku-4-5');
   assert.equal(again.resumePoint.claude.modelForAll, true, 'rides the resume point');
+});
+
+test('the switch note on a run whose steps use several harnesses', () => {
+  assert.equal(engineSwitchNote('claude', { mixed: true }), 'Starts the paused step fresh; every step runs on Claude Code from here, steps set to another harness included; a model Claude Code cannot run falls back to its default.');
+});
+test('a usage limit on a step pinned to Codex names Codex, on a Claude-default run', async () => {
+  const orch = createOrchestrator({ projectDir: gitDir(), workflowId: 'wf_default', prompt: 'demo', auto: true, guardrailsId: 'permissive', claude: { mock: true },
+    overlay: { nodes: { n_plan: { model: 'gpt-5.5', engine: 'codex' } } },
+    runners: { producer: async (ctx) => { if (ctx.claudeOpts.engine === 'codex') throw LIMIT_ERR(); return { status: 'ok', summary: 'done' }; }, verifier: okVerifier } });
+  const res = await orch.run();
+  assert.deepEqual([res.status, res.reason, res.limitEngine], ['paused', 'usage_limit', 'codex']);
+  assert.equal(readPipelineForResume(orch.state.id).resumePoint.limitEngine, 'codex');
+});
+
+test('runCostKnown and runCostLabel on a run that used several harnesses', () => {
+  const fmt = (n) => `$${n.toFixed(2)}`;
+  assert.equal(runCostKnown('claude'), 'all');
+  assert.equal(runCostKnown('claude', ['claude', 'codex']), 'all');
+  assert.equal(runCostKnown('claude', ['claude', 'cursor']), 'part');
+  assert.equal(runCostKnown('cursor', ['claude', 'cursor']), 'part');
+  assert.equal(runCostKnown('cursor', ['copilot', 'cursor']), 'none');
+  assert.equal(runCostLabel('claude', 1.5, fmt, ['claude', 'cursor']), '$1.50 (cost partly unknown)');
+  assert.equal(runCostLabel('claude', 0, fmt, ['claude', 'cursor']), 'cost partly unknown');
+  assert.equal(runCostLabel('cursor', 0.42, fmt, ['copilot', 'cursor']), "cost unknown (worca's own calls: $0.42)");
+  assert.equal(fmtRunCost('claude', 1.5, ['claude', 'cursor']), '$1.50 (cost partly unknown)');
 });

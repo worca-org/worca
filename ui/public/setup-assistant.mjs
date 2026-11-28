@@ -9,12 +9,15 @@ import { makeSwitch } from './switch.mjs';
 import { renderCopilotSignIn } from './bridge-view.mjs';
 import { renderRolesSection, ENGINE_EFFORTS } from './engine-settings-view.mjs';
 import { renderInheritField, readInheritField } from './inherit-field.mjs';
-import { fetchJson as defaultFetchJson, renderResults, PORT_EMPTY_NOTE, PORT_SWITCH_NOTE, AUTH_OPTIONS } from './settings-network-proxy.mjs';
+import { fetchJson as defaultFetchJson, renderResults, PORT_EMPTY_NOTE, PORT_SWITCH_NOTE, AUTH_OPTIONS, SIDECAR_NOTE } from './settings-network-proxy.mjs';
 import { LEVEL_INFO, UI_LEVELS } from './ui-level.mjs';
-import { ROLE_LABELS, MODEL_ROLES, ROLE_HARNESSES } from '../../src/shared/model-roles.mjs';
+import { ROLE_LABELS, MODEL_ROLES, ROLE_HARNESSES, isCliDecides, decidesLabel } from '../../src/shared/model-roles.mjs';
 import { CHAT_ENGINE_NAMES, engineLabel } from '../../src/shared/engine-switch.mjs';
 import { UPSTREAM_TIMEOUTS } from '../../src/shared/proxy-timeouts.mjs';
 import { claudeCheckedWhere } from '../../src/shared/claude-sign-in.mjs';
+import { WORCA_LEVEL_COUNT } from '../../src/shared/worca-levels.mjs';
+import { whereAgentsRunSection, EXEC_ENV_CHOICES } from './setup-where-agents-run.mjs';
+import { vaultChoiceSection } from './setup-vault-choice.mjs';
 
 export const SETUP_STEPS = Object.freeze([
   { id: 'check', label: 'Check this machine' },
@@ -29,7 +32,7 @@ export const SETUP_STEPS = Object.freeze([
 export const TEST_PASS_MS = 9 * 60_000;
 const GROUP_STEP = Object.freeze({ network: 'network', access: 'access', models: 'models', work: 'work' });
 const WORK_KEYS = Object.freeze(['uiLevel', 'pipelineCostLimitUsd', 'totalCostLimitUsd', 'costLimitResetPeriod', 'autoGeneratePrDescription', 'smartNaming', 'runEngine',
-  'hideBuiltinModels', 'sync', 'networkWait']);
+  'hideBuiltinModels', 'sync', 'networkWait', 'execEnv']);
 /** The Review line when a team's values already match what is saved (T17). */
 export const TEAM_MATCHES_LINE = "Your setup already matches your team's recommendation.";
 /** The Review line when the notice's policy home is no longer cached by the time the dialog loads (T17). */
@@ -105,6 +108,19 @@ export function initialAnswers({ saved, detect = null, entry = 'first', step = n
     if (entry !== 'team' && !(entry === 'first' && blank)) continue;
     a.work[k] = isRecord(v) && isRecord(a.work[k]) ? { ...a.work[k], ...structuredClone(v) } : structuredClone(v);
     a.found.team.push(`work.${k}`);
+  }
+  // #1450: each empty Claude Code / Codex role starts on Worca's default (GET /api/settings roleDefaults), so the
+  // person sees and saves a model for it; a saved or team role is never replaced, nor a "Let <tool> decide".
+  a.found.defaults = [];
+  const st = saved.settings || {};
+  for (const [harness, picks] of Object.entries(isRecord(st.roleDefaults) ? st.roleDefaults : {})) {
+    if (harness === 'claude' && st.claudeAuth === 'signed-out') continue;
+    for (const [role, pick] of Object.entries(picks || {})) {
+      const cur = a.models.modelRoles?.[harness]?.[role];
+      if (!pick?.model || (cur && (cur.model || isCliDecides(cur)))) continue;
+      ((a.models.modelRoles[harness] ||= {})[role]) = { model: pick.model };
+      a.found.defaults.push(`models.modelRoles.${harness}.${role}`);
+    }
   }
   a.found.unmapped = Array.isArray(team?.unmapped) ? team.unmapped : [];
   a.found.teamGone = entry === 'team' && team === null;   // the home vanished between the menu click and the load (ux-2-4)
@@ -203,6 +219,7 @@ export function buildApplyBody(saved, answers) {
     const patch = { ...(url !== (pv[name]?.baseUrl || '') ? { baseUrl: url } : {}), ...(key ? { apiKey: key } : {}) };
     if (Object.keys(patch).length) body.access = { ...body.access, [name]: patch };
   }
+  if (a.vault === 'move') body.access = { ...body.access, vault: 'move' };   // the vault-move step (src/core/setup/apply.mjs)
   const models = {};
   const roles = rolePatch(saved.settings?.modelRoles || {}, answers.models.modelRoles);
   if (Object.keys(roles).length) Object.assign(models, { modelRoles: roles, testRoles: answers.models.testRoles });
@@ -222,7 +239,13 @@ export function diffRows(saved, answers, { detect = null } = {}) {
   const body = buildApplyBody(saved, answers); const n = answers.network; const a = answers.access; const w = answers.work;
   const claudeOff = (detect?.checks || []).some((c) => c.id === 'claude' && c.state !== 'ok');
   const sources = [a.claude && (claudeOff ? 'Claude Code (not signed in)' : 'Claude Code'), a.copilot && 'GitHub Copilot', a.openai && 'OpenAI-compatible', a.anthropic && 'Anthropic-compatible'].filter(Boolean);
-  const roles = answers.models.modelRoles[w.runEngine || 'claude'] || {};
+  const engineOfRoles = w.runEngine || 'claude';
+  const roles = answers.models.modelRoles[engineOfRoles] || {};
+  // #1450: a role still on the Worca default it was preselected with reads "Worca's default (…)".
+  const defaulted = (r) => (answers.found?.defaults || []).includes(`models.modelRoles.${engineOfRoles}.${r}`)
+    && same(roles[r], { model: saved.settings?.roleDefaults?.[engineOfRoles]?.[r]?.model });
+  const roleWords = (r) => (isCliDecides(roles[r]) ? decidesLabel(engineOfRoles === 'codex' ? 'Codex' : engineLabel(engineOfRoles))
+    : defaulted(r) ? `Worca’s default (${(saved.catalog || []).find((m) => m?.id === roles[r].model)?.label || roles[r].model})` : '');
   const chatLine = { role: 'Chat', model: answers.models.askModel?.model || null, fallback: chatFallback(askEngineOf(saved.settings)) };
   const money = (v) => (v == null ? 'none' : `$${v}`);
   // Whether the team filled a key of this group (the Team chip); network and access never: D12.
@@ -232,10 +255,11 @@ export function diffRows(saved, answers, { detect = null } = {}) {
       value: n.mode === 'proxy' ? `Corporate proxy · ${n.host}:${n.port || '8080'}` : 'Direct' },
     { group: 'access', step: 'access', label: 'Model access', changed: !!body.access, team: false, value: sources.join(', ') || 'None' },
     { group: 'models', step: 'models', label: 'Models', changed: !!body.models, team: teamIn('models'),
-      value: [...MODEL_ROLES.map((r) => `${ROLE_LABELS[r]} · ${roles[r]?.model || 'each job’s own default'}`), `Chat · ${chatLine.model || chatLine.fallback}`].join('; '),
-      lines: [...MODEL_ROLES.map((r) => ({ role: ROLE_LABELS[r], model: roles[r]?.model || null })), chatLine] },
+      value: [...MODEL_ROLES.map((r) => `${ROLE_LABELS[r]} · ${roleWords(r) || roles[r]?.model || 'each job’s own default'}`), `Chat · ${chatLine.model || chatLine.fallback}`].join('; '),
+      lines: [...MODEL_ROLES.map((r) => ({ role: ROLE_LABELS[r], model: roles[r]?.model || null, ...(defaulted(r) ? { defaulted: true } : {}),
+        ...(isCliDecides(roles[r]) ? { fallback: decidesLabel(engineOfRoles === 'codex' ? 'Codex' : engineLabel(engineOfRoles)) } : {}) })), chatLine] },
     { group: 'work', step: 'work', label: 'How you work', changed: !!body.work, team: teamIn('work'),
-      value: `${LEVEL_INFO[w.uiLevel || 'simple']?.label || 'Simple'} interface · per run ${money(w.pipelineCostLimitUsd)} · total ${money(w.totalCostLimitUsd)}${w.totalCostLimitUsd == null ? '' : `, resets ${w.costLimitResetPeriod === 'weekly' ? 'weekly' : 'monthly'}`}` },
+      value: `${LEVEL_INFO[w.uiLevel || 'simple']?.label || 'Simple'} interface · per run ${money(w.pipelineCostLimitUsd)} · total ${money(w.totalCostLimitUsd)}${w.totalCostLimitUsd == null ? '' : `, resets ${w.costLimitResetPeriod === 'weekly' ? 'weekly' : 'monthly'}`}${w.execEnv ? ` · agents in ${EXEC_ENV_CHOICES.find((c) => c.name === w.execEnv)?.label || w.execEnv}` : ''}` },
   ];
 }
 
@@ -246,7 +270,8 @@ export function diffRows(saved, answers, { detect = null } = {}) {
  * re-run or fix-it visit that changed nothing (NO_CHANGES_LINE).
  */
 export function nextGate(step, answers, { saved, tested = null, now = Date.now(), detect = null, entry = 'first', netSaved = '' } = {}) {
-  if (step === 'network' && answers.network.mode === 'proxy') {
+  // A login the operator manages (egress sidecar): Network shows its status only and changes nothing, so no Test is due.
+  if (step === 'network' && answers.network.mode === 'proxy' && !saved?.proxy?.managed) {
     if (!tested || tested.key !== proxyKey(answers.network) || now - tested.at >= TEST_PASS_MS) return { ok: false, reason: 'Test the connection to continue' };
   }
   if (step === 'access') {
@@ -305,6 +330,9 @@ const CHECK_BADGE = Object.freeze({ ok: ['green', 'OK'], warn: ['amber', 'Check'
 const STATE_BADGE = Object.freeze({ ok: ['green', 'Done'], failed: ['red', 'Failed'], skipped: ['grey', 'Skipped'], refused: ['amber', 'Refused'] });
 const COPILOT_PLANS = Object.freeze([['individual', 'Individual'], ['business', 'Business'], ['enterprise', 'Enterprise']]);
 const TIMEOUTS = Object.freeze([['connectMs', 'Connect timeout (s)'], ['authMs', 'Login timeout (s)'], ['idleMs', 'Idle timeout (s)']]);
+const LEVEL_HINT = 'Finish to earn your first level.';
+const NO_PROVIDER_LINE = 'Sign in to a model provider to earn your first level.';
+const SHOWN_KEY = 'worca-level:shown-in-session';
 const LOST = 'Worca lost track of this setup. Check the rows, then go back to review.';
 const FOCUSABLE = 'a[href], button:not([disabled]), input:not([disabled]):not([type="hidden"]), select:not([disabled]), textarea:not([disabled]), [tabindex]';
 
@@ -328,12 +356,17 @@ function paintApplyRows(doc, list, results, done) {
 /**
  * Open the assistant. entry 'first' | 'rerun' | 'fix' | 'team'; `step` opens on that step (a fix-it link); `team` is the
  * policy home a 'team' entry reviews (the account-menu notice).
- * onClose(how, { applied }): how is 'later' (Set up later / Cancel / Close / Discard) or 'done' (Continue after Apply, or Finish);
- * `applied` is true when the dialog saved something (an Apply, or the network apply on Next).
+ * onClose(how, { applied, next, readyShown }): how is 'later' (Skip all / Cancel / Close / Discard) or 'done' (the ready screen's button);
+ * `applied` is true when the dialog saved something (an Apply, or the network apply on Next); `next` is a hash to go to
+ * (the earned ready screen's "Start your first run"); `readyShown` is true once a ready screen has painted; `finishing` is true while its facts are still being asked (Setup is finished, the screen is not up yet).
+ * deps.levelIndex(): the held level (0 none, null view not loaded). deps.finishSetup(): the ready screen's facts, or null.
  * Returns { onFrame(msg), goTo(step), close() }; goTo is a no-op on Apply and switches Copilot on for 'access'.
  */
 export function openSetupAssistant({ doc = globalThis.document, fetchJson = defaultFetchJson, entry = 'first', step = 'check', team: teamHome = null, onClose = () => {}, now = () => Date.now(),
+  deps = {},
   timers = { setTimeout: (f, ms) => doc.defaultView.setTimeout(f, ms), clearTimeout: (t) => doc.defaultView.clearTimeout(t) } } = {}) {
+  const levelIndex = typeof deps.levelIndex === 'function' ? deps.levelIndex : () => null;
+  const finishSetup = typeof deps.finishSetup === 'function' ? deps.finishSetup : async () => null;
   const el = (tag, cls, text) => { const n = doc.createElement(tag); if (cls) n.className = cls; if (text != null) n.textContent = text; return n; };
   const btn = (text, cls, on) => { const b = el('button', cls, text); b.type = 'button'; b.addEventListener('click', on); return b; };
   // A rejected fetch becomes an answer, so no await can leave the dialog loading or busy (A18).
@@ -349,13 +382,17 @@ export function openSetupAssistant({ doc = globalThis.document, fetchJson = defa
     cpChecking: false, cpChecked: '', provSeq: 0,
     // Model access › Claude › Check again: claudeChecking while /api/setup/detect?recheck=1 is in flight,
     // claudeChecked the line every answer leaves (signed in, still not signed in, or why it failed).
-    claudeChecking: false, claudeChecked: '' };
+    claudeChecking: false, claudeChecked: '',
+    // The ready screen: readyWait while finishSetup is asked, ready its answer (null = a plain screen), readyShown once painted,
+    // applied what teardown reports as saved.
+    readyWait: false, ready: null, readyShown: false, applied: false, viaApply: false };
 
   const stepOf = el('span', 'sa-step-of'); const title = el('h2', null); title.id = 'setup-title'; const sub = el('p', 'sa-sub');
+  const levelHint = el('p', 'hint sa-level-hint', LEVEL_HINT); levelHint.hidden = true;
   // One segment per step, above "Step N of 7". Decorative: the step line says the same to a screen reader.
   const progress = el('div', 'sa-progress'); progress.setAttribute('aria-hidden', 'true');
   for (const s of SETUP_STEPS) { const seg = el('span', 'sa-progress-seg'); seg.dataset.step = s.id; seg.title = s.label; progress.append(seg); }
-  const head = el('div', 'card-head'); head.append(progress, stepOf, title, sub);
+  const head = el('div', 'card-head'); head.append(progress, levelHint, stepOf, title, sub);
   const body = el('div', 'sa-step'); const status = el('small', 'hint sa-status'); status.setAttribute('role', 'status');
   const actions = el('div', 'confirm-actions');
   const card = el('div', 'card setup-card'); card.append(head, body, status, actions);
@@ -395,18 +432,18 @@ export function openSetupAssistant({ doc = globalThis.document, fetchJson = defa
   const opener = doc.activeElement; let closed = false;
   // The key page is another tab: the Copilot sign-in made there is read again when this window regains focus.
   const win = doc.defaultView; const onFocus = () => { void refreshProviders(); };
-  function teardown(how, { applied = false } = {}) {
+  function teardown(how, { applied = false, next } = {}) {
     if (closed) return; closed = true;
     timers.clearTimeout(S.pollT); timers.clearTimeout(S.cpT); timers.clearTimeout(S.passT);
     win?.removeEventListener('focus', onFocus);
     guard.release(); modal.remove();
     if (opener?.isConnected) opener.focus?.();
-    onClose(how, { applied });
+    onClose(how, { applied, next, readyShown: S.readyShown, ...(S.readyWait ? { finishing: true } : {}) });
   }
   // Apply (and a login Retry after it) is past the point of discarding: its writes are done (architect-1-2).
   const isDirty = () => S.step !== 'apply' && !S.retryLogin && !!S.answers && !!S.opened && JSON.stringify(S.answers) !== S.opened;
   const guard = guardModal(modal, { kind: 'form', close: () => teardown('later'), busy: () => S.netJob, isDirty });
-  // Cancel / Set up later asks "Discard changes?" once an answer changed, like Escape; untouched it closes at once.
+  // Cancel / Skip all asks "Discard changes?" once an answer changed, like Escape; untouched it closes at once.
   async function cancel() {
     if (isDirty() && !(await askDiscard(doc))) return;      // Keep editing
     if (!closed) guard.cancel();
@@ -433,6 +470,8 @@ export function openSetupAssistant({ doc = globalThis.document, fetchJson = defa
     const pick = (v) => (typeof v === 'string' ? v : v[entry === 'first' ? 'first' : 'other']);
     title.textContent = S.step === 'apply' ? (S.done ? (S.done.ok ? 'Worca is ready' : 'Setup stopped') : 'Setting up Worca…') : TITLES[S.step];
     sub.textContent = pick(SUBTITLES[S.step]);
+    const held = levelIndex();
+    levelHint.hidden = S.step === 'apply' || !(held === 0 || (held === null && entry === 'first'));
   }
 
   // ── small builders ──
@@ -572,7 +611,18 @@ export function openSetupAssistant({ doc = globalThis.document, fetchJson = defa
     body.append(table);
   }
 
+  /** Managed by the operator (egress sidecar, WORCA_EGRESS_LOGIN_FILE): who is logged in and the state, no form. */
+  function paintManagedNetwork(p) {
+    const list = rows('sa-managed');
+    list.append(row(null, p.managedNote || 'The corporate proxy login is managed by the operator.'));
+    // A login the proxy rejected is not "logged in": the state line below says what happened and who fixes it.
+    if (p.state !== 'needs-login') list.append(row(null, p.login ? `Logged in as ${p.login.label}${p.upstream ? ` to ${p.upstream}` : ''}.` : 'No login is set.'));
+    if (p.line) { const r = row(null, p.line); if (p.lineTitle) r.title = p.lineTitle; list.append(r); }
+    body.append(list);
+  }
+
   function paintNetwork() {
+    if (S.saved.proxy?.managed) { paintManagedNetwork(S.saved.proxy); return; }
     const n = S.answers.network; const locked = !!S.retryLogin || !!S.netRetry || S.netJob;
     // Any edit to a value the test sent drops the pass, so changing it back still needs a new test.
     const untest = (set) => (v) => { S.tested = null; timers.clearTimeout(S.passT); set(v); };
@@ -611,17 +661,22 @@ export function openSetupAssistant({ doc = globalThis.document, fetchJson = defa
         const pw = textInput('password', n.password, untest((v) => { n.password = v; }), { autocomplete: 'off',
           ...(S.saved.proxy?.login && !locked ? { placeholder: 'Saved login in use · type to replace' } : {}) });
         body.append(field('Account', account, null), field('Password', pw, 'network.login.password'));
+        // In a container the password goes to the egress sidecar; say so where it is typed.
+        if (S.saved.proxy?.sidecar) body.append(el('small', 'hint sa-sidecar-note', SIDECAR_NOTE));
       }
       body.append(field('No proxy hosts', noProxy, 'network.networkProxy.noProxy'));
       if (!locked) {
-        body.append(btn('More: timeouts and local proxy port', 'link-btn sa-more', () => { S.more = !S.more; paintBody(); }));
-        if (S.more) {
+        body.append(btn(S.saved.proxy?.sidecar ? 'More: timeouts' : 'More: timeouts and local proxy port', 'link-btn sa-more', () => { S.more = !S.more; paintBody(); }));
+        // The egress sidecar listens on its own port: no local proxy port in a container.
+        if (S.more && !S.saved.proxy?.sidecar) {
           const fixed = textInput('number', n.fixedPort, untest((v) => { n.fixedPort = v.trim(); }), { min: '1024', max: '65535', placeholder: 'Automatic' });
           const f = field('Local proxy port', fixed, 'network.networkProxy.fixedPort');
           // What empty means, always; with a proxy already running, also that a new port applies at once while the old
           // one keeps answering for the programs holding it until the next start (egress-policy.mjs listenAlso).
           f.append(el('small', 'hint', S.saved.proxy?.running ? `${PORT_EMPTY_NOTE} ${PORT_SWITCH_NOTE}` : PORT_EMPTY_NOTE));
           body.append(f);
+        }
+        if (S.more) {
           // Shown filled in with the default; saved only when it differs, so an untouched field never reads as a change.
           for (const [k, label] of TIMEOUTS) {
             const v = n.timeouts?.[k] || UPSTREAM_TIMEOUTS[k];
@@ -746,6 +801,8 @@ export function openSetupAssistant({ doc = globalThis.document, fetchJson = defa
       }
       body.append(box);
     }
+    const vault = vaultChoiceSection({ doc, vault: S.detect?.vault, value: a.vault, onPick: (v) => { a.vault = v; paint(); }, seg, section });
+    if (vault) body.append(vault);   // the secretVault flag: one skippable choice (setup-vault-choice.mjs)
   }
 
   // The Team line above a step the team filled, and the roles no source here serves (T18).
@@ -826,7 +883,8 @@ export function openSetupAssistant({ doc = globalThis.document, fetchJson = defa
     chatHost.addEventListener('change', readChat);
     chatHost.addEventListener('click', (e) => { if (e.target.closest?.('.inherit-clear')) readChat(); });
     body.append(host);
-    renderRolesSection(host, { roles: m.modelRoles, catalog, engine: S.answers.work.runEngine || 'claude', engines: roleEngines(), switchLevel: null, onChange: (next) => {
+    renderRolesSection(host, { roles: m.modelRoles, catalog, engine: S.answers.work.runEngine || 'claude', engines: roleEngines(), switchLevel: null,
+      roleDefaults: S.saved.settings?.roleDefaults || null, claudeAuth: S.saved.settings?.claudeAuth || 'unknown', onChange: (next) => {
       // A click that changes nothing (the harness switch) keeps the answers as they were.
       if (!Object.keys(rolePatch(m.modelRoles, next)).length) return;
       m.modelRoles = next;
@@ -855,6 +913,7 @@ export function openSetupAssistant({ doc = globalThis.document, fetchJson = defa
       sw('AI-written PR descriptions', w.autoGeneratePrDescription !== false, (on) => { w.autoGeneratePrDescription = on; paintFoot(); }, 'sa-pr-desc'),
       sw('Smart run names', naming.suggestTitle !== false && naming.suggestBranch !== false,
         (on) => { w.smartNaming = { ...naming, suggestTitle: on, suggestBranch: on }; paintFoot(); }, 'sa-smart-naming')));
+    body.append(whereAgentsRunSection({ doc, detect: S.detect, posture: S.posture, value: w.execEnv, onPick: (v) => { w.execEnv = v; paint(); }, seg, section }));
   }
 
   // A table like the Check step's: the group and its value stacked on the left, its badges and Change on the right,
@@ -869,7 +928,7 @@ export function openSetupAssistant({ doc = globalThis.document, fetchJson = defa
       const what = el('td', 'sa-review-what'); what.append(el('div', 'sa-review-name', r.label));
       if (r.lines) {
         const ul = el('ul', 'sa-review-lines');
-        for (const l of r.lines) { const li = el('li'); li.append(el('span', 'sa-review-role', l.role), doc.createTextNode(l.model ? labelOf(l.model) : (l.fallback || 'each job’s own default'))); ul.append(li); }
+        for (const l of r.lines) { const li = el('li'); li.append(el('span', 'sa-review-role', l.role), doc.createTextNode(l.defaulted ? `Worca’s default (${labelOf(l.model)})` : l.model ? labelOf(l.model) : (l.fallback || 'each job’s own default'))); ul.append(li); }
         what.append(ul);
       } else what.append(el('div', 'sa-review-value', r.value));
       const marks = el('td', 'sa-review-marks');
@@ -894,33 +953,76 @@ export function openSetupAssistant({ doc = globalThis.document, fetchJson = defa
   }
 
   function paintApply() {
-    const list = rows('sa-apply');
-    paintApplyRows(doc, list, S.results, !!S.done);
-    body.append(list);
+    if (S.results.size || !S.readyShown) {
+      const list = rows('sa-apply');
+      paintApplyRows(doc, list, S.results, !!S.done);
+      body.append(list);
+    }
+    if (S.readyShown) paintReady();
+  }
+
+  const earnedReady = () => S.ready?.earned === true && !!S.ready.level;
+  /** The last screen: the level just earned, or the one thing still missing, or nothing for someone who holds a level. */
+  function paintReady() {
+    const r = S.ready; if (!r) return;
+    if (earnedReady()) {
+      const block = el('div', 'sa-ready'); const avatar = el('img', 'sa-ready-avatar'); avatar.alt = ''; avatar.width = 56; avatar.height = 56;
+      if (typeof r.level.avatar === 'string' && r.level.avatar) avatar.setAttribute('src', r.level.avatar);
+      if (Number.isFinite(r.level.hue)) avatar.style.setProperty('--wl-hue', String(r.level.hue));
+      const text = el('div', 'sa-ready-text');
+      text.append(el('div', 'sa-ready-level', `${r.level.name} · Level ${r.level.index} of ${WORCA_LEVEL_COUNT}`));
+      const needs = Array.isArray(r.nextNeeds) ? r.nextNeeds.filter((n) => typeof n === 'string' && n) : [];
+      if (r.nextName && needs.length) text.append(el('div', 'hint sa-ready-next', `${r.nextName} needs: ${needs.join(' and ')}`));
+      block.append(avatar, text); body.append(block);
+    } else if (r.earned !== true && Array.isArray(r.missing) && r.missing.includes('provider')) {
+      body.append(el('p', 'sa-ready-missing', NO_PROVIDER_LINE));
+    }
+  }
+  /** Painting the earned screen is what acknowledges the Curious celebration: every way out leaves none queued. */
+  function ackCurious() {
+    try { doc.defaultView.sessionStorage.setItem(SHOWN_KEY, '1'); } catch { /* storage blocked: the acknowledgement below still holds */ }
+    let tz; try { tz = Intl.DateTimeFormat().resolvedOptions().timeZone; } catch { tz = undefined; }
+    void call('/api/worca-level/ack', { method: 'POST', body: { what: 'celebration', index: 1, tz } });
+  }
+  /** Setup is done (an Apply finished OK, or Finish with nothing to apply): ask for the level, then paint the ready screen. */
+  async function showReady(applied, viaApply) {
+    S.applied = applied; S.viaApply = viaApply; S.readyWait = true; paint();
+    let r = null;
+    try { r = await finishSetup(); } catch { r = null; }      // a failed read is a plain ready screen, never a stuck dialog
+    if (closed) return;
+    S.readyWait = false; S.ready = r && typeof r === 'object' ? r : null; S.readyShown = true;
+    if (earnedReady()) ackCurious();
+    paint();
   }
 
   function paintFoot() {
     actions.replaceChildren();
     const first = idx() === 0;
     if (S.step === 'apply') {
-      if (S.done?.ok) {
-        const share = btn('Share as team setup', 'btn btn-quiet sa-share', () => { void shareDraft(); });
-        share.disabled = S.sharing;                              // one draft at a time (ux-1-5)
-        actions.append(share);
-        actions.append(btn('Continue', 'btn btn-primary sa-continue', () => teardown('done', { applied: true })));
+      if (S.done?.ok && S.readyShown) {
+        const earned = earnedReady();
+        if (S.viaApply && !(earned && entry === 'first')) {     // a Finish with nothing to apply has no new setup to share
+          const share = btn('Share as team setup', 'btn btn-quiet sa-share', () => { void shareDraft(); });
+          share.disabled = S.sharing;                              // one draft at a time (ux-1-5)
+          actions.append(share);
+        }
+        actions.append(btn(earned ? 'Start your first run' : 'Continue', 'btn btn-primary sa-continue',
+          () => teardown('done', { applied: S.applied, next: earned ? '#new' : undefined })));
+      } else if (S.done?.ok) {
+        // finishSetup is being asked: no button until the screen knows what it says
       } else if (S.done) {
         actions.append(btn('Close', 'btn sa-close', () => teardown('later')));
         actions.append(S.done.retry ? btn('Retry', 'btn btn-primary sa-retry', () => retry(S.done.retry))
           : btn('Back to review', 'btn btn-primary sa-back-review', () => goTo('review')));
       }
-      status.className = `hint sa-status${S.error ? ' err' : ''}`; status.textContent = S.error || S.note || (S.done ? '' : 'Working…');
+      status.className = `hint sa-status${S.error ? ' err' : ''}`; status.textContent = S.error || S.note || (S.done && !S.readyWait ? '' : 'Working…');
       return;
     }
     if (S.applying || S.netJob) { status.className = 'hint sa-status'; status.textContent = 'Working…'; return; }
     if (S.netRetry && S.step === 'network') {             // a failed network apply: Retry from its step
       const needPw = S.netRetry.login && !String(S.answers.network.password || '').trim();
       actions.append(btn('Back', 'btn sa-back', () => goTo(stepBefore())));
-      actions.append(btn('Skip for now', 'btn btn-quiet sa-skip', () => { void skip(); }));
+      actions.append(btn('Skip step', 'btn btn-quiet sa-skip', () => { void skip(); }));
       const again = btn('Retry', 'btn btn-primary sa-next', () => applyNetwork(S.netRetry.body, S.netRetry));
       again.disabled = needPw; actions.append(again);
       status.className = `hint sa-status${S.error ? ' err' : ''}`; status.textContent = S.error || (needPw ? 'Type the proxy password again to retry' : '');
@@ -936,17 +1038,23 @@ export function openSetupAssistant({ doc = globalThis.document, fetchJson = defa
     }
     // Every step before Apply can leave the dialog, not only the first. Order: Cancel, then Skip / Use saved values,
     // then Back and Next side by side (the workspace guide's foot), in one group a narrow foot never splits.
-    actions.append(btn(entry === 'first' ? 'Set up later' : 'Cancel', 'btn btn-quiet sa-later', () => { void cancel(); }));
+    actions.append(btn(entry === 'first' ? 'Skip all' : 'Cancel', 'btn btn-quiet sa-later', () => { void cancel(); }));
     const gate = S.answers ? nextGate(S.step, S.answers, { saved: S.saved, tested: S.tested, now: now(), detect: S.detect, entry, netSaved: S.netSaved }) : { ok: false, reason: '' };
     const skipLabel = S.answers && idx() >= 1 && idx() <= 4 ? skipLabelFor(gate) : null;
     if (skipLabel) actions.append(btn(skipLabel, 'btn btn-quiet sa-skip', () => { void skip(); }));
     const nav = el('span', 'sa-nav');
     if (!first) nav.append(btn('Back', 'btn sa-back', () => goTo(stepBefore())));
     const label = S.step === 'check' ? 'Start' : S.step === 'review' ? (gate.finish ? 'Finish' : 'Apply') : 'Next';
-    const onNext = () => (S.step === 'network' ? nextFromNetwork() : S.step !== 'review' ? goTo(stepAfter()) : gate.finish ? teardown('done', { applied: !!S.netSaved }) : startApply(null));
+    const onNext = () => (S.step === 'network' ? nextFromNetwork() : S.step !== 'review' ? goTo(stepAfter()) : gate.finish ? finishNothing() : startApply(null));
     const next = btn(label, 'btn btn-primary sa-next', onNext);
     next.disabled = !gate.ok || S.testing; nav.append(next); actions.append(nav);
     status.className = `hint sa-status${S.error ? ' err' : ''}`; status.textContent = S.error || gate.reason;
+  }
+
+  /** Finish with nothing to apply: the same ready screen, on the last step with no rows. */
+  function finishNothing() {
+    S.done = { ok: true, retry: null }; S.step = 'apply'; S.error = ''; S.errField = null;
+    void showReady(!!S.netSaved, false);
   }
 
   // D17: the saved settings as a team setup draft, downloaded. The server builds it (network and access never read).
@@ -976,10 +1084,10 @@ export function openSetupAssistant({ doc = globalThis.document, fetchJson = defa
   // network apply those are re-read first: its earlier steps may have saved some of them.
   // The second button on steps 2–5 shows only when it does something Next does not. Both labels run skip(), which
   // puts the step back to its saved values and moves on. Next blocked (an untested proxy, a missing sign-in):
-  // "Skip for now". The step differs from what is saved (the Review step's Changed): "Use saved values"
+  // "Skip step". The step differs from what is saved (the Review step's Changed): "Use saved values"
   // (not "Discard changes", which is Cancel's question and closes the dialog). Else none.
   function skipLabelFor(gate) {
-    if (!gate.ok) return 'Skip for now';
+    if (!gate.ok) return 'Skip step';
     return diffRows(S.saved, S.answers).some((r) => r.step === S.step && r.changed) ? 'Use saved values' : null;
   }
   async function skip() {
@@ -1000,7 +1108,8 @@ export function openSetupAssistant({ doc = globalThis.document, fetchJson = defa
   async function load({ keepAnswers = false } = {}) {
     S.provSeq++;
     S.loadError = ''; if (!keepAnswers) S.error = ''; paint();   // a successful Try again leaves no stale error (ux-2-1)
-    const [settings, proxy, providers, cfg, detect, teamRes] = await Promise.all(['/api/settings', '/api/proxy/status', '/api/providers', '/api/config', '/api/setup/detect', '/api/setup/team'].map((u) => call(u)));
+    const [settings, proxy, providers, cfg, detect, teamRes, posture] = await Promise.all(['/api/settings', '/api/proxy/status', '/api/providers', '/api/config', '/api/setup/detect', '/api/setup/team', '/api/security/posture'].map((u) => call(u)));
+    S.posture = posture.ok ? posture.data : null;   // "Where agents run": a box shows its posture instead of the choice
     if (closed) return;
     const bad = [settings, proxy, providers].find((r) => !r.ok);
     if (bad) { S.loadError = "Couldn't load your settings."; S.error = `${S.loadError} ${bad.data?.error || `HTTP ${bad.status}`}`; paint(); return; }
@@ -1274,7 +1383,7 @@ export function openSetupAssistant({ doc = globalThis.document, fetchJson = defa
     S.done = { ok: done.ok === true, retry: done.retry || null }; delete card.dataset.fbState;
     timers.clearTimeout(S.pollT);
     if (S.netJob) { void finishNetwork(S.done); return; }
-    paint();
+    if (S.done.ok) void showReady(true, true); else paint();
   }
   function schedulePoll(ms = 2000) {
     timers.clearTimeout(S.pollT);

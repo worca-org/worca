@@ -16,21 +16,36 @@ body.view-workflows .main{padding:0;overflow:hidden;display:flex;flex-direction:
 .wfv-canvas{position:absolute;inset:0;}
 .wfv-canvas.is-drop::after{content:"";position:absolute;inset:6px;border-radius:var(--r-sm);border:1.5px dashed var(--ink-3);background:color-mix(in srgb,var(--field) 45%,transparent);pointer-events:none;z-index:5;}
 .wfv-float{position:absolute;z-index:20;}
-.wfv-tl{top:12px;left:12px;}
-.wfv-tr{top:12px;right:12px;}
+.wfv-tl{top:12px;left:12px;max-width:calc(100% - 32px - var(--wfv-tr-w,0px));}
+.wfv-tl .wfv-bar{max-width:100%;}
+.wfv-tr{top:12px;right:12px;display:flex;align-items:center;gap:8px;height:40px;}
+.wfv-tr > *{flex:0 0 auto;}
 .wfv-br{right:12px;bottom:14px;display:flex;gap:8px;transition:bottom .2s;}
 .wfv-br.is-up{bottom:66px;}
 @media (prefers-reduced-motion:reduce){.wfv-br{transition:none;}}
 .wfv-dock{left:50%;bottom:14px;transform:translateX(-50%);display:flex;align-items:flex-end;gap:8px;z-index:30;max-width:calc(100% - 24px);}
+.wfv-dock > .wfv-bar{flex:0 0 auto;}
 .wfv-bar{display:flex;align-items:center;height:40px;box-sizing:border-box;padding:4px;gap:2px;background:var(--panel);border:1px solid var(--line);border-radius:var(--r-sm);}
 .wfv-sep{width:1px;align-self:stretch;margin:6px 4px;background:var(--line);}
-/* Toolbar buttons are .btn (quiet, icon or text; Save is primary); open menus and the pressed library toggle keep a tint. */
+/* Bar buttons are .btn (quiet, icon or text); an open menu keeps a tint. */
 .wfv-bar .btn-quiet:is([aria-pressed="true"],[aria-expanded="true"]){background:var(--hover);color:var(--ink);}
+/* Top right: the status bar (the document badge and the validation chip; no bar while neither shows), then Open (the
+   Library toggle), Save version and Save, which stand apart, each a .btn on its own surface (Save is primary), in line
+   with the top-left bar's buttons; the toggle keeps a tint while the Library is open.
+   The two top groups never meet (top-fit.mjs measures them): the right group keeps its own width, the top-left bar
+   takes what is left (--wfv-tr-w; its name gives way), and when even that is too narrow the status bar folds: the
+   badge stays for screen readers, the chip goes into the menu of one "!" in the chip's dress. With the badge alone
+   there is nothing to open, so the bar goes too. */
+.wfv-status:not(:has(> :not([hidden]))){display:none;}
+.wfv-status[data-compact="true"] > .wfv-errchip:not(.wfv-status-more){display:none;}
+.wfv-status[data-compact="true"] > .wfv-doc,.wfv-status[data-compact="true"]:has(> .wfv-status-more[hidden]){position:absolute;width:1px;height:1px;margin:-1px;padding:0;border:0;overflow:hidden;clip:rect(0 0 0 0);clip-path:inset(50%);white-space:nowrap;}
+.wfv-tr .btn[aria-pressed="true"]{background:var(--hover);}
 .wfv-bar .btn-icon svg{width:16px;height:16px;}
-.wfv-bar .btn:not(.btn-icon) svg{width:15px;height:15px;}
+.wfv-bar .btn:not(.btn-icon) svg,.wfv-tr .btn:not(.btn-icon) svg{width:15px;height:15px;}
+/* Bottom right, after the zoom menu: How it works in a bar of its own (how-it-works.mjs fills it). */
+.wfv-howto-bar:not(:has(> .btn:not([hidden]))){display:none;}
 .wfv-bar .wfv-chev{width:12px;height:12px;color:var(--ink-2);}
-.wfv-savewrap{display:inline-flex;margin-left:4px;}
-.wfv-save-reason{margin-right:8px;font-size:12px;align-self:center;}
+.wfv-savewrap{display:inline-flex;}
 .wfv-savewrap > .btn-primary:disabled{opacity:.7;}
 input.wfv-name{width:auto;height:32px;min-width:56px;max-width:280px;field-sizing:content;padding:0 9px;border:0;border-radius:var(--r-sm);background:transparent;color:var(--ink);font:500 var(--fs-body)/1 var(--sans);}
 input.wfv-name:hover{background:var(--hover);}
@@ -41,6 +56,7 @@ input.wfv-name:focus-visible{box-shadow:0 0 0 2px var(--ink);}
 .wfv-doc[data-kind="edit"]{background:var(--green-bg);color:var(--green-ink-strong);}
 .wfv-doc:is([data-kind="copy"],[data-kind="new"]){background:var(--amber-bg);color:var(--amber-ink-strong);}
 .wfv-errchip{flex:0 0 auto;margin:0 4px 0 2px;}
+.wfv-status-more{margin:0 2px;}
 .wfv-errchip.is-incomplete{background:var(--field);color:var(--ink-2);}
 .wfv-errchip.is-warning{background:var(--amber-bg);color:var(--amber-ink-strong);}
 /* .btn-danger:hover:not(:disabled) is (0,3,0); without these arms a grey or amber chip turns red on hover. */
@@ -78,7 +94,7 @@ input.wfv-name:focus-visible{box-shadow:0 0 0 2px var(--ink);}
 .wfv-sheet-head .btn-icon{margin-left:auto;}
 .wfv-sheet-head .btn-icon svg{width:16px;height:16px;}
 .wfv-sheet-body{overflow:auto;padding:16px;}
-@media (max-width:760px){.wfv-tr{top:58px;}#wfv-autolayout span{display:none;}#wfv-autolayout{width:30px;padding:0;justify-content:center;}.wfv-sheet{padding:8px;}}
+@media (max-width:760px){.wfv-tr{top:58px;}.wfv-sheet{padding:8px;}}
 @media (prefers-reduced-motion:reduce){}
 
 /* Library card (wfl-): 380px beside the canvas; an overlay on phones. A header whose search box slides over the title,
@@ -104,7 +120,7 @@ input.wfv-name:focus-visible{box-shadow:0 0 0 2px var(--ink);}
 .wfl-bar{display:flex;align-items:center;gap:6px;min-height:46px;flex:0 0 auto;padding:7px 8px 7px 10px;border-bottom:1px solid var(--line);}
 .wfl-seg{flex:1 1 auto;min-width:0;}
 .wfl-tab{flex:1 1 0;min-width:0;justify-content:center;}
-.wfl-tname{min-width:0;overflow:hidden;text-overflow:ellipsis;}
+.wfl-tname{min-width:0;overflow:hidden;text-overflow:ellipsis;line-height:1.4;}
 .wfl-tab .wfl-n{flex:0 0 auto;font-size:11px;color:var(--ink-2);}
 .wfl-new{flex:0 0 auto;}
 .wfl-new.is-slot{width:32px;height:32px;}
@@ -182,3 +198,35 @@ input.wfv-name:focus-visible{box-shadow:0 0 0 2px var(--ink);}
 .wfl-foot{flex:0 0 auto;height:38px;display:flex;align-items:center;padding:0 14px;border-top:1px solid var(--line);color:var(--ink-2);font-size:12px;}
 @media (max-width:760px){.wfl{position:absolute;top:8px;right:8px;bottom:8px;z-index:35;width:min(380px,calc(100% - 16px));box-shadow:var(--shadow-sheet);}}
 @media (prefers-reduced-motion:reduce){.wfl{transition:none;}.wfl-item.is-flash{animation:none;}}
+/* Workflow versions (plans/workflow-tests-plan.md Part 1). The Canvas · Versions buttons keep the .seg 28px (A5). */
+.wfv-vstatus{margin:0 4px;white-space:nowrap;color:var(--ink-2);}
+/* The page sits on the stage above the canvas overlay (10) and under the top bars (20); the canvas tools leave while it shows.
+   The bars' room is the page's top border, outside what scrolls: the page's text never passes under them. */
+.wfv-versions{position:absolute;inset:0;z-index:15;overflow:auto;background:var(--bg);border-top:64px solid var(--bg);padding:8px 32px 48px;}
+.wfv-changes{margin:4px 0 12px;padding-left:18px;}
+.wfv-changes li{margin:2px 0;}
+.wfv-check{display:flex;align-items:center;gap:8px;font-size:13px;}
+.wfv-stage:has(> .wfv-versions:not([hidden])) > .wfv-dock,.wfv-stage:has(> .wfv-versions:not([hidden])) > .wfv-br > :not(.wfv-howto-bar){display:none;}
+/* The Versions page (Task 8, canvas board 7): the draft row, one row per version, then every save with Restore. */
+.wfv-vpage{max-width:1080px;margin:0 auto;display:flex;flex-direction:column;gap:20px;}
+.wfv-vt{padding:0;overflow-x:auto;}
+.wfv-vt-draft,.wfv-vt-row{display:grid;grid-template-columns:64px minmax(0,1fr) 120px 320px;gap:16px;align-items:center;padding:14px 18px;border-bottom:1px solid var(--line);}
+.wfv-vt-draft{background:var(--canvas-2);}
+.wfv-vt-row:last-child{border-bottom:0;}
+.wfv-vt-no{font-family:var(--mono);font-weight:600;}
+.wfv-vt-main{display:flex;flex-direction:column;gap:2px;min-width:0;}
+.wfv-vt-head{display:flex;flex-wrap:wrap;gap:8px;align-items:center;}
+.wfv-vt-acts{display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap;}
+.badge.wfv-inuse{background:var(--blue-bg);color:var(--blue-ink-strong);}
+.wfv-vh{display:flex;flex-direction:column;gap:6px;}
+.wfv-vh-row{display:grid;grid-template-columns:minmax(0,1fr) auto auto;gap:12px;align-items:center;padding:6px 0;border-bottom:1px solid var(--line);}
+.wfv-vh-by{margin-top:0;}
+.wfv-vt-draft > .btn{grid-column:4;justify-self:end;}
+@media (max-width:760px){.wfv-versions{border-top-width:112px;padding:0 16px 32px;}}
+@media (max-width:700px){.wfv-vt-draft,.wfv-vt-row{grid-template-columns:48px minmax(0,1fr);}.wfv-vt-used,.wfv-vt-acts,.wfv-vt-draft > .btn{grid-column:2;justify-content:flex-start;}.wfv-vt-draft > .btn{justify-self:start;}}
+/* Narrow: the top-left bar may shrink (the name gives way first) and never outgrows the stage; the status line stays for screen readers. */
+@media (max-width:760px){.wfv-tl{max-width:calc(100% - 24px);}.wfv-tl .wfv-bar{max-width:100%;}.wfv-tl .wfv-name{min-width:0;flex:0 1 auto;}.wfv-tl .wfv-menu-btn{flex:0 0 auto;}.wfv-tl .wfv-menu-btn > span{position:absolute;width:1px;height:1px;margin:-1px;padding:0;overflow:hidden;clip:rect(0 0 0 0);clip-path:inset(50%);white-space:nowrap;}.wfv-tl .wfv-pages .flag-chip{display:none;}.wfv-tl .wfv-pages{flex:0 0 auto;}.wfv-tl .wfv-pages button{padding:0 8px;}.wfv-vstatus{position:absolute;width:1px;height:1px;margin:-1px;padding:0;overflow:hidden;clip:rect(0 0 0 0);clip-path:inset(50%);white-space:nowrap;}}
+/* Phone width: Canvas · Tests · Versions had squeezed the name to one letter ("F"). With the switch shown it is compact (no
+   separator before it, smaller buttons, the Workflows menu button as its icon only) and the bar's other pieces keep their
+   size, so the name has the rest and ends in "…" ("Fix a bu…" at 390px). Without the switch (flag off) the bar is as before. */
+@media (max-width:480px){:root[data-flags~="workflowTests"] .wfv-tl .wfv-bar > :not(.wfv-name){flex-shrink:0;}:root[data-flags~="workflowTests"] .wfv-tl .wfv-name{text-overflow:ellipsis;}:root[data-flags~="workflowTests"] .wfv-tl .wfv-sep[data-flag]{display:none;}:root[data-flags~="workflowTests"] .wfv-tl .wfv-menu-btn{padding:0 8px;}:root[data-flags~="workflowTests"] .wfv-tl .wfv-chev{display:none;}:root[data-flags~="workflowTests"] .wfv-tl .wfv-pages button{padding:0 4px;font-size:var(--fs-meta);}}

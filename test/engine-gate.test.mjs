@@ -11,7 +11,7 @@ import { useTempHome } from './helpers/temp-home.mjs';
 import { createOrchestrator } from '../src/core/orchestrator.mjs';
 import { runOpts } from '../src/core/phases.mjs';
 import { runClaude } from '../src/core/claude-runner.mjs';
-import { addGlobalModel, setUtilityModels } from '../src/core/settings.mjs';
+import { addGlobalModel, setUtilityModels, setAskModels } from '../src/core/settings.mjs';
 import { readPipelineForResume } from '../src/core/artifacts.mjs';
 import { ENGINES } from './helpers/engines.mjs';
 import { fakeCodex } from './helpers/fake-codex.mjs';
@@ -24,7 +24,7 @@ import { writeProjectFiles } from '../src/core/engines/project-files.mjs';
 import { fakeCursor } from './helpers/fake-cursor.mjs';
 import { removeInjectedPaths, writeRunManifest, readRunManifest } from '../src/core/run-manifest.mjs';
 import { readGuardrailSet } from '../src/core/guardrail-store.mjs';
-import { guardrailsToPermissionRules } from '../src/core/guardrails.mjs';
+import { guardrailsToPermissionRules, gateRules, DEFAULT_GUARDRAILS, GUARDRAIL_PRESETS } from '../src/core/guardrails.mjs';
 
 useTempHome(after);
 const POSIX = process.platform === 'win32' ? { skip: 'POSIX shell fixtures' } : {};
@@ -103,6 +103,26 @@ test('codex does not hold WebFetch while its shell or web search can still fetch
   const off = withNodes(orch({ engine: 'codex' }), {});
   off.guardrailPermissionRules = { deny: ['Bash', 'WebSearch', 'WebFetch'] };
   assert.deepEqual(off._engineGate().filter((l) => /deny rules/.test(l)), ['engine codex: deny rules enforced on codex: Bash, WebSearch, WebFetch']);
+});
+
+test('the secret-file floor is never weighed by the gate: a custom set keeps its outcome and its audit lines', () => {
+  // codex: a set that only turns the shell and web search off still runs without consent, though its spawn carries the floor.
+  const o = withNodes(orch({ engine: 'codex' }), {});
+  o.guardrailPermissionRules = guardrailsToPermissionRules({ ...DEFAULT_GUARDRAILS, deny: ['Bash', 'WebSearch'] });
+  o.guardrailsId = 'custom';
+  const lines = o._engineGate();
+  assert.deepEqual(lines.filter((l) => /deny rules/.test(l)), ['engine codex: deny rules enforced on codex: Bash, WebSearch']);
+  assert.equal(lines.some((l) => /NOT enforced|only in part/.test(l)), false, lines.join('\n'));
+  // gemini: a WebFetch-only set passes as it did before the floor.
+  const g = withNodes(orch({ engine: 'gemini' }), {});
+  const webFetch = guardrailsToPermissionRules({ ...DEFAULT_GUARDRAILS, deny: ['WebFetch'] });
+  assert.equal(g._engineRefusal({ rules: webFetch, guardrailsId: 'custom', nodes: [] }), null);
+  // codex with Normal: the refusal text is the one computed from the preset without the floor.
+  const n = withNodes(orch({ engine: 'codex' }), {});
+  const normal = guardrailsToPermissionRules(GUARDRAIL_PRESETS.normal);
+  assert.equal(n._engineRefusal({ rules: normal, guardrailsId: 'normal', nodes: [] }),
+    n._engineRefusal({ rules: gateRules(normal), guardrailsId: 'normal', nodes: [] }));
+  assert.ok(n._engineRefusal({ rules: normal, guardrailsId: 'normal', nodes: [] }));
 });
 
 test('--allow-unguarded-engine runs it anyway and says so in the audit', () => {
@@ -277,11 +297,12 @@ test('the night decider runs on the run\'s engine: that engine\'s model kept, an
     return o.state.subAgents[0].runModel;                     // the decider's row names the model it ran
   };
   assert.equal(await decide({ engine: 'codex', model: 'gpt-5.5' }), 'gpt-5.5');
-  assert.equal(await decide({ engine: 'codex', model: 'claude-sonnet-5' }), CODEX_DEFAULT_MODEL);
+  // No run model on the decider's engine: Worca's Deep thinking default (#1450), never the CLI's own.
+  assert.equal(await decide({ engine: 'codex', model: 'claude-sonnet-5' }), 'gpt-5.6-sol');
   assert.equal(await decide({ engine: 'claude', model: 'claude-opus-5-5' }), 'claude-opus-5-5');
-  assert.equal(await decide({ engine: 'claude', model: 'gpt-5.5' }), null);
-  assert.equal(await decide({ engine: 'codex' }), CODEX_DEFAULT_MODEL);
-  assert.deepEqual(seen, [['codex', 'gpt-5.5'], ['codex', CODEX_DEFAULT_MODEL], ['claude', 'claude-opus-5-5'], ['claude', null], ['codex', CODEX_DEFAULT_MODEL]]);
+  assert.equal(await decide({ engine: 'claude', model: 'gpt-5.5' }), 'claude-opus-5-5');
+  assert.equal(await decide({ engine: 'codex' }), 'gpt-5.6-sol');
+  assert.deepEqual(seen, [['codex', 'gpt-5.5'], ['codex', 'gpt-5.6-sol'], ['claude', 'claude-opus-5-5'], ['claude', 'claude-opus-5-5'], ['codex', 'gpt-5.6-sol']]);
 });
 
 test('the run title runs on the run\'s engine: codex gets no model, Claude keeps the run model', () => {
@@ -432,7 +453,7 @@ test('a resume keeps the saved consent; a point without it is refused and stays 
   const first = await ref.run();
   assert.equal(first.status, 'paused');
   const id = ref.state.id;
-  assert.equal(models[0], undefined, 'a Claude model never reaches the codex spawn');
+  assert.equal(models[0], 'gpt-5.6-sol', 'a Claude model never reaches the codex spawn: Worca\'s default for the role does (#1450 D-i)');
 
   const saved = readPipelineForResume(id);
   assert.deepEqual(saved.resumePoint.claude, { model: 'claude-sonnet-5', engine: 'codex', allowUnguardedEngine: true });
@@ -450,7 +471,7 @@ test('a resume keeps the saved consent; a point without it is refused and stays 
   ref = engine.create({ projectDir: dir, auto: true, claude: { mock: true }, runners: runners(), resume: kept });
   assert.equal(ref.claude.engine, 'codex');
   assert.equal((await ref.resume()).status, 'done');
-  assert.ok(models.slice(1).every((m) => m === undefined));
+  assert.ok(models.slice(1).every((m) => m && !m.startsWith('claude-')), `no Claude id reaches a codex spawn: ${models}`);
 });
 
 test('the MCP layer refusal runs at run start and before a resume touches the paused run', async () => {
@@ -510,7 +531,7 @@ test("a single-project codex run's project deny rules reach every codex spawn an
   // Without the consent the Permissive set's run is refused: the command rule holds only in part.
   assert.deepEqual(await make({ engine: 'codex' }).engineStartRefusal(), {
     error: `engine codex: the project's .claude/settings.json denies Bash(git push:*), which this engine holds only in part: ${REACH} — pass --allow-unguarded-engine to run it with them as a partial guard`,
-    overridable: true,
+    overridable: true, engines: ['codex'],
   });
   const o = make({ engine: 'codex', allowUnguardedEngine: true });
   const seen = [];
@@ -550,8 +571,8 @@ test('engineStartRefusal answers before a run exists, and says when the consent 
 
   const strict = make({ engine: 'codex' }, { guardrailsId: 'normal' });
   assert.deepEqual(await strict.engineStartRefusal(), {
-    error: 'engine codex: guardrail set "normal" has permission rules this engine cannot enforce (Read(.env*), Edit(.env*), Read(*.pem) (+28 more)) — run it with --guardrails permissive, or pass --allow-unguarded-engine to run it without them',
-    overridable: true,
+    error: 'engine codex: guardrail set "normal" has permission rules this engine cannot enforce (Read(.env*), Edit(.env*), Read(*.pem) (+32 more)) — run it with --guardrails permissive, or pass --allow-unguarded-engine to run it without them',
+    overridable: true, engines: ['codex'],
   });
   assert.equal(await make({ engine: 'codex', allowUnguardedEngine: true }, { guardrailsId: 'normal' }).engineStartRefusal(), null);
   // Secure was already refused for its path rules; WebFetch now joins the rules it lists, and the consent still lifts it.
@@ -579,7 +600,7 @@ test('engineStartRefusal reports an MCP registry layer as not liftable', async (
   o._resolveMcp = layer([{ name: 'sentry_billing', setName: 'Billing' }]);
   assert.deepEqual(await o.engineStartRefusal(), {
     error: 'engine codex: this run attaches MCP servers codex cannot attach — remote, and codex attaches stdio servers only: sentry_billing',
-    overridable: false,
+    overridable: false, engines: ['codex'],
   });
   // Rules AND copies: the consent would lift only the rules, so the answer is the copies, not liftable.
   const both = createOrchestrator({ projectDir: tmp(), guardrailsId: 'normal', claude: { mock: true, engine: 'codex' } });
@@ -601,7 +622,7 @@ test('engineStartRefusal sees the Team set\'s copies before the run resolves its
   };
   assert.deepEqual(await o.engineStartRefusal(), {
     error: 'engine codex: this run attaches MCP servers codex cannot attach — remote, and codex attaches stdio servers only: github',
-    overridable: false,
+    overridable: false, engines: ['codex'],
   });
   assert.deepEqual(asked, { team }, 'the cached Team set reaches the early look');
   o.policyRun = { home: 'acme/platform', fields: {}, deviations: [] };
@@ -693,7 +714,8 @@ test('a node keeps its model only on the engine that owns it; a dropped model ta
   const codexRun = orch({ engine: 'codex', model: 'gpt-5.6-sol' });
   assert.deepEqual(codexRun._nodeModelPair({ model: 'claude-opus-5-5', effort: 'max' }), { model: 'gpt-5.6-sol', effort: undefined });
   assert.deepEqual(codexRun._nodeModelPair({ model: 'gpt-5.5', effort: 'low' }), { model: 'gpt-5.5', effort: 'low' });
-  assert.deepEqual(orch({ engine: 'codex' })._nodeModelPair({ model: 'claude-opus-5-5', effort: 'max' }), { model: undefined, effort: undefined });
+  assert.deepEqual(orch({ engine: 'codex' })._nodeModelPair({ model: 'claude-opus-5-5', effort: 'max' }), { model: 'gpt-6.1-sol', effort: undefined, source: 'worca-default' },
+    'a dropped node model falls to Worca\'s default for the role (#1450 D-i), never to the CLI default');
   const claudeRun = orch({ model: 'claude-opus-5-5' });
   assert.deepEqual(claudeRun._nodeModelPair({ model: 'gpt-5.5', effort: 'low' }), { model: 'claude-opus-5-5', effort: undefined });
   assert.deepEqual(claudeRun._nodeModelPair({ effort: 'high' }), { model: 'claude-opus-5-5', effort: 'high' }, 'an effort without a node model rides the run model, as before');
@@ -850,6 +872,70 @@ test('engineStartRefusal: a missing opencode binary is not liftable', POSIX, asy
   const r = await createOrchestrator({ projectDir: tmp(), claude: { engine: 'opencode', bin: join(tmp(), 'no-opencode') } }).engineStartRefusal();
   assert.equal(r.overridable, false);
   assert.match(r.error, /WORCA_OPENCODE_BIN/);
+});
+
+test('an opencode run with no model auto-names worca\'s default OpenCode model: the ask slot first, else the ONLY opencode-capable catalog row, never OpenCode Zen, never one of several', async () => {
+  await withCatalogHome(async () => {
+    // A Zen (opencode/…) row FIRST, so an unwary first-row pick would grab it; and one plain person model.
+    await addGlobalModel({ id: 'opencode/zen-free', engine: 'opencode' });
+    await addGlobalModel({ id: 'anthropic/claude-sonnet-4-5', engine: 'opencode' });
+    const mk = () => createOrchestrator({ projectDir: '/tmp/gate-proj', guardrailsId: 'permissive', claude: { engine: 'opencode', mock: true } });
+    // No ask slot, one model of the person's own: there is nothing to choose between, so it is the run's.
+    const viaCatalog = mk();
+    assert.equal(await viaCatalog._ensureOpencodeDefaultModel(), 'anthropic/claude-sonnet-4-5', 'never the first-row Zen model');
+    assert.equal(viaCatalog.claude.model, 'anthropic/claude-sonnet-4-5');
+    assert.equal(await viaCatalog._opencodeOnDefaultModel(), false);
+    // Two of them: catalogue order says nothing about price or fit, so worca does not choose — the run-start check
+    // still refuses the unnamed spawn, and the log says how to name one.
+    await addGlobalModel({ id: 'openai/gpt-5.5-mini', engine: 'opencode' });
+    const several = mk();
+    const logged = [];
+    several._log = (_who, level, text) => logged.push([level, text]);
+    assert.equal(await several._ensureOpencodeDefaultModel(), null);
+    assert.ok(!several.claude.model, 'no model was named');
+    assert.equal(await several._opencodeOnDefaultModel(), true);
+    assert.ok(logged.some(([level, text]) => level === 'warn' && /2 OpenCode models/.test(text) && /anthropic\/claude-sonnet-4-5/.test(text) && /openai\/gpt-5\.5-mini/.test(text)), JSON.stringify(logged));
+    // The person's OpenCode ask slot wins over the catalog row, and a second call is a no-op.
+    await setAskModels({ opencode: { model: 'openai/gpt-5.5-mini' } });
+    const viaAsk = mk();
+    assert.equal(await viaAsk._ensureOpencodeDefaultModel(), 'openai/gpt-5.5-mini');
+    assert.equal(await viaAsk._ensureOpencodeDefaultModel(), null, 'already named: nothing left to resolve');
+    assert.equal(viaAsk.claude.model, 'openai/gpt-5.5-mini');
+    assert.equal(await viaAsk._opencodeOnDefaultModel(), false);
+    // A Zen model in the chat slot is not taken either; with two catalogue models left, nothing is named.
+    await setAskModels({ opencode: { model: 'opencode/zen-free' } });
+    const zenSlot = mk();
+    assert.equal(await zenSlot._ensureOpencodeDefaultModel(), null);
+    assert.ok(!zenSlot.claude.model);
+    // An explicitly named model is never overridden.
+    const named = mk();
+    named.claude.model = 'anthropic/claude-sonnet-4-5';
+    assert.equal(await named._ensureOpencodeDefaultModel(), null);
+    assert.equal(named.claude.model, 'anthropic/claude-sonnet-4-5');
+  });
+});
+
+test('the run window lets an opencode run start with no model when worca can name one (engineStartRefusal passes), on the same orchestrator that then runs', POSIX, async () => {
+  await withCatalogHome(async () => {
+    await addGlobalModel({ id: 'anthropic/claude-sonnet-4-5', engine: 'opencode' });
+    const dir = tmp();
+    const bin = join(dir, 'opencode');
+    writeFileSync(bin, '#!/bin/sh\nif [ "$1" = "--version" ]; then echo 1.18.23; exit 0; fi\n' +
+      'if [ -n "$ANTHROPIC_API_KEY" ]; then echo "0 credentials"; echo "1 environment variables"; else echo "0 credentials"; echo "0 environment variables"; fi\n');
+    chmodSync(bin, 0o755);
+    const keep = { key: process.env.ANTHROPIC_API_KEY, optIn: process.env.WORCA_OPENCODE_ALLOW_DEFAULT_MODEL };
+    process.env.ANTHROPIC_API_KEY = 'worca-only';
+    delete process.env.WORCA_OPENCODE_ALLOW_DEFAULT_MODEL;
+    try {
+      const orch = createOrchestrator({ projectDir: dir, guardrailsId: 'permissive', claude: { engine: 'opencode', bin } });
+      const r = await orch.engineStartRefusal();
+      assert.equal(r, null, `the gate must not refuse an auto-named opencode run (got ${JSON.stringify(r)})`);
+      assert.match(orch.claude.model, /^anthropic\/claude-sonnet-4-5$/, 'the same orchestrator now carries the named model');
+    } finally {
+      if (keep.key === undefined) delete process.env.ANTHROPIC_API_KEY; else process.env.ANTHROPIC_API_KEY = keep.key;
+      if (keep.optIn === undefined) delete process.env.WORCA_OPENCODE_ALLOW_DEFAULT_MODEL; else process.env.WORCA_OPENCODE_ALLOW_DEFAULT_MODEL = keep.optIn;
+    }
+  });
 });
 
 // The Cursor files in the §8.8 set, the commit and the diffs (run-harness _registerEngineConfig, _injectedFor,

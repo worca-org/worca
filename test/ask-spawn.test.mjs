@@ -12,6 +12,7 @@ import {
   askWorktreeAllowRules, webMcpEnv, webKeyVar, SANDBOX_NOTE_WEB,
 } from '../src/core/ask/spawn.mjs';
 import { buildClaudeArgs, runClaude, buildSpawnEnv } from '../src/core/claude-runner.mjs';
+import { agentHome } from '../src/core/engines/spawn.mjs';
 
 const POSIX_SHIM = { skip: process.platform === 'win32' ? 'fake claude shim is a POSIX shell script (no .exe stand-in on Windows)' : false };
 
@@ -69,12 +70,14 @@ test('deny rules: spec list, every path rule // or ~/ anchored, the resolved hom
   assert.deepEqual(o.permissionRules, { allow: askWorktreeAllowRules('ask_00000001'), deny: [...ASK_DENY_RULES] });
   assert.deepEqual(ASK_DENY_RULES, [
     'Bash', 'Edit', 'Write', 'NotebookEdit', 'WebFetch', 'WebSearch', 'Skill',
-    'Read(//**/worca-cc.db*)', 'Read(//**/worca.db*)', 'Read(//**/secrets.json)', 'Read(//**/.env*)',
+    'Read(//**/worca-cc.db*)', 'Read(//**/worca.db*)', 'Read(//**/secrets.json)',
+    'Read(//**/worca-vault*)', 'Read(//**/.env*)',
     'Read(//**/.worca-cc/settings.json)', 'Read(//**/.worca-cc/store/**)', 'Read(//**/.worca-cc/runs/**)',
     'Read(//**/.worca-cc/plugins/**)', 'Read(//**/.worca-cc/tmp/**)', 'Read(//**/.worca-cc/logs/**)',
     'Read(//**/.worca-cc/mcp/**)', 'Read(//**/.worca-cc/skills/**)',
     'Read(~/.ssh/**)', 'Read(~/.aws/**)', 'Read(~/.gnupg/**)', 'Read(~/.kube/**)', 'Read(~/.docker/**)',
     'Read(~/.claude/**)', 'Read(~/.netrc)', 'Read(~/.npmrc)', 'Read(~/.config/gh/**)', 'Read(//proc/**)',
+    'Read(//**/proxy-login.json*)', 'Read(//run/secrets/**)', 'Read(//var/run/secrets/**)', 'Read(//worca/egress/**)',
   ]);
   for (const rule of o.permissionRules.deny) {
     const m = /^\w+\((.*)\)$/.exec(rule);
@@ -199,9 +202,12 @@ test('fake bin: the recipe (with a memoryDir) reaches the spawned argv and env �
     { name: 'fake bin env dump: the sandbox var reaches the SPAWNED env and every WORCA_* var is scrubbed (probe F1)', run: () => {
       assert.ok(env.includes('CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1'), 'survives buildSpawnEnv + prepareModelEnv and wins over a caller value');
       assert.ok(env.includes('ANTHROPIC_BASE_URL=http://proxy'), 'caller routing env still merged');
-      // Two deliberate WORCA_ vars: the host-guard PID and the test-worker cap (Settings › Runs › Machine load).
-      const worcaLeaks = env.filter((l) => l.startsWith('WORCA_') && !l.startsWith('WORCA_HOST_PID=') && !l.startsWith('WORCA_TEST_CONCURRENCY='));
+      // Three deliberate WORCA_ vars: the host-guard PID, the test-worker cap (Settings › Runs › Machine load) and the
+      // throwaway home that replaces the host's (agentHome).
+      const worcaLeaks = env.filter((l) => l.startsWith('WORCA_') && !l.startsWith('WORCA_HOST_PID=') && !l.startsWith('WORCA_TEST_CONCURRENCY=')
+        && l !== `WORCA_HOME=${agentHome()}`);
       assert.equal(worcaLeaks.length, 0, `WORCA_* scrubbed (host-guard PID excepted): ${worcaLeaks}`);
+      assert.ok(!env.includes('WORCA_HOME=/tmp/must-not-leak'), 'the host home never reaches the child');
       assert.ok(env.includes(`WORCA_HOST_PID=${process.pid}`), 'the host-guard PID deliberately rides scrubbed spawns (host-guard.mjs)');
       assert.ok(env.some((l) => l.startsWith('PATH=')) && env.some((l) => l.startsWith('HOME=')), 'base vars kept');
     } },
@@ -236,7 +242,7 @@ test('buildMcpConfig: resolved base, argv twins of the env, execPath default', (
   // v7: the chat's claude is env-scrubbed (envScrub:true above), so the nested classifier's knobs must ride mcpServers.env — only when set.
   const fwd = buildMcpConfig({ homeBase: '/b', threadId: 't', serverPath: '/s.mjs', env: { WORCA_CLAUDE_BIN: '/x/claude.exe', WORCA_AUTO_MODEL: 'claude-sonnet-5', HOME: '/h', WORCA_MOCK: '1' } });
   assert.deepEqual(fwd.mcpServers.worca.env, { WORCA_HOME: resolve('/b'), WORCA_ASK_THREAD_ID: 't', WORCA_CLAUDE_BIN: '/x/claude.exe', WORCA_AUTO_MODEL: 'claude-sonnet-5' }, 'HOME / WORCA_MOCK are not forwarded');
-  assert.deepEqual(MCP_FORWARD_ENV, ['WORCA_CLAUDE_BIN', 'ORCH_CLAUDE_BIN', 'WORCA_AUTO_MODEL', 'WORCA_PROJECTS_ROOT', 'WORCA_CLONE_ALLOW', 'WORCA_FLAGS',
+  assert.deepEqual(MCP_FORWARD_ENV, ['WORCA_CLAUDE_BIN', 'ORCH_CLAUDE_BIN', 'WORCA_AUTO_MODEL', 'WORCA_PROJECTS_ROOT', 'WORCA_CLONE_ALLOW', 'WORCA_FLAGS', 'WORCA_BOX',
     'WORCA_CODEX_BIN', 'WORCA_COPILOT_BIN', 'WORCA_GEMINI_BIN', 'WORCA_GOOSE_BIN', 'WORCA_OPENCODE_BIN', 'WORCA_QWEN_BIN']);
   assert.ok(!MCP_FORWARD_ENV.some((k) => /TOKEN|KEY|SECRET|GH_/.test(k)), 'no credential is ever forwarded to the MCP child');
   assert.throws(() => buildAskSpawnOptions({ ...base(), scratchDir: '' }), /scratchDir/);
@@ -429,10 +435,33 @@ test('the corporate proxy bridge: the token rides spawnEnv for every engine, the
   assert.equal(buildMcpConfig({ homeBase: '/h', threadId: 'ask_0000aaaa', serverPath: '/s.mjs', env: {} }).mcpServers.worca.env.WORCA_ASK_PROXY, undefined);
 });
 
+test('the tab bridge (issue 1064 slice 3): the token rides spawnEnv, the URL (never the token) rides the mcp env; none ⇒ unchanged', () => {
+  const tabs = { url: 'http://127.0.0.1:1/api/ask/tabs', token: 'secret' };
+  const base = { thread: { id: 'ask_0000aaaa' }, turn: {}, limits: {}, mcpConfigPath: '/m.json', scratchDir: '/t' };
+  const cfg = buildMcpConfig({ homeBase: '/h', threadId: 'ask_0000aaaa', serverPath: '/s.mjs', env: {}, tabs });
+  assert.deepEqual(JSON.parse(cfg.mcpServers.worca.env.WORCA_ASK_TABS), { url: 'http://127.0.0.1:1/api/ask/tabs' });
+  assert.doesNotMatch(JSON.stringify(cfg), /secret/);
+  assert.equal(buildMcpConfig({ homeBase: '/h', threadId: 'ask_0000aaaa', serverPath: '/s.mjs', env: {} }).mcpServers.worca.env.WORCA_ASK_TABS, undefined);
+  for (const engine of ['claude', 'codex', 'copilot']) {
+    assert.deepEqual(buildAskSpawnOptions({ ...base, engine, tabs }).spawnEnv, { ASK_TABS_TOKEN: 'secret' }, engine);
+    assert.equal(buildAskSpawnOptions({ ...base, engine }).spawnEnv, undefined, engine);
+  }
+});
+
 test('without commands the sub-agent note and the mcp env are unchanged (#574)', () => {
   assert.equal(sandboxNote({ commands: false }), SANDBOX_NOTE);
   const doc = buildMcpConfig({ homeBase: '/h', threadId: 'ask_0000aaaa', serverPath: '/s.mjs', env: {} });
   assert.equal(doc.mcpServers.worca.env.WORCA_ASK_COMMANDS, undefined);
   const o = buildAskSpawnOptions({ thread: { id: 'ask_0000aaaa' }, turn: {}, limits: {}, mcpConfigPath: '/m.json', scratchDir: '/t' });
   assert.equal(o.spawnEnv, undefined);
+});
+
+test('a locked-down chat (opencode) keeps its server alias stable per thread: serverAliasSeed = the thread id', () => {
+  const base = { thread: { id: 'ask_0000aaaa', sessionId: null }, turn: { prompt: 'p', systemPrompt: 'S', model: 'aifarm-msp/DeepSeek-V4-Flash-0731' }, limits: {}, mcpConfigPath: '/m.json', scratchDir: '/t' };
+  const o = buildAskSpawnOptions({ ...base, engine: 'opencode' });
+  assert.equal(o.serverAliasSeed, 'ask_0000aaaa', 'every spawn of the same thread seeds the same opencode server alias, so a resumed session\'s names stay callable');
+  // Claude's own chat handover does not name it (the Claude adapter does not use a server alias).
+  assert.equal(buildAskSpawnOptions(base).serverAliasSeed, undefined);
+  // Nor does another locked-down engine's: only an engine whose tool names carry the alias asks for one.
+  assert.equal(buildAskSpawnOptions({ ...base, engine: 'codex', turn: { ...base.turn, model: 'gpt-5.5' } }).serverAliasSeed, undefined);
 });

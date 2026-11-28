@@ -48,7 +48,7 @@ const isOutline = (q) => q.kind === 'plan' && q.plan?.outline;
 
 /** Start a mock run in slicing mode. Outline asks go to `onOutline(q, orch)`, other plan asks to `onPlan`. */
 function start(opts = {}, onOutline = () => {}, onPlan = (q, orch) => orch.answer(q.id, { decision: 'approve' })) {
-  const { afterSpawn, beforeSpawn, ...rest } = opts;
+  const { afterSpawn, beforeSpawn, position, ...rest } = opts;
   opts = rest;
   const dir = opts.projectDir || gitDir('slices');
   const orch = createOrchestrator({ projectDir: dir, workflowId: 'wf_shape', prompt: PROMPT, claude: { mock: true }, shape: SHAPE, ...opts });
@@ -61,7 +61,8 @@ function start(opts = {}, onOutline = () => {}, onPlan = (q, orch) => orch.answe
     spawns.push({ key: nc.key, slicing: Boolean(ctx.shapeSlicing), note: ctx.shapeOutlineNote?.decision || null,
       feedback: ctx.shapeOutlineNote?.feedback || null, resume: Boolean(ctx.resumeSessionId), scope: Boolean(ctx.shapeSliceScope),
       // the outline file as the spawn starts: its sha, or null when it is missing
-      outlineSha: ctx.shapeSlicing ? shaOf(ctx.shapeSlicing.file) : undefined });
+      outlineSha: ctx.shapeSlicing ? shaOf(ctx.shapeSlicing.file) : undefined,
+      slicingKeys: ctx.shapeSlicing ? Object.keys(ctx.shapeSlicing) : undefined });
     if (beforeSpawn) await beforeSpawn(nc, ctx, spawns.length, orch);
     const r = await real(nc, ctx);
     if (afterSpawn) await afterSpawn(nc, ctx, spawns.length);
@@ -69,6 +70,8 @@ function start(opts = {}, onOutline = () => {}, onPlan = (q, orch) => orch.answe
   };
   orch.on('exec', (e) => execs.push(e));
   orch.on('question', (q) => {
+    // Shaper small runs B2: a marked run's Start step takes Worca's Care pick.
+    if (q.kind === 'care') { setImmediate(() => orch.answer(q.id, { care: { position: position || q.care.pick.position } })); return; }
     if (isOutline(q)) { outlines.push(q); setImmediate(() => onOutline(q, orch)); return; }
     if (q.kind === 'plan') { plans.push(q); setImmediate(() => onPlan(q, orch)); return; }
     if (q.kind === 'clarify' || q.kind === 'questions') setImmediate(() => orch.answer(q.id, { answers: [] }));
@@ -434,15 +437,14 @@ for (const [name, opts, line] of [
   ['a null check', { check: null }, 'the shape check did not pass'],
   ['outline-change.md', { change: true }, 'the planner says this slice cannot be built as outlined'],
 ]) {
-  test(`D19: ${name} with Away active waits for a person`, async () => {
+  test(`D19: ${name} with Away active is answered by Away, flagged`, async () => {
     const h = d19({ ...opts, away: true, onPlan: LEAVE });
-    await waitFor(() => h.plans.length === 1);
-    await settled();
-    assert.equal(h.orch.pendingQuestion?.id, h.plans[0].id, 'still open');
-    assert.equal(h.orch.state.night.openedAt, null, 'no countdown');
+    assert.equal((await h.done).status, 'done', 'nobody answered: Away did');
     assert.ok(audit(h.orch).some((x) => x.includes(`Plan approval held: ${line}`)));
-    h.orch.answer(h.plans[0].id, { decision: 'approve' });
-    assert.equal((await h.done).status, 'done');
+    assert.equal(h.orch.answeredBy(h.plans[0].id), 'night-mode');
+    const rec = readNightDecisions(h.orch.getState().id).find((d) => d.questionId === h.plans[0].id);
+    assert.equal(rec.flagged, true, 'one to check');
+    assert.deepEqual(rec.meta, { ask: 'plan' });
   });
 }
 
@@ -619,4 +621,81 @@ test('outline approval saves the run\'s pr_auto on the feature; a run with none 
   assert.equal((await plain.done).status, 'done');
   const [g] = featuresOf(plain.orch.getState().id);
   assert.deepEqual([g.pr_open, g.pr_slices, g.pr_source], [null, null, null]);
+});
+
+// A3 The split rules: the flag picks the rule set the outline ask is checked with (ctx.shapeSlicing carries it).
+const NINE = { why: '', slices: Array.from({ length: 9 }, (_, i) => ({ id: `s${i + 1}`, title: `Step ${i + 1} for people`,
+  goal: `People can do step ${i + 1}`, inScope: ['x'], outOfScope: [], acceptance: [`GET /api/s${i + 1} returns 200`],
+  dependsOn: i ? [`s${i}`] : [], estimate: 'medium' })) };
+async function nineSliceAsk(flags) {
+  const prev = process.env.WORCA_FLAGS;
+  if (flags) process.env.WORCA_FLAGS = flags; else delete process.env.WORCA_FLAGS;
+  try {
+    let wrote = false;
+    const h = start({ afterSpawn: async (nc, ctx) => {
+      if (nc.key !== 'planner' || !ctx.shapeSlicing || wrote) return;
+      wrote = true;
+      await writeFile(ctx.shapeSlicing.file, JSON.stringify(NINE));
+    } }, (q, orch) => orch.answer(q.id, { decision: 'stop' }));
+    assert.equal((await h.done).status, 'stopped');
+    return { check: h.outlines[0].plan.check, keys: h.spawns.find((x) => x.slicing).slicingKeys };
+  } finally {
+    if (prev === undefined) delete process.env.WORCA_FLAGS; else process.env.WORCA_FLAGS = prev;
+  }
+}
+
+test('A3 flag on: a 9-slice outline\'s ask has a passing runs item and no count item; ctx.shapeSlicing adds smallRuns and care', async () => {
+  const { check, keys } = await nineSliceAsk('shaperSmallRuns');
+  const runs = check.items.find((i) => i.id === 'runs');
+  assert.equal(runs.pass, true);
+  assert.equal(check.items.some((i) => i.id === 'count'), false);
+  assert.equal(check.ok, true);
+  assert.deepEqual(keys, ['file', 'size', 'smallRuns', 'care']);
+});
+
+test('A3 flag off: the same outline fails count, and ctx.shapeSlicing keys are dev\'s', async () => {
+  const { check, keys } = await nineSliceAsk(null);
+  const count = check.items.find((i) => i.id === 'count');
+  assert.equal(count.pass, false);
+  assert.equal(count.detail, '9 slices: never more than 8');
+  assert.equal(check.items.some((i) => i.id === 'runs'), false);
+  assert.deepEqual(keys, ['file', 'size']);
+});
+
+
+// Small runs B4 (D3): the split rules follow the run's marker and Care, never the live flag.
+test('B4: ctx.shapeSlicing.care is the run\'s Care and the Planner prompt names its cap (3, 3, 2)', async () => {
+  const { _testing } = await import('../src/core/graph/executor.mjs');
+  const { runClaude } = await import('../src/core/claude-runner.mjs');
+  const prev = process.env.WORCA_FLAGS;
+  process.env.WORCA_FLAGS = 'shaperSmallRuns';
+  try {
+    for (const [position, cap] of [['lean', 3], ['balanced', 3], ['thorough', 2]]) {
+      const prompts = [];
+      _testing.runClaude = (o) => { prompts.push(o.prompt); return runClaude(o); };
+      let care = null;
+      const h = start({ position, beforeSpawn: (nc, ctx) => { if (ctx.shapeSlicing && care === null) care = ctx.shapeSlicing.care; } },
+        (q, orch) => orch.answer(q.id, { decision: 'stop' }));
+      assert.equal((await h.done).status, 'stopped');
+      assert.equal(care, position);
+      assert.ok(prompts.some((p) => p.includes(`each owns 1 to ${cap} agreed requirements`)), position);
+    }
+  } finally {
+    _testing.runClaude = null;
+    if (prev === undefined) delete process.env.WORCA_FLAGS; else process.env.WORCA_FLAGS = prev;
+  }
+});
+
+test('B4: a run started with the flag off keeps dev\'s rules when the flag turns on mid-run', async () => {
+  const prev = process.env.WORCA_FLAGS;
+  delete process.env.WORCA_FLAGS;
+  try {
+    const h = start({ beforeSpawn: (nc) => { if (nc.key === 'planner') process.env.WORCA_FLAGS = 'shaperSmallRuns'; } },
+      (q, orch) => orch.answer(q.id, { decision: 'stop' }));
+    assert.equal((await h.done).status, 'stopped');
+    assert.deepEqual(h.spawns.find((x) => x.slicing).slicingKeys, ['file', 'size']);
+    assert.equal(h.outlines[0].plan.check.items.some((i) => i.id === 'count'), true, 'dev\'s check');
+  } finally {
+    if (prev === undefined) delete process.env.WORCA_FLAGS; else process.env.WORCA_FLAGS = prev;
+  }
 });

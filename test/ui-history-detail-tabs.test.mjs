@@ -1,17 +1,38 @@
 // test/ui-history-detail-tabs.test.mjs
 // History detail: the Overview, Agents, Clarify, Logs, form, glance and bar sections, and the
 // Actions tab. Shared boot and fixtures: helpers/history-detail-boot.mjs.
-import { test } from 'node:test';
+import { test, before, beforeEach, after } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  PROJECT, boot, settle, go, KEY, ROW, DETAIL, PAUSED_DETAIL, RESULTS, retainedRow, blockedBudget, ok,
-  fail, DETAIL_URL, detailHash, bootDetail, openDetail, deliverRows, click, secOf, badgeOf, PATCH,
+  PROJECT, settle, go, KEY, ROW, DETAIL, PAUSED_DETAIL, RESULTS, retainedRow, blockedBudget, ok, okBudget,
+  fail, DETAIL_URL, detailHash, historyArms, openDetail, deliverRows, click, secOf, badgeOf, PATCH,
   diffResults, diffDetail, patchArm, filesOf, paneOf, confirmDialog, proposalFor,
 } from './helpers/history-detail-boot.mjs';
+import { useSharedApp, restoreAfter } from './helpers/shared-app-boot.mjs';
 import { lastToast } from './helpers/feedback.mjs';
 import { checkRows } from './helpers/rows.mjs';
+import { openTab as openRunTab } from './helpers/run-tabs.mjs';
 import { useAppTimers } from './helpers/app-timers.mjs';
 import { ICONS } from '../ui/public/icons.mjs';
+import { applyFlags } from '../ui/public/flags.mjs';
+import { careRunPlan } from '../src/shared/shape/feature-record.mjs';
+
+// One app boot for the file (test/helpers/shared-app-boot.mjs), reset before each test. The boot's own answers are
+// history-detail-boot's: the project list, and a benign default for everything else.
+const app = useSharedApp({ before, beforeEach, after }, {
+  fetchHandler: (u) => Promise.resolve(String(u).includes('/api/projects')
+    ? { ok: true, status: 200, json: async () => ({ projects: [{ name: 'proj', path: PROJECT, exists: true }] }) }
+    : { ok: true, status: 200, json: async () => ({ config: { steps: {}, customModels: [] }, models: [], efforts: [] }) }),
+});
+
+// history-detail-boot's bootDetail over the shared app: the same mutable `box` and route table (historyArms), a reset
+// instead of a new import. `deepLink` lands on the run's route after the reset, as a reload on that address does.
+const bootDetail = async ({ rows = [ROW], detail = DETAIL, budget = okBudget(), arms = null, deepLink = false } = {}) => {
+  const box = { rows, detail, budget };
+  const base = historyArms(box);
+  await app.fresh({ fetchHandler: (url, opts) => (arms && arms(url, opts, box)) || base(url, opts), ...(deepLink ? { hash: detailHash } : {}) });
+  return { window: app.window, calls: app.calls, wsBox: app.wsBox, box };
+};
 
 // Click the action button of the newest toast (Retry | Details).
 const clickToastAction = (window) => {
@@ -46,9 +67,9 @@ async function openOverview(ctx) {
   return secOf(doc, 'overview');
 }
 
-test('Overview: clean verdict + stat cards + task card; a non-done run shows the status verdict line', async () => {
+test('Overview: clean verdict, no stat cards, no task card (it is the Task tab); a non-done run shows the status verdict line', async () => {
   await checkRows([
-    { name: 'Overview: clean verdict + stat cards + task card', run: async () => {
+    { name: 'Overview: clean verdict, no stat cards; the task card is the Task tab', run: async () => {
       const ctx = await bootDetail({ detail: OV_DETAIL });
       const sec = await openOverview(ctx);
 
@@ -58,27 +79,18 @@ test('Overview: clean verdict + stat cards + task card; a non-done run shows the
       assert.match(verdict.textContent, /Clean: no blocking issues flagged\./);
       assert.equal(sec.querySelector('ul.issues'), null, 'nothing to list when there are no findings');
 
-      const dur = sec.querySelector('.hd-ov-card-duration');
-      assert.match(dur.textContent, /1h 40m/);
-      assert.match(dur.querySelector('.hd-ov-sub').textContent, /\d+ steps? · \d+ cycles?/);
+      // One level: the stat cards are gone (the card's facts row carries Time · Cost).
+      assert.equal(sec.querySelector('.hd-ov-card-duration'), null);
+      assert.equal(sec.querySelector('.hd-ov-card-cost'), null);
 
-      const cost = sec.querySelector('.hd-ov-card-cost');
-      assert.match(cost.textContent, /\$153\.21/);
-      assert.match(cost.querySelector('.hd-ov-value').title, /Estimated cost/);
-
-      // The worktree is a one-line row under the cards: its path only while it is on disk.
+      // The worktree is a one-line row in the card's side column: its path only while it is on disk.
       const wt = sec.querySelector('.hd-ov-wt');
       assert.match(wt.textContent, /retained|released/);
       if (/retained/.test(wt.textContent)) assert.equal(wt.querySelector('.hd-ov-wt-path').title, '/tmp/wt');
       else assert.equal(wt.querySelector('.hd-ov-wt-path'), null, 'a released worktree has no path to show');
 
-      const task = sec.querySelector('.hd-ov-task');
-      assert.ok(task, 'the task card renders');
-      assert.match(task.textContent, /Fix the log UX\./);
-      assert.equal(task.querySelector('.hd-ov-more'), null, 'a short prompt needs no Show more');
-      const chips = [...sec.querySelectorAll('.hd-ov-tag')].map((c) => c.textContent);
-      assert.ok(chips.includes('feat/log-ux'), `the source branch is a chip — got ${JSON.stringify(chips)}`);
-      assert.ok(chips.includes('Alpha'), 'and so is the project name');
+      // The task card left Overview for the Task tab.
+      assert.equal(sec.querySelector('.hd-ov-task, .run-task, .hd-ov-tag'), null, 'Overview carries no task card or chips');
 
       // D6: the LLM "Generate overview" UI is gone from History for good.
       assert.equal(sec.querySelector('.results-overview-btn'), null,
@@ -88,6 +100,15 @@ test('Overview: clean verdict + stat cards + task card; a non-done run shows the
       // line is a judgement, never a count restatement. `+A −R` belongs to the header
       // meta (.hd-diffcounts) and to the Diff tab's file-list head — nowhere else.
       assert.doesNotMatch(verdict.textContent, /[+−]/, 'the verdict carries no raw diff counts');
+
+      const taskSec = await openTab(ctx, 'task');
+      const task = taskSec.querySelector('.run-task-tab .run-task');
+      assert.ok(task, 'the Task tab renders the task card');
+      assert.match(task.querySelector('.run-task-body').textContent, /Fix the log UX\./);
+      assert.equal(task.querySelector('.hd-ov-more'), null, 'the full prompt, no Show more');
+      const chips = [...task.querySelectorAll('.hd-ov-tag')].map((c) => c.textContent);
+      assert.ok(chips.includes('feat/log-ux'), `the source branch is a chip — got ${JSON.stringify(chips)}`);
+      assert.ok(chips.includes('Alpha'), 'and so is the project name');
     } },
     { name: 'Overview: non-done run shows the status verdict line', run: async () => {
       const ctx = await bootDetail({
@@ -157,45 +178,6 @@ test('Overview findings: keyThingsToCheck render, workspace findings collected f
       assert.match(verdict.textContent, /1 thing to check/);
       assert.equal(sec.querySelector('.issue-loc').textContent, 'proj-a-00000001: x.js:2',
         'the location is prefixed with its project key');
-    } },
-  ]);
-});
-
-test('the WORKTREE card reads retained while running and flips released -> retained in place', async () => {
-  await checkRows([
-    { name: 'the WORKTREE card flips released -> retained without leaving the tab', run: async () => {
-      // The carried-over phase-4 assertion. A tab body is built exactly ONCE, so the
-      // one body that reads mutable record fields only tracks the authoritative row
-      // because refreshHdFromRow calls refreshHdOverviewTab() — without it this card
-      // would read `released` for the life of the screen.
-      const ctx = await bootDetail({ rows: [], detail: DETAIL, deepLink: true });
-      await settle(ctx.window, 5);
-      const doc = ctx.window.document;
-
-      const sec = secOf(doc, 'overview');
-      assert.equal(sec.hidden, false, 'results-null -> Overview is the default tab');
-      assert.match(sec.querySelector('.hd-ov-wt .hd-ov-wt-state').textContent, /^released$/,
-        'the deep-link stub carries no retainedWork');
-
-      await deliverRows(ctx, [retainedRow()]);
-      assert.equal(secOf(doc, 'overview'), sec, 'the SAME section node is repainted in place');
-      assert.equal(sec.hidden, false, 'and the user never left the tab');
-      assert.equal(sec.querySelector('.hd-ov-wt .hd-ov-wt-state').textContent, 'retained');
-      assert.equal(sec.querySelectorAll('.hd-ov-wt').length, 1, 'the repaint replaces, never stacks');
-    } },
-    { name: 'the WORKTREE card reads retained while the run is still running', run: async () => {
-      // Running pipelines DO appear in History (listAllPipelines filters only
-      // `archived_at IS NULL`), and their worktree is very much still on disk — the
-      // card printed the live path under the word "released".
-      const ctx = await bootDetail({
-        rows: [{ ...ROW, status: 'running' }],
-        detail: { ...DETAIL, state: { ...DETAIL.state, status: 'running' } },
-      });
-      await openDetail(ctx, 'details/overview');
-      const sec = secOf(ctx.window.document, 'overview');
-      const row = sec.querySelector('.hd-ov-wt');
-      assert.equal(row.querySelector('.hd-ov-wt-state').textContent, 'retained');
-      assert.match(row.textContent, /\/tmp\/wt/, 'and it names the worktree it just called retained');
     } },
   ]);
 });
@@ -763,7 +745,7 @@ test('Auto badge: an Auto run is badged with classifier rows under Preflight, a 
       await openDetail(ctx);
       const badge = ctx.window.document.querySelector('#hist-detail .hd-row1 .auto-badge');
       assert.equal(badge.hidden, false); assert.equal(badge.textContent, 'Auto → Quick fix'); assert.equal(badge.title, 'Auto reused the saved workflow "Quick fix"');
-      ctx.window.document.querySelector('#hd-tab-agents').click(); await settle(ctx.window);
+      openRunTab(ctx.window, ctx.window.document.querySelector('#hd-tab-agents')); await settle(ctx.window);
       const names = [...ctx.window.document.querySelectorAll('#hist-detail .hd-ag-name')].map((n) => n.textContent);
       assert.deepEqual(names, ['Auto workflow (round 1)']);
       const head = ctx.window.document.querySelector('#hist-detail .hd-ag-head').textContent;
@@ -1002,15 +984,19 @@ const GLANCE_DETAIL = {
   results: { ...RESULTS, keyThingsToCheck: [{ id: 'c1', severity: 'major', title: 'Uploads fall back to IP' }] },
 };
 
-test('History opens on the glance: page title, status line, facts, the tab rows; Details is a route', async () => {
+test('History opens on Overview, one level: page title, status line, facts; the run card is the Overview tab; a tab is a route', async () => {
   const ctx = await bootDetail({ detail: GLANCE_DETAIL });
   await openDetail(ctx, '');
   await settle(ctx.window, 6);
   const doc = ctx.window.document;
   const hd = doc.querySelector('#hist-detail .hd');
-  assert.equal(hd.dataset.mode, 'glance');
-  assert.equal(hd.querySelector('.hd-glance').hidden, false);
-  assert.equal(hd.querySelector('.hd-details').hidden, true);
+  assert.equal(hd.dataset.mode, 'details', 'no glance mode any more');
+  assert.equal(hd.querySelector('.hd-details').hidden, false);
+  assert.equal(hd.querySelector('.hd-back').hidden, false);
+  assert.ok(doc.querySelector('#hist-detail .hd-tab[data-sec="overview"]').classList.contains('active'), 'the glance route opens Overview');
+  // The run card lives inside the Overview tab section.
+  const glance = hd.querySelector('.hd-glance');
+  assert.ok(secOf(doc, 'overview').contains(glance), 'the run card is adopted into Overview');
   // The run's name is the page title; the bar repeats it (shown only once scrolled away),
   // with no status word and no Details button of its own.
   const name = hd.querySelector('.hd-title').textContent;
@@ -1018,54 +1004,42 @@ test('History opens on the glance: page title, status line, facts, the tab rows;
   assert.equal(hd.querySelector('.rd-page-title').textContent, name);
   assert.equal(hd.querySelector('.hd-bar .rd-bar-title').textContent, name);
   assert.equal(hd.querySelector('.hd-bar-word'), null, 'the state lives in the status line, not the bar');
-  assert.equal(hd.querySelector('.rd-to-details'), null, 'every tab is a row on the glance: no Details button');
+  assert.equal(hd.querySelector('.rd-to-details'), null, 'no Details button');
+  assert.equal(hd.querySelector('.hd-to-run'), null, 'no ‹ Run button: there is no glance to go back to');
   // A finished run: the state word alone (its own glyph), no trail, the facts as tiles.
-  // Runs redesign slice 4: the one status block names the state, and its line says the state word once.
-  const st = hd.querySelector('.hd-glance .rd-sheet .run-status');
+  const st = glance.querySelector('.rd-sheet .run-status');
   assert.ok(st.dataset.state, 'the status block names the state');
   assert.ok(st.dataset.text.toLowerCase().includes(st.dataset.word.toLowerCase()), 'the state word is in the status line');
   assert.equal(hd.querySelector('.rd-trail-btn'), null, 'no trail of dots');
   assert.equal(hd.querySelectorAll('.rd-facts .rd-stats > div').length, 3, 'time · cost · changes');
   assert.deepEqual([...hd.querySelectorAll('.rd-facts .rd-stats > div > span')].map((s) => s.textContent).slice(0, 2), ['time', 'cost']);
-  assert.equal(hd.querySelector('.hd-result .issues'), null, 'the things to check live in Overview only');
+  assert.equal(hd.querySelector('.hd-result .issues'), null, 'the things to check live below the card, not in its result column');
   assert.equal(hd.querySelector('.rd-nowlist').textContent, '', 'no step list on a finished run');
-  // Every tab is a row, in tab order, under Results and How it ran.
-  const groups = [...hd.querySelectorAll('.hd-result .rd-sgroup')];
-  assert.deepEqual(groups.map((g) => g.querySelector('.rd-slabel').textContent), ['Results', 'How it ran']);
-  const rows = [...hd.querySelectorAll('.hd-result [data-rd-tab]')].map((b) => b.dataset.rdTab);
-  const tabs = [...doc.querySelectorAll('#hist-detail .hd-tab')].map((b) => b.dataset.sec);
-  assert.deepEqual(rows, tabs, 'one row per tab, in the tab bar\'s order');
-  assert.ok([...hd.querySelectorAll('.hd-result [data-rd-tab]')].every((b) => b.querySelector('svg.rd-srow-ico')), 'each row carries its tab icon');
-  assert.equal(hd.querySelector('.hd-result .mono'), null, 'run 4: the values in Results and How it ran are body font');
-  assert.ok([...hd.querySelectorAll('.hd-result .rd-srow-v')].every((v) => !v.classList.contains('mono')));
-  assert.doesNotMatch(hd.querySelector('.hd-glance').textContent, /\b\d+ of \d+\b/);
+  // The card no longer lists the tabs as rows (Results / How it ran are gone).
+  assert.deepEqual([...hd.querySelectorAll('.hd-result [data-rd-tab]')], [], 'no tab rows on the card');
+  assert.ok(![...hd.querySelectorAll('.hd-result .rd-slabel')].some((l) => /Results|How it ran/.test(l.textContent)));
+  assert.doesNotMatch(glance.textContent, /\b\d+ of \d+\b/);
 
-  // A row deep-links into Details › that tab; the graph moved into Workflow.
-  hd.querySelector('.hd-result [data-rd-tab="overview"]').dispatchEvent(new ctx.window.MouseEvent('click', { bubbles: true }));
-  ctx.window.dispatchEvent(new ctx.window.Event('hashchange'));
-  await settle(ctx.window, 4);
-  assert.equal(ctx.window.location.hash, `#${detailHash}/details/overview`);
-  assert.equal(hd.dataset.mode, 'details');
-  assert.ok(doc.querySelector('#hist-detail .hd-tab[data-sec="overview"]').classList.contains('active'));
-  doc.querySelector('#hist-detail .hd-tab[data-sec="workflow"]').dispatchEvent(new ctx.window.MouseEvent('click', { bubbles: true }));
+  // A tab click rewrites the address; the graph lives in Workflow.
+  openRunTab(ctx.window, doc.querySelector('#hist-detail .hd-tab[data-sec="workflow"]'));
   assert.ok(secOf(doc, 'workflow').querySelector('.hd-graph .run-flow'), 'the graph lives in Workflow');
   assert.equal(ctx.window.location.hash, `#${detailHash}/details/workflow`, 'a tab click rewrites the address');
-
-  // Escape: Details -> glance -> the list.
-  doc.dispatchEvent(new ctx.window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
-  ctx.window.dispatchEvent(new ctx.window.Event('hashchange'));
+  // The card shows only while Overview is the active tab.
+  assert.equal(secOf(doc, 'overview').hidden, true, 'the Overview section, and the card in it, are hidden');
+  // A deep link to a tab opens that tab.
+  await openDetail(ctx, 'details/overview');
   await settle(ctx.window, 4);
-  assert.equal(ctx.window.location.hash, `#${detailHash}`);
-  assert.equal(hd.dataset.mode, 'glance');
+  assert.equal(hd.dataset.mode, 'details');
+  assert.ok(doc.querySelector('#hist-detail .hd-tab[data-sec="overview"]').classList.contains('active'));
 });
 
-// The saved run's bar carries the Running bar's controls in its order (Run after, the
-// Resume split, Pause, Stop, then the terminal button), in both modes. "Resume on <other engine>" lives in the
+// The saved run's bar controls (.rd-bar-end, moved into the header's title row on the full page: barIntoHeader) are the
+// Running bar's in its order (Run after, the Resume split, Pause, Stop, then the terminal button). "Resume on <other engine>" lives in the
 // split's menu, never as a button of its own. The Details header
 // keeps only the PR controls (slice 2: its ⋯ joined the bar's), and the glance card carries no run control. Run 3 (D13): the bar ends
 // with its own ⋯ (Save as preset and Terminal fold into it; CSS hides the two). Run after stays a quick button beside
 // Resume and Stop, so ⋯ does not repeat it.
-const HD_BAR_ORDER = ['hd-save-preset', 'hd-after', 'rd-actions', 'hd-resume-split', 'hd-pause', 'hd-stop', 'term-opener', 'hd-bar-more', 'run-menu-carriers'];
+const HD_BAR_ORDER = ['hd-save-preset', 'hd-after', 'rd-actions', 'hd-resume-split', 'hd-pause', 'hd-stop', 'tool-icons', 'hd-bar-more', 'run-menu-carriers'];
 // A step in flight: the one run model reads a running run with no step as Starting, which offers no Pause (slice 4).
 const STEPPING = { steps: [{ executionId: 'x:n_impl:1', nodeId: 'n_impl', ordinal: 1, cycle: 1, kind: 'cycle', status: 'start',
   startedAt: '2026-01-01T00:00:00Z' }], active: [{ nodeId: 'n_impl', executionId: 'x:n_impl:1' }] };
@@ -1081,7 +1055,7 @@ test('History bar per finished/paused status: Run after, Resume split only when 
       await openDetail(ctx, '');
       await settle(ctx.window, 6);
       const hd = ctx.window.document.querySelector('#hist-detail .hd');
-      const end = hd.querySelector('.hd-bar .rd-bar-end');
+      const end = hd.querySelector('.hd-row1 .rd-bar-end');
       assert.deepEqual([...end.children].map((c) => HD_BAR_ORDER.find((k) => c.classList.contains(k)) || c.className), HD_BAR_ORDER);
       const after = end.querySelector('.hd-after');
       assert.equal(after.hidden, false, 'a saved run can always be waited for');
@@ -1106,8 +1080,12 @@ test('History bar per finished/paused status: Run after, Resume split only when 
       assert.equal(end.querySelector('.hd-stop').hidden, !parked, parked ? 'the model lists Stop' : 'nothing to stop');
       if (parked) assert.equal(end.querySelector('.hd-stop').disabled, false, 'a paused saved run is stopped through its row');
       const header = hd.querySelector('.hd-header');
+      // The full page puts no controls above the run's title: the bar's controls end the header's title row.
+      assert.equal(end.parentElement, hd.querySelector('.hd-row1'), 'the bar\'s controls end the header\'s title row');
       for (const sel of ['.hd-after', '.hd-resume-split', '.hd-resume', '.hd-resume-switch', '.hd-pause', '.hd-stop']) {
-        assert.equal(header.querySelector(sel), null, `${sel} is not in the Details header`);
+        assert.equal(hd.querySelector(`.hd-bar ${sel}`), null, `${sel} left the bar`);
+        assert.equal(hd.querySelector(`.hd-glance ${sel}`), null, `${sel} is not on the run card`);
+        assert.ok([...header.querySelectorAll(sel)].every((n) => end.contains(n)), `${sel} is only in the header's .rd-bar-end`);
       }
       assert.ok(header.querySelector('.hd-pr') && header.querySelector('.hd-pr-link'), 'the Details header keeps the PR controls');
       assert.equal(header.querySelector('.hd-more, .hd-menu'), null, 'slice 2: its ⋯ moved into the bar\'s one menu');
@@ -1130,7 +1108,7 @@ test('History bar of a live pipeline: Pause and Stop act on its live run', async
   await openDetail(ctx, '');
   await settle(ctx.window, 6);
   const doc = ctx.window.document;
-  const end = doc.querySelector('#hist-detail .hd-bar .rd-bar-end');
+  const end = doc.querySelector('#hist-detail .hd-row1 .rd-bar-end');
   const pause = end.querySelector('.hd-pause');
   const stop = end.querySelector('.hd-stop');
   assert.equal(pause.hidden, false, 'a live run can be paused');
@@ -1214,7 +1192,7 @@ test('History bar of a resumed pipeline: Pause/Stop and the Resume split follow 
       await openDetail(ctx, '');
       await settle(ctx.window, 6);
       const doc = ctx.window.document;
-      const end = doc.querySelector('#hist-detail .hd-bar .rd-bar-end');
+      const end = doc.querySelector('#hist-detail .hd-row1 .rd-bar-end');
       const pause = end.querySelector('.hd-pause');
       const stop = end.querySelector('.hd-stop');
       assert.equal(pause.hidden, false, 'the running lineage can be paused');
@@ -1253,7 +1231,7 @@ test('History bar of a resumed pipeline: Pause/Stop and the Resume split follow 
       await settle(ctx.window, 4);
       await openDetail(ctx, '');
       await settle(ctx.window, 6);
-      const end = ctx.window.document.querySelector('#hist-detail .hd-bar .rd-bar-end');
+      const end = ctx.window.document.querySelector('#hist-detail .hd-row1 .rd-bar-end');
       const split = end.querySelector('.hd-resume-split');
       assert.equal(split.hidden, true);
       // It parks on a pipeline cost cap, which no schedule may continue past.
@@ -1321,7 +1299,7 @@ test('History bar failures: a failed pause is said inline, a refused Resume keep
       await settle(ctx.window, 6);
       const doc = ctx.window.document;
       const hd = doc.querySelector('#hist-detail .hd');
-      const pause = hd.querySelector('.hd-bar .hd-pause');
+      const pause = hd.querySelector('.rd-bar-end .hd-pause');
       click(ctx.window, pause);
       await settle(ctx.window, 4);
       const err = hd.querySelector('.hd-error');
@@ -1332,7 +1310,7 @@ test('History bar failures: a failed pause is said inline, a refused Resume keep
       await settle(ctx.window, 4);
       assert.equal(pauses, 2);
       assert.equal(err.hidden, true, 'a pause that went through takes its failure away');
-      click(ctx.window, hd.querySelector('.hd-bar .hd-stop'));
+      click(ctx.window, hd.querySelector('.rd-bar-end .hd-stop'));
       const modal = doc.getElementById('stop-modal');
       assert.equal(modal.classList.contains('hidden'), false);
       go(ctx.window, 'new');
@@ -1371,7 +1349,7 @@ test('History bar of a paused pipeline resumed elsewhere: Pause and Stop replace
   const ctx = await bootDetail({ rows: [{ ...ROW, status: 'paused' }], detail: PAUSED_DETAIL });
   await openDetail(ctx, '');
   await settle(ctx.window, 6);
-  const end = ctx.window.document.querySelector('#hist-detail .hd-bar .rd-bar-end');
+  const end = ctx.window.document.querySelector('#hist-detail .hd-row1 .rd-bar-end');
   const split = end.querySelector('.hd-resume-split');
   assert.equal(split.hidden, false, 'paused: Resume');
   assert.equal(end.querySelector('.hd-pause').hidden, true);
@@ -1414,7 +1392,7 @@ test("History bar after a server restart: an old boot's running/paused/stopped r
       await openDetail(ctx, '');
       await settle(ctx.window, 6);
       const doc = ctx.window.document;
-      const end = doc.querySelector('#hist-detail .hd-bar .rd-bar-end');
+      const end = doc.querySelector('#hist-detail .hd-row1 .rd-bar-end');
       const resume = end.querySelector('.hd-resume');
       const pause = end.querySelector('.hd-pause');
       const stop = end.querySelector('.hd-stop');
@@ -1454,7 +1432,7 @@ test("History bar after a server restart: an old boot's running/paused/stopped r
     await settle(ctx.window, 4);
     await openDetail(ctx, '');
     await settle(ctx.window, 6);
-    const end = ctx.window.document.querySelector('#hist-detail .hd-bar .rd-bar-end');
+    const end = ctx.window.document.querySelector('#hist-detail .hd-row1 .rd-bar-end');
     assert.equal(end.querySelector('.hd-pause').hidden, false, 'the listed run can be paused');
     assert.equal(end.querySelector('.hd-stop').hidden, false);
     assert.equal(end.querySelector('.hd-resume-split').hidden, true, 'nothing to resume while it runs');
@@ -1480,7 +1458,7 @@ test('History bar, paused saved run: Stop settles it (and a pre-restart copy in 
       await openDetail(ctx, '');
       await settle(ctx.window, 6);
       const doc = ctx.window.document;
-      const stop = doc.querySelector('#hist-detail .hd-bar .hd-stop');
+      const stop = doc.querySelector('#hist-detail .rd-bar-end .hd-stop');
       assert.equal(stop.hidden, false);
       click(ctx.window, stop);
       const modal = doc.getElementById('stop-modal');
@@ -1497,7 +1475,7 @@ test('History bar, paused saved run: Stop settles it (and a pre-restart copy in 
       assert.deepEqual(ctx.calls.filter((c) => c.url.endsWith('/api/stop')).map((c) => JSON.parse(c.opts.body)), [{ pipelineId: ROW.id }]);
       assert.ok(modal.classList.contains('hidden'), 'closed on success');
       assert.ok(ctx.calls.filter((c) => c.url.endsWith(DETAIL_URL)).length > fetchesBefore, 'the saved run was fetched again');
-      const end = doc.querySelector('#hist-detail .hd-bar .rd-bar-end');
+      const end = doc.querySelector('#hist-detail .hd-row1 .rd-bar-end');
       assert.equal(end.querySelector('.hd-stop').hidden, true, 'stopped: nothing left to stop');
       assert.equal(end.querySelector('.hd-resume-split').hidden, true, 'stopped: nothing to resume');
     } },
@@ -1519,7 +1497,7 @@ test('History bar, paused saved run: Stop settles it (and a pre-restart copy in 
       await openDetail(ctx, '');
       await settle(ctx.window, 6);
       const doc = ctx.window.document;
-      click(ctx.window, doc.querySelector('#hist-detail .hd-bar .hd-stop'));
+      click(ctx.window, doc.querySelector('#hist-detail .rd-bar-end .hd-stop'));
       click(ctx.window, doc.getElementById('stop-modal').querySelector('.stop-confirm'));
       await settle(ctx.window, 10);
       assert.equal(doc.getElementById('nav-needs-count').hidden, true, 'the old copy no longer reads Paused');
@@ -1531,7 +1509,7 @@ test('History bar, paused saved run stopped from elsewhere: the row refresh take
   const ctx = await bootDetail({ rows: [{ ...ROW, status: 'paused' }], detail: PAUSED_DETAIL });
   await openDetail(ctx, '');
   await settle(ctx.window, 6);
-  const end = ctx.window.document.querySelector('#hist-detail .hd-bar .rd-bar-end');
+  const end = ctx.window.document.querySelector('#hist-detail .hd-row1 .rd-bar-end');
   assert.equal(end.querySelector('.hd-stop').hidden, false);
   assert.equal(end.querySelector('.hd-resume-split').hidden, false);
   // Its Stop dialog is open when the run is stopped elsewhere: it closes with the page it was opened on.
@@ -1541,7 +1519,7 @@ test('History bar, paused saved run stopped from elsewhere: the row refresh take
   ctx.box.detail = { ...DETAIL, state: { ...DETAIL.state, status: 'stopped' } };   // what the server now holds
   await deliverRows(ctx, [{ ...ROW, status: 'stopped' }]);   // another tab / the CLI / chat stopped it
   assert.ok(modal.classList.contains('hidden'), 'no dialog left asking to stop a stopped run');
-  const end2 = ctx.window.document.querySelector('#hist-detail .hd-bar .rd-bar-end');   // the page was re-read
+  const end2 = ctx.window.document.querySelector('#hist-detail .hd-row1 .rd-bar-end');   // the page was re-read
   assert.equal(end2.querySelector('.hd-stop').hidden, true, 'no Stop on a stopped run');
   assert.equal(end2.querySelector('.hd-resume-split').hidden, true, 'no Resume on a stopped run');
   assert.equal(ctx.window.document.querySelector('#hist-detail .hd-status-word').textContent, 'Stopped', 'the page reads stopped, not Paused');
@@ -1566,7 +1544,7 @@ test('History bar, paused saved run stopped from elsewhere under an open comment
     assert.ok(draft.isConnected, 'the draft is kept');
     draft.remove();
   }
-  const end = doc.querySelector('#hist-detail .hd-bar .rd-bar-end');
+  const end = doc.querySelector('#hist-detail .hd-row1 .rd-bar-end');
   assert.equal(end.querySelector('.hd-stop').hidden, true, 'the bar still drops Stop');
   assert.equal(end.querySelector('.hd-resume-split').hidden, true, 'and Resume');
   await deliverRows(ctx, [{ ...ROW, status: 'stopped' }]);
@@ -1590,7 +1568,7 @@ test('History bar: a resume in flight is never re-armed by a frame, a budget ref
   });
   await openDetail(ctx, '');
   await settle(ctx.window, 6);
-  const resume = ctx.window.document.querySelector('#hist-detail .hd-bar .hd-resume');
+  const resume = ctx.window.document.querySelector('#hist-detail .rd-bar-end .hd-resume');
   click(ctx.window, resume);
   await settle(ctx.window);
   assert.equal(resume.disabled, true, 'the resume claims its button');
@@ -1621,7 +1599,7 @@ test('History bar: a run frame during the detail fetch is painted once the detai
   assert.doesNotThrow(() => frame({ type: 'state', runId: 'r-live', id: ROW.id, status: 'running', ...STEPPING }));
   release();
   await settle(ctx.window, 6);
-  const end = ctx.window.document.querySelector('#hist-detail .hd-bar .rd-bar-end');
+  const end = ctx.window.document.querySelector('#hist-detail .hd-row1 .rd-bar-end');
   assert.equal(end.querySelector('.hd-pause').hidden, false);
   assert.equal(end.querySelector('.hd-stop').hidden, false);
 });
@@ -1646,7 +1624,7 @@ test('History bar: a live pause after load (error cause named / total-budget pau
       await settle(ctx.window, 6);
       frame({ type: 'done', runId: 'r-live', status: 'paused', ...done });
       await settle(ctx.window, 6);
-      const resume = ctx.window.document.querySelector('#hist-detail .hd-bar .hd-resume');
+      const resume = ctx.window.document.querySelector('#hist-detail .rd-bar-end .hd-resume');
       assert.equal(resume.hidden, false);
       if (done.reason === 'cost_total') {
         ctx.box.budget = blockedBudget();
@@ -1683,7 +1661,7 @@ test('History glance: the card head\'s Create PR (every level), View PR │ ▾,
       const glance = ctx.window.document.querySelector('#hist-detail .hd-glance');
       const slot = glance.querySelector('.rd-pr-slot');
       assert.equal(slot.closest('.hd-result'), null, 'outside the result host paintHdGlance rebuilds');
-      assert.equal(slot.parentElement, glance.querySelector('.rd-sheet > .rd-sheet-head > .rd-head-acts'), 'the control sits in the head');
+      assert.equal(slot.parentElement, glance.querySelector('.rd-sheet-main > .rd-sheet-head > .rd-head-acts'), 'the control sits in the head');
       assert.equal(glance.querySelector('.rd-pr-box'), null, 'no PR bar');
       assert.equal(glance.querySelector('.rd-result [data-rd-cta]'), null, 'nothing PR-shaped under Results');
       const steps = [...glance.querySelectorAll('.rd-route .rd-route-row')];
@@ -1793,7 +1771,7 @@ test('History glance PR lookup pending: a busy placeholder morphs in place into 
 });
 
 // s2: the route's branch row copies the branch (D15); the Project row's value keeps paintPageHead's text.
-test('History glance: the route\'s branch row copies the branch, none without a branch', async () => {
+test('History glance: the route\'s branch row copies the branch, none without a branch', async (t) => {
   await checkRows([
     { name: 'History glance: the route\'s branch row carries the feature branch and one copy button', run: async () => {
       const ctx = await bootDetail();
@@ -1810,7 +1788,8 @@ test('History glance: the route\'s branch row copies the branch, none without a 
       assert.equal(meta.firstChild.nodeType, 3, 'paintPageHead\'s text stays the line\'s first node');
       assert.match(meta.firstChild.data, /^proj · /);
       const writes = [];
-      Object.defineProperty(window.navigator, 'clipboard', { configurable: true, value: { writeText: async (t) => { writes.push(t); } } });
+      restoreAfter(t, window.navigator, 'clipboard');
+      Object.defineProperty(window.navigator, 'clipboard', { configurable: true, value: { writeText: async (w) => { writes.push(w); } } });
       click(window, copy);
       await settle(window, 2);
       assert.deepEqual(writes, [ROW.branch]);
@@ -1881,34 +1860,27 @@ test('the Actions tab loads the run model with the run scope and offers Check ou
   assert.ok([...card.querySelectorAll('button')].some((b) => b.textContent === 'Check out'));
 });
 
-test('the Overview Actions strip on a finished run follows actions-changed without opening the Actions tab', async () => {
+test('no Actions strip on the Overview (one level); the Actions tab follows actions-changed', async () => {
   await checkRows([
-    { name: 'the Overview carries the Actions strip on a finished run, with "Open tab ›"', run: async () => {
+    { name: 'the Overview carries no Actions strip on a finished run', run: async () => {
       const ctx = await bootDetail({ arms: actionArms() });
       await openDetail(ctx, 'details/overview');
       await settle(ctx.window, 4);
-      const strip = secOf(ctx.window.document, 'overview').querySelector('.act-strip');
-      assert.ok(strip, 'the strip is mounted');
-      assert.equal(strip.dataset.runId, ROW.id);
-      assert.equal(strip.dataset.minLevel, 'advanced');
-      const open = [...strip.querySelectorAll('button')].find((b) => b.textContent === 'Open tab ›');
-      assert.ok(open);
-      click(ctx.window, open);
-      assert.equal(ctx.window.location.hash, `#${detailHash}/details/actions`);
+      assert.equal(secOf(ctx.window.document, 'overview').querySelector('.act-strip'), null);
     } },
-    { name: 'the Overview strip follows actions-changed without the Actions tab ever opening', run: async () => {
+    { name: 'the Actions tab follows actions-changed', run: async () => {
       const running = { ...ACT_MODEL, members: [{ ...ACT_MODEL.members[0], checkout: { setup: { status: 'ok' } } }], instances: [ACT_RUNNING[0]] };
       let model = running;
       const ctx = await bootDetail({ arms: (url) => (url.includes(`/api/runs/${ROW.id}/actions?`) ? ok(model) : actionArms()(url)) });
-      await openDetail(ctx, 'details/overview');
+      await openDetail(ctx, 'details/actions');
       await settle(ctx.window, 4);
-      const strip = () => secOf(ctx.window.document, 'overview').querySelector('.act-strip');
-      assert.match(strip().textContent, /Running :4417/);
+      const tab = () => secOf(ctx.window.document, 'actions');
+      assert.match(tab().textContent, /:4417/);
       model = { ...running, instances: [{ ...ACT_RUNNING[0], status: 'stopped' }] };   // stopped from the sidebar, or it crashed
       ctx.wsBox.ws.dispatch('message', { data: JSON.stringify({ type: 'actions-changed', action: 'stopped' }) });
       await settle(ctx.window, 4);
-      assert.doesNotMatch(strip().textContent, /Running :4417/);
-      assert.ok(![...strip().querySelectorAll('button')].some((b) => b.textContent === 'Stop'));
+      assert.doesNotMatch(tab().textContent, /:4417/);
+      assert.ok(![...tab().querySelectorAll('button')].some((b) => b.textContent === 'Stop'));
     } },
   ]);
 });
@@ -2040,7 +2012,7 @@ const AW_DETAIL = {
   },
 };
 
-test("worca's own AI calls: named in the Agents tab (stopped review tokens shown, never stopping the step) and not counted as sub-agents in the Overview", async () => {
+test("worca's own AI calls: named in the Agents tab (stopped review tokens shown, never stopping the step) and not counted as sub-agents in the Task tab", async () => {
   await checkRows([
     { name: "Agents tab: worca's own calls are named, a stopped review shows its tokens, and none of them stop the step", run: async () => {
       const ctx = await bootDetail({ detail: AW_DETAIL });
@@ -2071,9 +2043,9 @@ test("worca's own AI calls: named in the Agents tab (stopped review tokens shown
       assert.deepEqual(pills(setup), ['Auto workflow', 'Auto workflow', 'Run title']);
       assert.match(setup.querySelector('.hd-ag-meta').textContent, /\$0\.0419/);
     } },
-    { name: "Overview: worca's own AI calls are not counted as the run's sub-agents", run: async () => {
+    { name: "Task tab: worca's own AI calls are not counted as the run's sub-agents", run: async () => {
       const ctx = await bootDetail({ detail: AW_DETAIL });
-      const sec = await openTab(ctx, 'overview');
+      const sec = await openTab(ctx, 'task');
       // AW_DETAIL: two Auto workflow rounds, the run title and two Away mode reviews are worca's; one Explore row is the agent's.
       assert.deepEqual([...sec.querySelectorAll('.hd-ov-tag')].map((c) => c.textContent).filter((t) => /sub-agent/.test(t)), ['1 sub-agent']);
     } },
@@ -2213,7 +2185,7 @@ test('Running actions: when the open page\'s row cannot take focus (not shown), 
   stop.dispatchEvent(new ctx.window.MouseEvent('click', { bubbles: true, detail: 0 }));
   await settle(ctx.window, 4);
   assert.equal(doc.getElementById('side-actions').hidden, true);
-  assert.equal(doc.activeElement, doc.getElementById('topnav-new'), 'New run shows at every level and every width');
+  assert.equal(doc.activeElement, doc.getElementById('topnav-activity'), 'Activity shows at every level and every width');
 });
 
 test('Running actions: a row whose run loses its saved row keeps keyboard focus in that row (its Stop), never on another row\'s name', async () => {
@@ -2243,4 +2215,108 @@ test('History › Overview: the Perspective checklists group is on the saved run
   const group = secOf(ctx.window.document, 'overview').querySelector('.shape-checklists');
   assert.ok(group, 'the group is on the saved run\'s Overview');
   assert.match(group.textContent, /Review cycle 1 · 1 met · 0 unmet · 0 n\/a/);
+});
+
+// ---------------------------------------------------------------------------
+// Shaper small runs D2 (D11, D12, D16): the saved page's one Agents place and the run's facts
+// ---------------------------------------------------------------------------
+const d2Agent = (id, key) => ({ id, kind: 'agent', key, x: 0, y: 0, label: key, ports: { inputs: [], outputs: [] } });
+const d2Manifest = (careRun) => ({ version: 2, template: { id: 'wf_shape_slice_req' },
+  graph: { nodes: [['n_clarify', 'clarify'], ['n_plan', 'planner'], ['n_refine', 'refiner'], ['n_impl', 'implementer'], ['n_review', 'reviewer'],
+    ['n_roles', 'planReviewer'], ['n_tests', 'testWriter']].map(([id, key]) => d2Agent(id, key)), wires: [] }, ...(careRun ? { careRun } : {}) });
+const d2Row = (nodeId) => ({ key: `x:${nodeId}:1`, executionId: `x:${nodeId}:1`, nodeId, ordinal: 1, cycle: 1, status: 'done', startedAt: '2026-11-21T10:00:00Z' });
+const D2_CARE_DETAIL = { ...DETAIL, state: { ...DETAIL.state, stepper: d2Manifest(careRunPlan('balanced', { runRoles: ['product'] })),
+  steps: ['n_clarify', 'n_plan', 'n_roles', 'n_refine', 'n_tests', 'n_impl', 'n_review'].map(d2Row),
+  subAgents: [{ id: 'a1', label: 'Explore repo', nodeId: 'n_impl', cycle: 1, status: 'finished' }] } };
+const D2_SLICE = { featureId: 'feat_d2', title: 'Charts everywhere', index: 2, total: 3, sliceTitle: 'Export', state: 'done', next: null, threadId: null,
+  owns: [{ id: 'R-po-1', text: 'Export the report', pass: true }],
+  startsFrom: { kind: 'feature', branch: 'main', text: 'the feature branch: nothing is finished yet' },
+  stored: { planVersion: 2, planReviewed: true, tests: { passed: 12, total: 12 } } };
+const SLICE_URL = `/api/shape/pipelines/${ROW.id}/slice`;
+const hdAgentsPlaces = (doc) => [...doc.querySelectorAll('#hist-detail .rd-run-agents')].filter((x) => !x.hidden).length
+  + [...doc.querySelectorAll('#hist-detail .hd-tab[data-sec="agents"]')].filter((x) => !x.hidden).length;
+
+test('D2 (D12): flag on, a saved Care run has 1 Agents place (no Agents tab, .rd-run-agents visible) and its facts, from a late /slice answer', async () => {
+  let release;
+  const late = new Promise((r) => { release = r; });
+  const ctx = await bootDetail({ detail: D2_CARE_DETAIL, arms: (url) => (url.endsWith(SLICE_URL) ? late.then(() => ok(D2_SLICE)) : null) });
+  applyFlags({ shaperSmallRuns: true }, ctx.window.document);
+  const doc = ctx.window.document;
+  await openDetail(ctx, 'details/overview');
+  await settle(ctx.window, 6);
+  assert.equal(doc.querySelector('#hist-detail .hd-tab[data-sec="agents"]'), null, 'the Agents tab is not shown');
+  assert.equal(hdAgentsPlaces(doc), 1);
+  const box = doc.querySelector('#hist-detail .rd-run-agents');
+  assert.ok(box.querySelector('.run-agents'));
+  const sub = box.querySelector(':scope > .rd-run-subagents');
+  assert.equal(sub.dataset.minLevel, 'expert');
+  assert.ok(sub.querySelector('.hd-ag-group, .rd-ag-group, .hint'), 'dev\'s sub-agent body');
+  assert.equal(doc.querySelector('#hist-detail .rd-run-facts'), null, 'no facts node before the answer');
+  release();
+  await settle(ctx.window, 8);
+  const facts = doc.querySelectorAll('#hist-detail .rd-run-facts');
+  assert.equal(facts.length, 1);
+  assert.equal(facts[0].nextElementSibling, box, 'before the Agents box');
+  assert.equal((doc.querySelector('#hist-detail').textContent.match(/Starts from/g) || []).length, 1);
+  const planner = [...box.querySelectorAll('.plan-check-row')].find((r) => r.querySelector('.plan-check-label').textContent === 'Planner');
+  assert.equal(planner.querySelector('.plan-check-detail').textContent, 'plan v2 · after the plan review');
+});
+
+test('D2 (D16): the saved page paints its facts at build from a cached /slice answer', async () => {
+  const ctx = await bootDetail({ detail: D2_CARE_DETAIL, arms: (url) => (url.endsWith(SLICE_URL) ? ok(D2_SLICE) : null) });
+  applyFlags({ shaperSmallRuns: true }, ctx.window.document);
+  const doc = ctx.window.document;
+  await openDetail(ctx, 'details/overview');
+  await settle(ctx.window, 8);
+  assert.equal(doc.querySelectorAll('#hist-detail .rd-run-facts').length, 1);
+  const gets = () => ctx.calls.filter((c) => c.url.endsWith(SLICE_URL)).length;
+  const n = gets();
+  click(ctx.window, doc.querySelector('#hist-detail .hd-tab[data-sec="task"]'));
+  await settle(ctx.window);
+  secOf(doc, 'overview').dataset.loaded = '';
+  click(ctx.window, doc.querySelector('#hist-detail .hd-tab[data-sec="overview"]'));
+  await settle(ctx.window);
+  assert.equal(gets(), n, 'the cached answer, no new ask');
+  assert.equal(doc.querySelectorAll('#hist-detail .rd-run-facts').length, 1);
+  assert.equal(doc.querySelector('#hist-detail .rd-run-facts').hidden, false);
+});
+
+test('D2: flag off, a saved Care run keeps dev\'s Agents tab and no .rd-run-agents, no facts', async () => {
+  const ctx = await bootDetail({ detail: D2_CARE_DETAIL, arms: (url) => (url.endsWith(SLICE_URL) ? ok(D2_SLICE) : null) });
+  const doc = ctx.window.document;
+  await openDetail(ctx, 'details/overview');
+  await settle(ctx.window, 6);
+  assert.ok(doc.querySelector('#hist-detail .hd-tab[data-sec="agents"]'));
+  assert.equal(doc.querySelector('#hist-detail .rd-run-agents'), null);
+  assert.equal(doc.querySelector('#hist-detail .rd-run-facts'), null);
+  assert.equal(hdAgentsPlaces(doc), 1);
+});
+
+// --- the header state line -------------------------------------------------
+
+test('saved run: the state line says the state on every tab; the card repeats neither word nor step', async () => {
+  const ctx = await bootDetail({ detail: OV_DETAIL });
+  await openDetail(ctx, 'details/overview');
+  const doc = ctx.window.document;
+  const line = doc.querySelector('#hist-detail .hd-header > .run-state-line');
+  assert.ok(line, 'the state line is a direct child of the header');
+  assert.equal(line.previousElementSibling.className, 'hd-row1', 'right under the title row');
+  const card = doc.querySelector('#hist-detail .hd-glance .rd-sheet .run-status');
+  for (const tab of [...doc.querySelectorAll('#hist-detail .hd-tab')]) {
+    click(ctx.window, tab);
+    await settle(ctx.window);
+    assert.equal(line.dataset.text, line.textContent, tab.dataset.sec);
+    assert.ok(line.textContent.startsWith(card.dataset.word) || line.textContent.startsWith('Ready'), `${tab.dataset.sec}: ${line.textContent}`);
+    assert.equal(line.closest('.hd-sec'), null);
+  }
+  assert.equal(line.classList.contains('is-link'), false, 'a saved run has no question to jump to');
+  const [head, ...rest] = card.dataset.text.split(' · ');
+  assert.equal(line.querySelector('.run-state-word').textContent, head);
+  assert.equal(card.querySelector('.run-status-word').hidden, true);
+  assert.equal(card.querySelector('.status-dot').hidden, true);
+  assert.equal(card.querySelector('.run-status-detail').textContent, rest.join(' · '));
+  assert.equal(card.querySelector('.run-status-head').hidden, !rest.length);
+  // The row's refresh repaints the same node.
+  await deliverRows(ctx, [{ ...ROW, mtime: 2 }]);
+  assert.equal(doc.querySelector('#hist-detail .hd-header > .run-state-line'), line);
 });

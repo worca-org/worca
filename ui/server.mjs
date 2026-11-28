@@ -40,9 +40,9 @@ import { stopPausedRun, StopPausedError } from '../src/core/stop-paused.mjs';
 import {
   listPipelines, readPipeline, listAllPipelines, readPipelineByKey,
   enrichPipelinesPr, reconcileStaleRunning, foreignActiveWorkspaceRuns, readPipelineForResume, persistPrState, readPrState,
-  readRunLogText, readRunArtifactText, countPipelines, runRootSweepLookups, legacySweepLookups, slugify, newPipelineId,
+  readRunLogText, readRunArtifactText, countPipelines, isTestPipeline, runRootSweepLookups, legacySweepLookups, slugify, newPipelineId,
   listArtifacts, listRunArtifacts, lookupPipelineRow, findPipelineRowById, readPipelineStateById, resolveIndexedArtifact, resolveIndexedArtifactForRow,
-  folderApplyRetainFor,
+  folderApplyRetainFor, bareWorkspaceKey,
   resolveIndexedArtifactFileForRow, openArtifactUnder, readPromptFile, runDirForRow, recordArtifact, appendAudit,
   persistMemberPrState, readMemberPrStates, readPipelineExtras,
   checkoutRecordsFor, retainedWorkFor, runEngineOfRow, folderFacts, readRunResultsForRow,
@@ -50,7 +50,8 @@ import {
 import { FolderApplyError, folderMemberTarget, readFolderChanges, planFolderApply, applyFolderChanges, discardFolderChanges, releaseFolderCopy } from '../src/core/folder-apply.mjs';
 import { releaseFolderMember } from '../src/core/folder-members.mjs';
 import { readChangesFile, readRegularText, checkFolderSize } from '../src/core/folder-copy.mjs';
-import { mimeForPath, viewerKindFor } from '../src/shared/artifact-kinds.mjs';
+import { mimeForPath, viewerKindFor, isOfficePath } from '../src/shared/artifact-kinds.mjs';
+import { officePdf, OfficePreviewError, OFFICE_LIMITS } from '../src/core/office-preview.mjs';
 import { attachmentDisposition } from '../src/core/download-filename.mjs';
 import { appendDirection, DIRECTION_MAX_CHARS, DIRECTIONS_KIND, DIRECTIONS_FILE, DIRECTIONS_CLOSED } from '../src/core/directions.mjs';
 import { DIFF_PATCH_FILE } from '../src/core/results.mjs';
@@ -108,9 +109,11 @@ import {
   syncDefaults, setSyncDefaults, assertSyncSettingsInput, DEFAULT_SYNC_SETTINGS,
   networkWaitSettings, assertNetworkWaitInput, setNetworkWait, effectiveNetworkWait,
   runLimits, assertRunLimitsInput, setRunLimits, autoTestWorkers,
-  networkProxySettings, networkProxyEnabled, migrateCorporateProxyFlag,
+  networkProxySettings, networkProxyEnabled, migrateCorporateProxyFlag, tightenSettingsFileMode, primeSettingsVaultIfEnabled,
   keepAwakeEnabled, setKeepAwake, assertKeepAwakeInput, migrateKeepAwakeFlag,
+  chatLinksInPanel, setChatLinksInPanel, assertChatLinksInPanelInput, assertChatSourceBranchInput,
   runEngineSetting, assertRunEngineInput, setRunEngineSetting,
+  assertExecEnvInput, setExecEnvSetting, EXEC_ENV_SETTING_KEYS, assertExecEnvSettingInput, setExecEnvSettingKey,
   stepModelsSetting, assertStepModelsInput, setStepModels, setDesignModels,
   modelRolesSetting, assertModelRolesInput, setModelRoles,
   utilityModelsSetting, assertUtilityModelsInput, setUtilityModels,
@@ -118,7 +121,10 @@ import {
   askEngineSetting, assertAskEngineInput, setAskEngineSetting, askModelsSetting, assertAskModelsInput, setAskModels,
   chatHomePinsFor, setChatHomePinsFor,
 } from '../src/core/settings.mjs';
-import { resolveSetting, resolveAll, writeProjectSettings, assertProjectSettingsPatch, resolveRunEngine, defragSlotPair } from '../src/core/settings-cascade.mjs';
+import { resolveSetting, resolveAll, writeProjectSettings, assertProjectSettingsPatch, resolveRunEngine, runExecEnvOpts, defragSlotPair } from '../src/core/settings-cascade.mjs';
+import { sweepAllBackends } from '../src/core/exec-env/sweep.mjs';
+import { markServerProcess } from '../src/core/exec-env/build.mjs';
+import { branchNeeds, targetsForBody, sourceBranchRefusal } from '../src/core/chat-source-branch-gate.mjs';
 import { resolveNightConfig, validateNightPatch } from '../src/core/night/config.mjs';
 import { effectiveNightConfig, nightLayers } from '../src/core/night/effective.mjs';
 import { readNightDecisions, nightAnsweredSince } from '../src/core/night/store.mjs';
@@ -153,7 +159,7 @@ import {
   renameChatGroup as askRenameChatGroup, addToChatGroup as askAddToChatGroup, removeFromChatGroup as askRemoveFromChatGroup,
   deleteChatGroup as askDeleteChatGroup, chatGroupThreadIds as askChatGroupThreadIds, firstUserText as askFirstUserText,
   snapshotChatGroups as askSnapshotChatGroups, restoreChatGroups as askRestoreChatGroups,
-  ChatGroupError, switchThreadEngine as askSwitchThreadEngine,
+  ChatGroupError, switchThreadEngine as askSwitchThreadEngine, askOutRoot, supersedeRefusal as askSupersedeRefusal, appendSupersedingMessage as askAppendSupersedingMessage,
 } from '../src/core/ask/store.mjs';
 import { isSurfaceMode, turnHelperFlags } from '../src/core/ask/thread-modes.mjs';
 import { CHAT_BUSY, chatBusyReason, chatGroupBusyText } from '../src/shared/chat-busy.mjs';
@@ -167,15 +173,15 @@ import { askCatalog, validateModelEffort, chatEngine as askChatEngineOf, askEven
 import { buildCatalog as askBuildCatalog } from '../src/core/ask/catalog.mjs';
 import {
   buildSystemPrompt as askBuildSystemPrompt, buildComposerSystemPrompt as askBuildComposerSystemPrompt, buildContextHeader as askBuildContextHeader,
-  buildTurnPrompt as askBuildTurnPrompt, buildRestoredPrompt as askBuildRestoredPrompt, renderChatContextPrompt as askRenderChatContextPrompt,
+  buildTurnPrompt as askBuildTurnPrompt, buildRestoredPrompt as askBuildRestoredPrompt, renderChatContextPrompt as askRenderChatContextPrompt, renderAttachedRequirementsPrompt as askRenderAttachedRequirementsPrompt,
   buildHandoffPrompt as askBuildHandoffPrompt, handoffBudgetChars as askHandoffBudgetChars, needsHandoff as askNeedsHandoff,
-  selectInlineAttachments as askSelectInlineAttachments, validateClientContext, buildDesignSystemPrompt,
+  selectInlineAttachments as askSelectInlineAttachments, validateClientContext,
 } from '../src/core/ask/prompt.mjs';
 import { askScriptPromptInput, scriptToolsEnabled, defaultScriptDeps as askScriptDeps } from '../src/core/ask/script-deps.mjs';
 import { applyScriptCard, scriptEventPrompt, scriptNoticeText } from '../src/core/ask/script-approval.mjs';
 import { validateComposerPayload, isComposerCard, composerCardPatch, composerHeaderCard } from '../src/core/ask/composer-payload.mjs';
 import { composerPromptBlock } from '../src/core/ask/composer-deps.mjs';
-import { designPromptBlock } from '../src/core/ask/design-deps.mjs';
+import { designPromptBlock, designPicturesReady } from '../src/core/ask/design-deps.mjs';
 import { validateAttachmentUploads } from '../src/core/attachment-upload.mjs';
 import {
   listAskWorktrees as askListWorktrees,
@@ -223,7 +229,7 @@ import { policyCatalogModels, cachedPolicyHomes } from '../src/core/policy/cache
 import { pickFolderNative, pickAppNative, nativeDialogAvailable } from '../src/core/folder-dialog.mjs';
 import {
   readRemoteAccessConfig, checkRemoteAccessConfig, isRemoteMode, createHostGuard, createIdentityCheck, isInContainer,
-  isThisBox, LOCAL_HOSTNAMES, hostnameOf, createPeerGuard, readRouteGateways,
+  isThisBox, LOCAL_HOSTNAMES, hostnameOf, createPeerGuard, readRouteGateways, watchRelayPeers,
 } from '../src/core/remote-access.mjs';
 import { identityHeaderTrust } from '../src/core/trusted-proxies.mjs';
 import {
@@ -232,7 +238,7 @@ import {
 import { extensionInstallInfo } from '../src/core/extension-package.mjs';
 import { pageOrigin, matchRunningAction } from '../src/core/extension-actions.mjs';
 import { detectDeployment, deploymentFacts } from '../src/core/deployment.mjs';
-import { resolveIdentity, startedByOf, prAttributionFooter, actorOf, isSharedIdentity, byActor } from '../src/core/identity.mjs';
+import { resolveIdentity, startedByOf, actorOf, isSharedIdentity, byActor } from '../src/core/identity.mjs';
 import { withBillTo, currentBillTo, currentOwner } from '../src/core/billing.mjs';
 import { agentIdentity } from '../src/core/agent-user.mjs';
 import { spawn } from 'node:child_process';
@@ -251,6 +257,14 @@ import { detectBuiltins, builtinLaunch, revealLaunch, copyCommandText, findOnPat
 import { buildLauncherCommand, launchAndWatch, installedLaunchers, launcherExamples, launcherWarning, lineForPickedApp } from '../src/core/actions/launcher.mjs';
 import { assertNoRawCommand, normalizeStacks, memberAliases, SETUP_ACTION_ID, ActionConfigError } from '../src/core/actions/model.mjs';
 import { parsePortRange } from '../src/core/actions/ports.mjs';
+import { createPreviewProxy, createPreviewTokens, portRefusal, previewPrefix, sendPreviewNote } from '../src/core/preview-proxy.mjs';
+import { createToolTabsMirror, tabScope, isTabScope } from '../src/core/tool-tabs-mirror.mjs';
+import { createTabTools, modelPortRefusal, TabToolError } from '../src/core/tab-tools.mjs';
+import { createChatLinks, ChatLinkError } from '../src/core/chat-links.mjs';
+import { createFrameCheck } from '../src/core/frame-check.mjs';
+import { FILE_REFS_MAX, FILE_PATH_MAX } from '../src/shared/file-refs.mjs';
+import { createPageCapture } from '../src/core/page-capture.mjs';
+import { detectDevServer, devServerAction } from '../src/core/dev-server.mjs';
 import { checkoutRun, checkoutRunUnderLock, discardCheckout, membersOfRow, checkoutPathFor, setSetupState, markInterruptedSetups,
   enforceCheckoutCap, releaseKeptCheckouts, updateBranchRecords, withRunLock, freeBranchCheckout, canon } from '../src/core/checkout.mjs';
 import { checkRunBase, settleResolutions, updateRunBranch, pickBaseMember, baseMembersOfRow, assertFinishedRow, assertNotResolving,
@@ -265,6 +279,8 @@ import {
 } from '../src/core/platform-heartbeat.mjs';
 import { freeDailyStatus } from '../src/core/openrouter-free.mjs';
 import { checkBrokerAtBoot } from '../src/core/broker-boot.mjs';
+import { secretFileRefusals } from '../src/core/secret-files.mjs';
+import { sealGithubAppKey } from '../src/core/github-app.mjs';
 import { modelSlot, missingCredentials, describeMissing, workflowNeedsModel } from '../src/core/broker-routing.mjs';
 import { syncPluginSlots } from '../src/core/plugin-broker-slots.mjs';
 import { planClone, cloneProject, CloneError } from '../src/core/clone-project.mjs';
@@ -304,7 +320,7 @@ import { detectSetup, defaultProbes } from '../src/core/setup/detect.mjs';
 import { teamSetupState, buildTeamSetup, SHARE_SETTING_KEYS } from '../src/core/setup/team-file.mjs';
 import { planSetupApply, commitSetupPlan, runSetupSteps, SetupFieldError, SetupConflictError } from '../src/core/setup/apply.mjs';
 import {
-  DEFAULT_UI_PORT, UI_HEALTH_NAME, UI_TOKEN_HEADER, newUiToken, writeUiInstance, removeUiInstance, uiUrl, keepIdleConnections,
+  DEFAULT_UI_PORT, UI_HEALTH_NAME, UI_TOKEN_HEADER, newUiToken, writeUiInstance, removeUiInstance, uiUrl, keepIdleConnections, probeUi,
 } from '../src/core/ui-instance.mjs';
 import { validateGuardrails } from '../src/core/guardrails.mjs';
 import {
@@ -351,10 +367,14 @@ import { chatScopeOf, withChatScope, sameScope, scopeBody, targetInScope, scopeR
 import { hostAllowed as askHostAllowed } from '../src/core/web-allowlist.mjs';
 import { registryPortsFn } from '../src/core/graph/registry-ports.mjs';
 import { sweepV1Runs, V1_RUN_RETIRED, getDb } from '../src/core/db.mjs';
+import { isRealRun } from '../src/core/real-run.mjs';
 import {
   registerRequirementsRoutes, requirementsChangeNotifier, REQUIREMENTS_UPLOAD_ROUTES, REQUIREMENTS_UPLOAD_JSON_LIMIT, requirementsUploadSlots,
+  STATUS as REQUIREMENTS_STATUS,
 } from '../src/core/requirements/routes.mjs';
-import { createRunEventHook } from '../src/core/requirements/start.mjs';
+import { workflowTestOf, tryStartRefusal, tryRunOptions, holdTryOrch, recoverTestsAtBoot, sweepTestCopiesAtBoot, TRY_NEVER_SHIPS_TEXT, TRY_NEEDS_GIT_TEXT, TEST_TRY_PAUSE_TEXT, TEST_TRY_RESUME_TEXT } from '../src/core/workflow-tests/start.mjs';
+import { resolveRunAttachments, composeAttachedPrompt } from '../src/core/requirements/attach.mjs';
+import { createRunEventHook, createRunSummary } from '../src/core/requirements/start.mjs';
 import { recoverInterrupted as recoverRequirements, requirementsModel, DEFAULT_INTERVIEW_EFFORT } from '../src/core/requirements/interview.mjs';
 import { recoverBriefs } from '../src/core/requirements/brief-job.mjs';
 import { recoverAttachmentReads, sweepReadFolders, sweepTempBodies, withStagedRunFiles } from '../src/core/requirements/attachment-job.mjs';
@@ -372,7 +392,7 @@ import { createDesignChatActions } from '../src/core/design/chat-actions.mjs';
 import { cardStart, createSoundCards } from '../src/core/design/sound-cards.mjs';
 import { stageDesignKit } from '../src/core/design/kit.mjs';
 import { designWorkDir } from '../src/core/design/paths.mjs';
-import { designIdForThread } from '../src/core/design/chat-thread.mjs';
+import { designIdForThread, designToolFolder } from '../src/core/design/chat-thread.mjs';
 import { listVersions, restoreVersion, snapshotVersion } from '../src/core/design/versions.mjs';
 import { drainTimeoutMs, autoResumeMode, autoResumeCandidates, DRAIN_ACTIVE_STATUSES } from '../src/core/drain.mjs';
 import { exportWorkflow, exportWorkflowPlugin, ON_CONFLICT_MODES, RESOLUTION_CHOICES } from '../src/core/workflow-export.mjs';
@@ -400,6 +420,7 @@ import {
 } from '../src/core/project-sync.mjs';
 import { getReadiness, reevaluateReadiness, reevaluateAllReadiness, evaluateAddedProject, watchReadiness, readinessAfterSettingsPatch } from '../src/core/repo-readiness/projects.mjs';
 import { mapWithCap, fanoutCap } from '../src/core/fanout.mjs';
+import { runSyncOpts, syncPrecheck } from '../src/core/sync-before-run.mjs';   // Sync before run: per-member options and the start's precheck
 import { hasGh, pushBranch, createPr, createIssue, prMergeable, listRemotes, listRemoteBranches, prBaseBranch, sameRepo, readPrBody, editPrBody, branchPushedTo, branchTips, tipsRelation,
   prProviderFor, prHostsAvailable, anyPrHost, issueClosingLine, parseGithubIssueUrl,
   prWatchSnapshot, prChecks, prWatchJobLog, prWatchRerun, prWatchReply, prWatchComment, commitSubjects, checkConflictMerge,
@@ -446,14 +467,16 @@ import {
 } from '../src/core/graph/builtin-workflows.mjs';
 import { latestChecklist, checklistMarkdown, CHECKLIST_PR_MARKER } from '../src/shared/shape/review-checklist.mjs';
 import { attachRoleReviews } from '../src/shared/shape/role-review.mjs';
-import { resolveShapeRequest, PLAN_ASK_KIND, planFileOf } from '../src/core/shape/run.mjs';
+import { resolveShapeStart, PLAN_ASK_KIND, planFileOf } from '../src/core/shape/run.mjs';
 import { savePlanToCheckout } from '../src/core/shape/save.mjs';
+import { shaperSmallRunsOn } from '../src/core/shape/small-runs.mjs';
 import { featureView, currentFeatureId, featureOfPipeline, featuresOfTickets, cancelRest, resumeFeature,
   rechainWaiting, replanRest, setApproveEach, recordShapePlan, listShapePlans, chainFeature,
   sliceOfPipeline, slicePrPreamble, featureShipSuggestion, recordSliceDraft, recordShip, clearShip, featureShipInput,
-  liveSliceFrom, shaperCard, featureThread, addFeatureNote, appendFeatureRun, liveRoundOf, acceptanceRefusal, featureHoldsTicket } from '../src/core/shape/features.mjs';
+  liveSliceFrom, liveSliceResuming, shaperCard, featureThread, addFeatureNote, appendFeatureRun, liveRoundOf, acceptanceRefusal, featureHoldsTicket, chatShipCardOffered, stackedPrBase, shipOrder, sliceNeedsPr, isSlicePreambleLine } from '../src/core/shape/features.mjs';
+import { smallRunsChainGate, sliceFireStart, sliceCombineGate, oneShipCheck, shipHeadRow, shipHeadBase, recordSettledFigures, recordShipCommit, shipCover, shipStopped, SHIPPING, featureShipping, roundWhileShipping, oneShipRaced, createHeldStops, featureOfAnyPipeline, holdAfterSetupClash, resumeTakeInVerdict, whereToAnswerOf } from '../src/core/shape/chain.mjs';
 import { roundsOf, roundOrigin, nextRound, setRoundOutcome } from '../src/core/shape/rounds.mjs';
-import { changesCard, applyChanges, applyRoute, landingFacts, landingFactsOfFeature, shapeToolCheck, threadWork, shapeThreadFacts } from '../src/core/shape/changes.mjs';
+import { changesCard, applyChanges, applyRoute, landingFacts, landingFactsOfFeature, shapeToolCheck, threadWork, shapeThreadFacts, createRequirementChanges } from '../src/core/shape/changes.mjs';
 import { defaultShapeToolDeps } from '../src/core/ask/shape-tool-deps.mjs';
 import { routeCardVerb, changesCardVerb } from '../src/shared/shape/route.mjs';
 import { scanRunPrompt, scanRunTitle, createWorkspaceWithHomes, resolveScanModels } from '../src/core/workspace-scan-run.mjs';
@@ -469,6 +492,7 @@ import { autoFillTags } from '../src/shared/cost-tag-suggest.mjs';
 import { dimensionsForTarget, allTagDimensions, applyTagRules, teamTagPolicy, prefillSources } from '../src/core/tag-dimensions.mjs';
 import { generateOverview } from '../src/core/overview-agent.mjs';
 import { generatePrDescription, resolvePrDescriptionModel, PR_BODY_MAX } from '../src/core/pr-description.mjs';
+import { triagePrComment } from '../src/core/pr-comment-triage.mjs';
 import { projectKey, PROJECT_KEY_RE } from '../src/core/store.mjs';
 import { runProjectDir, noProjectWorkDir, isNoProjectWorkDir, isNoProjectKey, NO_PROJECT_KEY } from '../src/core/store.mjs';   // P3 — its own line: test/api-memory.test.mjs pins the one above
 import { WORK_ARTIFACT_KIND } from '../src/core/no-project-work.mjs';
@@ -490,7 +514,7 @@ import {
 import { memoryCaps } from '../src/core/settings.mjs';
 import { onboardingPrefs, setOnboardingPrefs } from '../src/core/settings.mjs';
 import { settingsErrorReply, asSettingsField } from '../src/core/settings-errors.mjs';
-import { configuredClaudeBin, onboardingStatus } from '../src/core/onboarding.mjs';   // a THIRD settings import line (the two blocks above are unrelated readers)
+import { configuredClaudeBin, ensureSetupMarker, onboardingStatus } from '../src/core/onboarding.mjs';   // a THIRD settings import line (the two blocks above are unrelated readers)
 import { probeClaudeAuth, CLAUDE_SIGNED_OUT_CODE, CLAUDE_SIGNED_OUT_MESSAGE } from '../src/core/preflight.mjs';
 import { failedBecauseSignedOut, claudeChatSignedOut, claudeRunSignedOut } from '../src/core/claude-auth.mjs';
 import { createAgentGen, resolveAgentGenModel } from '../src/core/agent-gen.mjs';
@@ -534,14 +558,14 @@ import { TokenBucket } from '../src/core/chat/rate-limiter.mjs';
 import { renderTest } from '../src/core/chat/renderers.mjs';
 import { readPluginsLock, pluginCurrentDir } from '../src/core/plugins-lock.mjs';
 import { normalizeManifest, validatePluginDir, PLUGIN_NAME_RE as MANIFEST_PLUGIN_NAME_RE } from '../src/core/plugin-manifest.mjs';
-import { listTaskSources, retryWriteback, resolveTaskInput, sourcePlaceholderTitle } from '../src/core/sources.mjs';
+import { announcePrOpened, listTaskSources, retryWriteback, resolveTaskInput, sourcePlaceholderTitle } from '../src/core/sources.mjs';
 import {
   createTicket, getTicket, listTickets, updateTicket, cancelTicket, requestRunNow, setTicketPipeline,
   createSchedule, getSchedule, listSchedules, updateSchedule, pauseSchedule, resumeSchedule, skipNext,
   runScheduleNow, deleteSchedule, cancelForTarget, dependentsOfWorkflow, runDueTickets, recordOutcome,
   recoverScheduler, purgeScheduler, scheduleCounts, scheduleStageDir, scheduleSignature,
   resolveAfterRef, resumeWaitError, predecessorState, previousBranchesOf, dependentsOfRun, AFTER_POLICIES, afterRefOf,
-  chainBaseBranchesOf, stackedPrBaseOf, resumeTicketsFor, cancelResumeTicketsFor, inheritedTagsAtCreation, runChains,
+  chainBaseBranchesOf, resumeTicketsFor, cancelResumeTicketsFor, inheritedTagsAtCreation, runChains,
 } from '../src/core/scheduler.mjs';
 import {
   addNotification, onNotification, listNotifications, unreadCount, latestNotificationId, markRead, markAllRead, purgeNotifications,
@@ -585,11 +609,13 @@ import * as skClone from '../src/core/clone-project.mjs';
 import { HLJS_GRAMMAR_IDS } from './public/hljs-loader.mjs';
 import { useEnvProxy, reinstallEnvProxy, proxyNotice } from '../src/core/env-proxy.mjs';
 import { startLiveEgress, egressNotice, egressSummary } from '../src/core/egress-policy.mjs';
+import { sealEgressSecret } from '../src/core/egress-sidecar-client.mjs';
+import { startSidecarBoot } from '../src/core/egress-sidecar-boot.mjs';
 import { detectSystemProxy } from '../src/core/system-proxy.mjs';
 import { saveProxyLogin, clearProxyLogin, parseAccount, ProxyLoginError, upstreamEnv, savedLoginRefusal } from '../src/core/proxy-credentials.mjs';
 import { createProxyHost, PROXY_AGENT_TEXT } from '../src/core/proxy-host.mjs';
 import { applyProxyChange, validateProxyChange, validateProxyFlagOn } from '../src/core/ask/proxy-deps.mjs';
-import { proxyEventPrompt, proxyNoticeText } from '../src/core/ask/proxy-proposal.mjs';
+import { proxyEventPrompt, proxyNoticeText } from '../src/core/ask/proxy-proposal.mjs'; import { envEventPrompt, envNoticeText } from '../src/core/ask/env-proposal.mjs'; import { askSecurityFacts } from '../src/core/ask/security-deps.mjs';
 
 // ── node:sqlite runtime guard + warning filter ──────────────────────────────────
 // Drop ONLY the one-time ExperimentalWarning emitted by node:sqlite (the module is
@@ -600,7 +626,7 @@ import { proxyEventPrompt, proxyNoticeText } from '../src/core/ask/proxy-proposa
 // printer no longer fires (a bare listener would NOT suppress the warning and would
 // double-print every OTHER warning), then attach our single filtering listener.
 // The credential broker's secret leaves process.env before anything can spawn: no child inherits it.
-sealBrokerSecret();
+sealBrokerSecret(); sealEgressSecret(); sealGithubAppKey();   // and the egress sidecar's, and the GitHub App key's (read once)
 process.removeAllListeners('warning');
 process.on('warning', (w) => {
   if (w && w.name === 'ExperimentalWarning' && /SQLite/i.test(w.message)) return;
@@ -613,6 +639,9 @@ preflightNode();
 // (express, ws and htmlparser2 are imported statically above, so a missing one of
 // those still fails at load, before this line.)
 preflightDeps();
+// This process is the worca server: the only one that may build project environments (it holds the backend
+// keys; plans/e2b-execution-design.md §18). A test that imports this module acts as the server.
+markServerProcess();
 // CONTRACT §0: one git answer before anything can spawn git — at import, so every process that loads this module has it:
 // `npm start` / `worca ui`, and the CDP proofs and screenshot tools (tools/verify-*-cdp.mjs) that import the server and call
 // listen themselves. WORCA_GIT=0|1 answers without a probe (the suite runs with 1).
@@ -717,6 +746,10 @@ const ASK_VENDOR_ASSETS = {
   marked: resolveEsmAsset('marked'),
   dompurify: resolveEsmAsset('dompurify'),
 };
+// The Office preview fallback's UMD builds (artifacts/office-lite.mjs), resolved through the package folders: docx-preview's
+// exports map hides dist/*.min.js from a subpath resolve. A missing package leaves its route unregistered (the 404 tail).
+const officeVendorFile = (spec, rel) => { const d = resolveVendorDir(spec, undefined, undefined, 'office preview'); return d ? path.join(d, rel) : null; };
+const OFFICE_VENDOR_ASSETS = { jszip: officeVendorFile('jszip', '../dist/jszip.min.js'), docx: officeVendorFile('docx-preview', 'docx-preview.min.js') };
 
 // Ask Worca voice mode (docs/speech.md): the Silero VAD (@ricky0123/vad-web) and
 // its onnxruntime-web wasm runtime, served from node_modules like marked above.
@@ -764,7 +797,8 @@ const DEPLOYMENT = detectDeployment(process.env, { remoteMode: REMOTE_MODE });
 // In the image, a published port reaches worca from the container's gateway (G4).
 const PEER_GATEWAYS = DEPLOYMENT === 'container' ? readRouteGateways() : [];
 const REMOTE_ACCESS_CHECK = checkRemoteAccessConfig(REMOTE_ACCESS, { bindHost: HOST, gateways: PEER_GATEWAYS });
-const isTrustedPeer = createPeerGuard(REMOTE_ACCESS, { gateways: PEER_GATEWAYS });
+const isTrustedPeer = createPeerGuard(REMOTE_ACCESS, { gateways: PEER_GATEWAYS,
+  relays: watchRelayPeers(DEPLOYMENT === 'container' && !REMOTE_MODE ? process.env : {}) });   // the hardened box's UI relay
 const hostGuard = createHostGuard(REMOTE_ACCESS.allowedHosts);
 const isLocalRequest = (req) => isTrustedPeer(req) && hostGuard(req);
 // X1: WORCA_IDENTITY_HEADER names a person (Ask thread owner, broker bill-to, startedBy) only when the identity
@@ -841,7 +875,7 @@ async function requestIdentity(req) {
  *   pendingQuestion: any
  * }>}
  */
-const runs = new Map();
+const runs = new Map(); const reqChanges = createRequirementChanges({ runs, stopRun, stopPausedPipeline, schedulerTick, broadcastFeature, liveSliceOf }); const heldStops = createHeldStops({ runs, liveSliceOf, broadcastFeature, resolvePending, applyChange: reqChanges.applyStop, now: Date.now, resume: (pid, o) => resumeRun(pid, o), refuse: (status, body) => new ResumeError(status, body), audit: (pid, text, by) => appendAuditById(pid, text, { actor: by }), resumeTakeIn: async (pid) => { const s = readPipelineForResume(pid); return !s || s.row.target === 'workspace' ? { status: 'none', skipped: [] } : resumeTakeInVerdict(await runProjectDir(s.row, projectDirForKey), pid); }, takeIn: (entry) => (typeof entry.orch?.takeInBeforeAnswer === 'function' ? entry.orch.takeInBeforeAnswer() : { ok: true, merged: [] }) }); const deliverHeld = () => heldStops.deliver().catch((err) => console.error(`[worca-ui] held stop delivery failed: ${err?.message || err}`));   // small runs C3 (D9), C4 (D11, D15); slice 3: the finished same-base work first
 
 // Ids of runs genuinely live in THIS process (non-terminal entries in the runs Map).
 // Passed to reconcileStaleRunning so a same-process run is never relabeled. Both the
@@ -867,7 +901,7 @@ function liveRunIds() {
 // engine AND for the v2 shim until the graph cut-over retires it.
 // `artifact-gone` is this branch's: an indexed artifact whose file the run later
 // removed, so the client can drop the row instead of leaving one that 404s.
-const EVENT_NAMES = ['exec', 'token', 'log', 'question', 'artifact', 'artifact-gone', 'state', 'done', 'error', 'subagent', 'stepskills', 'stepgraphify', 'title', 'night-decision', 'recovery-auto', 'sessionHost'];
+const EVENT_NAMES = ['exec', 'token', 'log', 'question', 'artifact', 'artifact-gone', 'state', 'done', 'error', 'subagent', 'stepskills', 'stepgraphify', 'title', 'night-decision', 'recovery-auto', 'sessionHost', 'shape-prototype'];
 // The agentgen-* WS family (Agent Platform, Phase 2): a NEW family in the SAME
 // runs Map. createAgentGen emits many agentgen-progress then exactly one terminal
 // agentgen-done OR agentgen-error. (The scan-* family is gone: dev made a
@@ -885,12 +919,12 @@ const FINISHED_RUN_CAP = 20;   // finished (done / stopped / error) pipeline ent
 /** A run ended: its buffered `state` frames go (each is a full deep copy; replayEntry sends a fresh snapshot after
  *  the replay), and beyond FINISHED_RUN_CAP the oldest finished pipeline entries leave the runs Map, as a restart
  *  would: History, the run page and every route read a finished run from its saved row. Paused and interrupted
- *  entries are never evicted (they resume from here). */
+ *  entries are never evicted (they resume from here), nor is one whose teardown still runs (archive waits on it). */
 function settleRunEntry(entry) {
   entry.events = entry.events.filter((ev) => ev.type !== 'state');
   entry.endedAt = Date.now();
   const finished = [...runs.values()].filter((r) => r.orch && (r.kind == null || r.kind === 'run' || r.kind === 'workspace-run')
-    && ['done', 'stopped', 'error'].includes(r.status)).sort((a, b) => (a.endedAt || 0) - (b.endedAt || 0));
+    && ['done', 'stopped', 'error'].includes(r.status) && r.settled).sort((a, b) => (a.endedAt || 0) - (b.endedAt || 0));
   for (const r of finished.slice(0, Math.max(0, finished.length - FINISHED_RUN_CAP))) runs.delete(r.id);
 }
 
@@ -985,8 +1019,10 @@ function extensionSocketAuth(req) {
   return extensionPairing.verify(origin, offered.find((p) => p.startsWith(TOKEN_PREFIX)) || null) || 'refuse';
 }
 
+// noServer: one 'upgrade' listener below routes /ws here and /preview/ to the Browser tab's proxy (issue 1064); with
+// `server`, ws answered every other upgrade path with 400 itself.
 const wss = new WebSocketServer({
-  server,
+  noServer: true,
   path: '/ws',
   verifyClient: (info, done) => {
     if (!isTrustedPeer(info.req)) return done(false, 403);   // G4: before the extension gate, as for HTTP
@@ -1015,6 +1051,16 @@ const wss = new WebSocketServer({
 // stack trace; the http server's own handler (isMain below) is the one that
 // reports it, so this side of the pair only has to not throw.
 wss.on('error', () => {});
+server.on('upgrade', (req, socket, head) => {
+  // Node takes the http server's 'error' listener off an upgraded socket; ws's handleUpgrade adds its own, the 400 below
+  // and a gate's refusal in upgradePreview would not: a client that resets mid-answer (EPIPE) would end Worca.
+  socket.on('error', () => socket.destroy());
+  const path = String(req.url || '').split('?')[0];
+  if (path === '/ws') { wss.handleUpgrade(req, socket, head, (ws) => wss.emit('connection', ws, req)); return; }
+  // No unhandledRejection handler here (F29): a throw inside the upgrade path must end only this socket.
+  if (path.startsWith('/preview/')) { upgradePreview(req, socket, head).catch(() => socket.destroy()); return; }
+  socket.end('HTTP/1.1 400 Bad Request\r\nConnection: close\r\nContent-Length: 0\r\n\r\n', () => socket.destroy());
+});
 
 /** All currently connected sockets. */
 const sockets = new Set();
@@ -1055,6 +1101,8 @@ heartbeat.unref();
   const httpClose = server.close.bind(server);
   server.close = (cb) => {
     for (const ws of sockets) { try { ws.terminate(); } catch { /* already gone */ } }
+    closePreviewSockets();   // proxied dev-server WebSockets are upgraded sockets too (issue 1064)
+    void pageCapture.close();   // the headless Chrome of the tab tools (issue 1064 slice 3)
     return httpClose(cb);
   };
 }
@@ -1273,7 +1321,7 @@ function askFrameOwner(obj) {
 
 // Browser extension: a surface thread's frames (thread-modes.mjs: a composer or a design chat) never reach an extension
 // socket — they would leak its id and streamed text. A mode is fixed at creation and ids are random: never a stale cache.
-const ASK_MODE_CACHE = new Map();   // threadId -> the thread's raw mode ('composer', 'design') | null
+const ASK_MODE_CACHE = new Map();   // threadId -> the thread's raw mode ('composer') | null
 function askFrameComposer(obj) {
   if (!obj || typeof obj.threadId !== 'string') return false;
   if (ASK_MODE_CACHE.has(obj.threadId)) return isSurfaceMode(ASK_MODE_CACHE.get(obj.threadId));
@@ -1302,7 +1350,16 @@ policyEvents.on('changed', (e) => emitChanged('team-policy-changed', e && e.acti
 projectSyncEvents.on('changed', (e) => emitChanged('project-sync-changed', e && e.projectKey ? e.projectKey : null));
 watchReadiness({ projectSyncEvents, policyEvents, emitChanged, broadcast });
 // D6: every open tab rewrites <html data-flags> and #flag-gates, without a reload.
-flagEvents.on('changed', (flags) => broadcast({ type: 'flags', flags }));
+// Vault in use (flag on, or a vault file left): prime the key (single-flight); only the off-to-on edge then migrates.
+let vaultWasOn = flagEnabled('secretVault');
+flagEvents.on('changed', (flags) => {
+  broadcast({ type: 'flags', flags });
+  const turnedOn = !!flags.secretVault && !vaultWasOn;
+  vaultWasOn = !!flags.secretVault;
+  if (!flags.secretVault && !vaultInUse()) return;
+  const primed = primeSettingsVaultIfEnabled().catch(() => {});
+  if (turnedOn) primed.then(() => migrateSecretsIfEnabled({ reason: 'flag-on', deployment: DEPLOYMENT })).then(noteStoreCheck).catch(() => {});
+});
 
 // Every comment mutation in THIS process (the REST routes below) pokes the open
 // Diff tabs. A poke carries ids only — no payload, so it is idempotent and has no
@@ -1343,6 +1400,7 @@ function bufferEvent(entry, event) {
   if (entry.events.length > MAX_BUFFER) entry.events.splice(0, entry.events.length - MAX_BUFFER);
   return tagged;
 }
+const broadcastFor = (entry, frame) => { if (!entry.isTest) broadcast(frame); };   // D21: a test try's frames reach no tab (app.js upserts a run per runId)
 
 // Clear an entry's active pending question and tell EVERY connected client to drop
 // its clarify/gate card — not just the tab that answered. A second tab's post-answer
@@ -1356,7 +1414,7 @@ function resolvePending(entry, { id = null, reason = 'resolved' } = {}) {
   const pq = entry && entry.pendingQuestion;
   if (!pq || (id && pq.id !== id)) return false;
   entry.pendingQuestion = null;
-  broadcast(bufferEvent(entry, { type: 'question-resolved', id: pq.id, reason }));
+  broadcastFor(entry, bufferEvent(entry, { type: 'question-resolved', id: pq.id, reason }));   // D21: the runner answers a try's questions
   syncKeepAwake();
   return true;
 }
@@ -1404,7 +1462,7 @@ function summarizeRuns() {
   // plumbing only — leaving it here puts "bench: <key>" in every hello and the
   // client's liveRuns() (which does NOT filter by kind) raises the rail's
   // Running badge over an empty Running list.
-  return [...runs.values()].filter((r) => r.kind !== 'scriptbench' && r.kind !== 'action').map((r) => ({
+  return [...runs.values()].filter((r) => r.kind !== 'scriptbench' && r.kind !== 'action' && !r.isTest).map((r) => ({
     runId: r.id,
     stepper: r.orch?.state?.stepper ?? null,
     pipelineId: r.pipelineId || null,
@@ -1423,8 +1481,15 @@ function summarizeRuns() {
     // A usage limit's own engine (engine-switch.mjs), and the run's engine: a reload keeps
     // the run page's "Resume on <other engine>" offer.
     limitEngine: r.limitEngine || null,
-    limitResetAt: r.limitResetAt || null,
+    limitResetAt: r.limitResetAt || null, modelConfirm: r.orch?.state?.modelConfirm || null, limitScope: r.orch?.state?.limitScope || null, limitModel: r.orch?.state?.limitModel || null,   // #1450
     runEngine: r.orch?.state?.runEngine || null,
+    ...(Array.isArray(r.orch?.state?.runEngines) ? { runEngines: r.orch.state.runEngines } : {}),
+    // Where the run executes (e2b mode only) and whether it still waits for a sandbox slot.
+    ...(r.orch?.state?.execEnv ? { execEnv: r.orch.state.execEnv, execEnvWaiting: !!r.orch.state.execEnvWaiting, ...(r.orch.state.execEnvPreparing ? { execEnvPreparing: r.orch.state.execEnvPreparing } : {}),
+      // While a question waits: when the parked sandbox is released (the run page's "Answer by" line).
+      ...(r.orch.state.execEnvWaitUntil ? { execEnvWaitUntil: r.orch.state.execEnvWaitUntil } : {}),
+      // Files from the sandbox to review before running them here (the run page's banner).
+      ...(Array.isArray(r.orch.state.execEnvReview) ? { execEnvReview: r.orch.state.execEnvReview } : {}) } : {}),
     startedAt: r.startedAt,
     startedBy: r.startedBy || null,
     // Who last stopped / paused / resumed it ({ kind, by, at }), or null.
@@ -1500,7 +1565,7 @@ function wireRun(entry) {
   // Chat notifications ride the same per-run subscription (design §4.5): every
   // creation site that wires a run gets chat fan-out for free. Scans/agent-gens
   // use their own wire* helpers and are deliberately not notified.
-  if ((entry.kind || 'run') === 'run' || entry.kind === 'workspace-run') {
+  if (((entry.kind || 'run') === 'run' || entry.kind === 'workspace-run') && !entry.isTest) {   // D21: no chat notifications for a test try
     try { chatNotifier.attach(orch, { runId: id, entry }); }
     catch (err) { console.error(`[worca-ui] chat notifier attach failed: ${err && err.message ? err.message : err}`); }
   }
@@ -1511,7 +1576,7 @@ function wireRun(entry) {
     // (state.id = pipeline SHORT id, NOT this UUID); tagging the UUID last stops
     // the client spawning a phantom run.
     const tagged = bufferEvent(entry, event);
-    broadcast(tagged);
+    if (!entry.isTest) broadcast(tagged);   // D21: a tab upserts a run for any frame with a runId (app.js:1995); a try sends none
     return tagged;
   };
 
@@ -1602,10 +1667,10 @@ function wireRun(entry) {
       // The entry's pipeline id finds the start of a resumed run (a new UUID, the same pipeline).
       requirementsRunEvent(id, name, payload, entry.pipelineId || null);   // never throws
       if (entry.ticketId && (name === 'done' || name === 'error') && !entry._outcomeRecorded) {
-        // Scheduled runs: report how the fired run ended (feed item, failure streak).
-        // 'error' is the launch-error channel — a failure before the pipeline row exists.
+        // Scheduled runs: report how the fired run ended (feed item, failure streak). 'error' is the launch-error channel.
         entry._outcomeRecorded = true;
-        try {
+        const held = name === 'error' && payload?.clash ? holdAfterSetupClash({ ticketId: entry.ticketId, pipelineId: entry.pipelineId, clash: payload.clash }) : null;   // A3: a setup clash holds it
+        if (held) { entry.setupClashHeld = true; broadcastFeature(held.featureId); emitChanged('schedules-changed', 'outcome'); } else try {
           recordOutcome(entry.ticketId, {
             status: name === 'error' ? 'error' : ((payload && payload.status) || 'done'),
             pipelineId: entry.pipelineId || null,
@@ -1632,7 +1697,7 @@ function wireRun(entry) {
           reason: 'the run was resumed or stopped by hand',
         });
       }
-      if (name === 'done' && entry.status === 'paused' && payload && payload.limitResetAt) {
+      if (name === 'done' && entry.status === 'paused' && payload && payload.limitResetAt && !entry.isTest) {   // no resume ticket for a try
         entry._limitResumeP = maybeScheduleLimitResume(entry, payload);   // never rejects
       }
       if (name === 'title' && payload && typeof payload.title === 'string') {
@@ -1643,12 +1708,12 @@ function wireRun(entry) {
 
       // F49: the feature card shows each slice's live state (liveSliceOf). Reaching or answering a plan ask, or
       // Clarify's questions, changes no status, so key on everything the view reads. Gated and caught (F42).
-      if (orch.runShape?.slice && (name === 'question' || name === 'state' || name === 'exec' || name === 'done')) {
+      if ((orch.runShape?.slice || orch.runShape?.verify) && (name === 'question' || name === 'state' || name === 'exec' || name === 'done')) {
         const pq = entry.pendingQuestion;
         const key = `${entry.status}|${pq ? `${pq.kind}:${pq.id || ''}` : ''}|${orch.state?.shaping?.approved ? 1 : 0}`;
         if (key !== entry._featureKey) {
           entry._featureKey = key;
-          broadcastFeaturesOf(() => [featureOfPipeline(entry.pipelineId)?.featureId].filter(Boolean));
+          deliverHeld(); broadcastFeaturesOf(() => [featureOfAnyPipeline(entry.pipelineId)?.featureId].filter(Boolean));   // C3: delivered as the busy run settles
         }
       }
       // Shaper s5 (D16): a round reports into its origin's card, which gets none of the round's own frames.
@@ -1667,6 +1732,9 @@ function wireRun(entry) {
         } catch (err) { console.error(`[worca-ui] round frame failed: ${err && err.message ? err.message : err}`); }
       }
 
+      // The run-finished message: the client cannot tell a demo or $0 run from a real one, so the done frame says
+      // (additive field). The row is persisted before the harness emits `done`; any other ending is never real.
+      if (name === 'done') event.real = entry.status === 'done' && isRealRun(entry.pipelineId);
       record(event);
       if (name === 'done') settleRunEntry(entry);
       // Only the events that can change status or pendingQuestion; log/token frames are far too
@@ -1923,9 +1991,10 @@ app.use('/design-preview', createPreviewGate({
 }));
 
 app.use((req, res, next) => {
-  if (!req.worcaExtensionRoute && !isLocalRequest(req)) {   // S1 itself is unchanged for every other request
-    return res.status(403).json({ error: HOST_FORBIDDEN });
-  }
+  // A Browser tab's preview page runs in an opaque origin (Origin: null) by design: /preview/ requests are held to the
+  // Host check here and to their per-tab token in the proxy (issue 1064). S1 itself is unchanged for every other request.
+  const previewOk = isPreviewPath(req.path) && previewHostOk(req);
+  if (!previewOk && !req.worcaExtensionRoute && !isLocalRequest(req)) return res.status(403).json({ error: HOST_FORBIDDEN });
   next();
 });
 
@@ -1997,6 +2066,9 @@ app.use((req, res, next) => {
   if (admitThisBoxCaller(req)) return next();
   res.status(403).json({ error: AGENT_CALLER_BLOCKED, code: 'AGENT_CALLER_BLOCKED' });
 });
+// The Browser tab's preview proxy (issue 1064): after the peer, host, identity and agent gates, before any body parser
+// (a proxied POST streams through unread) and the static files.
+app.use((req, res, next) => (isPreviewPath(req.path) ? handlePreview(req, res) : next()));
 
 // Ask threads have an owner (ask_threads.created_by). On a shared deployment (a real per-person
 // sign-in, identity.mjs#isSharedIdentity) a person reaches only their own threads and ownerless
@@ -2117,6 +2189,8 @@ if (ASK_VENDOR_ASSETS.marked) {
 if (ASK_VENDOR_ASSETS.dompurify) {
   app.get('/vendor/dompurify/purify.es.mjs', sendEsmModule(ASK_VENDOR_ASSETS.dompurify));
 }
+if (OFFICE_VENDOR_ASSETS.jszip) app.get('/vendor/jszip/jszip.min.js', sendEsmModule(OFFICE_VENDOR_ASSETS.jszip));
+if (OFFICE_VENDOR_ASSETS.docx) app.get('/vendor/docx-preview/docx-preview.min.js', sendEsmModule(OFFICE_VENDOR_ASSETS.docx));
 for (const { prefix, dir, files } of VOICE_VENDOR) {
   if (!dir) continue;
   for (const [name, type] of Object.entries(files)) {
@@ -2321,8 +2395,8 @@ function nestedInRepoRefusal(res, dir, enc, prefix = '') {
 /**
  * The run body's engine fields (harness bridge §10.4): `engine` names the harness for the
  * pipeline's agent nodes (the CLI's --engine), `allowUnguardedEngine` is the consent that
- * lifts the gate's rule refusals (--allow-unguarded-engine). Both are passed on only for an
- * engine other than Claude, so a default run's options stay exactly as they were.
+ * lifts the gate's rule refusals (--allow-unguarded-engine). `engine` is passed on only for a non-Claude engine; the
+ * consent rides whenever the body sends it (a Claude run's step can be pinned to a harness that needs it).
  * @returns {{ error: string } | { opts: { engine?: string, allowUnguardedEngine?: true } }}
  */
 function runEngineOpts(body, scope = {}) {
@@ -2332,8 +2406,7 @@ function runEngineOpts(body, scope = {}) {
   if (body.engine != null && body.engine !== '' && typeof body.engine !== 'string') return { error: 'engine must be a string' };
   let engine;
   try { engine = selectRunEngine(resolveRunEngine({ explicit: typeof body.engine === 'string' ? body.engine : null, ...scope }).engine); } catch (err) { return { error: err.message }; }
-  if (engine === 'claude') return { opts: {} };
-  return { opts: { engine, ...(body.allowUnguardedEngine === true ? { allowUnguardedEngine: true } : {}) } };
+  return { opts: { ...(engine === 'claude' ? {} : { engine }), ...(body.allowUnguardedEngine === true ? { allowUnguardedEngine: true } : {}) } };
 }
 
 // Single source of truth for path normalization lives in the core registry.
@@ -2367,66 +2440,6 @@ export function buildWorkspaceMembers(projects, branch, sourceByKey = {}) {
     const source = typeof override === 'string' && override.trim() ? override.trim() : branch.source;
     return { ...p, branch: { source, feature: branch.feature } };
   });
-}
-
-/** Per-member opts.sync for createOrchestratorFor (plan §4.3, D2, D14). */
-export function runSyncOpts(members, { allowed, before, policy, scheduled, onDiverged }) {
-  const out = {};
-  for (const m of members) {
-    const s = effectiveSyncSettings(m.projectKey);
-    let resolved, source;
-    if (scheduled) {
-      resolved = onDiverged || (s.onDiverged === 'fail' ? 'fail' : 'origin');       // D2: nobody can answer 'ask'
-      source = onDiverged ? 'schedule' : 'setting';
-    } else if (s.onDiverged === 'origin') {
-      resolved = 'origin'; source = 'setting';                                     // D14: never asks
-    } else if (policy === 'origin' && s.onDiverged !== 'fail') {
-      resolved = 'origin'; source = 'user';                                        // the person chose on the card
-    } else {
-      resolved = 'fail'; source = 'setting';                                       // 'fail', or 'ask' not yet answered
-    }
-    out[m.projectKey] = { enabled: !!(allowed && (before ?? s.beforeRun)), remote: s.remote, onDiverged: resolved, policySource: source };
-  }
-  return { members: out, enabled: Object.values(out).some((x) => x.enabled) };
-}
-
-/**
- * Before an interactive start: fetch (no TTL, 8 s bound) and read each synced member's base.
- * Returns null (start) or { status: 409, body } asking the person once (plan §0.2 C9, D14).
- * A member whose policy already resolves to 'origin' is never asked. No TTL: a Start is an
- * explicit action, so a push that landed inside the 45 s cache (a diverged base the run's own
- * Sync stage would then fail on) or a remote that came back since a failed fetch is seen now.
- */
-export async function syncPrecheck(members, sync) {
-  const rows = await mapWithCap(members, fanoutCap(), async (m) => {
-    const cfg = sync.members[m.projectKey];
-    if (!cfg || !cfg.enabled || !isSafeBranchName(m.source)) return null;
-    const f = await fetchRemote(m.projectDir, { remote: cfg.remote, maxAgeMs: 0, timeoutMs: INTERACTIVE_TIMEOUT_MS });
-    if (!f.ok && (f.kind === 'no-remote' || f.kind === 'bad-remote')) return null;
-    const st = await syncStatus(m.projectDir, { base: m.source, remote: cfg.remote });
-    // Neither a local nor a remote branch (a tag or a SHA): the harness has no branch to sync, so
-    // an offline start from it must not be asked about a failed fetch (D9).
-    if (!st.ok || (!st.hasLocal && !st.hasRemote)) return null;
-    return { m, f, st, cfg, setting: effectiveSyncSettings(m.projectKey).onDiverged };
-  });
-  const hit = rows.filter(Boolean);
-  const view = (r) => ({ projectKey: r.m.projectKey, projectName: r.m.projectName || path.basename(r.m.projectDir), base: r.m.source,
-    remote: r.cfg.remote, ahead: r.st.ahead, behind: r.st.behind, fetchedAt: r.f.fetchedAt || r.st.fetchedAt || null });
-  const diverged = hit.filter((r) => r.st.state === 'diverged' && r.cfg.onDiverged !== 'origin');
-  if (diverged.length) {
-    const d = diverged[0];
-    const forbidden = diverged.some((r) => r.setting === 'fail');     // the project forbids starting from the remote
-    return { status: 409, body: { code: 'sync-diverged', kind: 'diverged', options: forbidden ? ['cancel'] : ['origin', 'cancel'],
-      ...(forbidden ? { forbidden: true } : {}), members: diverged.map(view),
-      error: `${d.m.source} has diverged from ${d.cfg.remote}/${d.m.source} (${d.st.ahead} ahead, ${d.st.behind} behind)` } };
-  }
-  const failed = hit.filter((r) => !r.f.ok);
-  if (failed.length) {
-    const x = failed[0];
-    return { status: 409, body: { code: 'sync-fetch-failed', kind: 'fetch-failed', fetchKind: x.f.kind, options: ['last-fetch', 'cancel'],
-      members: failed.map((r) => ({ ...view(r), fetchKind: r.f.kind })), error: `Could not reach ${x.cfg.remote} (${x.f.kind})` } };
-  }
-  return null;
 }
 
 // Mirror the shared-source option-injection guard (D2) for every override entry.
@@ -2747,8 +2760,15 @@ async function _folderSizeProblem(dir, { name } = {}) {
   return checkFolderSize(dir, { name: name ?? getProjectByPath(dir)?.name });
 }
 
-/** An engine refusal's message on a preset start names the preset (#712). */
-const presetEngineMessage = (presetRow, runEngine, msg) => (presetRow ? `Preset "${presetRow.name}" cannot start: Engine ${runEngine.engine}: ${msg}` : msg);
+/** An engine refusal's message on a preset start names the preset (#712), with no second lead on `engine x (…): …`. */
+const presetEngineMessage = (presetRow, runEngine, msg) => (presetRow ? `Preset "${presetRow.name}" cannot start: ${/^engine /.test(msg) ? '' : `Engine ${runEngine.engine || 'claude'}: `}${msg}` : msg);
+/** A scheduled run's early refusals (engine gate on every harness, then the exec-env preflight): the 409 body, or null. */
+async function scheduledStartRefusal(probe, runEngine, presetRow) {
+  const refusal = await probe.engineStartRefusal();
+  if (refusal) return { error: presetEngineMessage(presetRow, runEngine, engineRefusalFor(refusal.error, 'ui')), code: 'engine-refused', overridable: refusal.overridable, engines: refusal.engines };
+  const execRefusal = probe.execEnvStartRefusal();
+  return execRefusal ? { error: execRefusal, code: 'exec-env-refused' } : null;
+}
 
 const startRunHandler = async (req, res) => {
   // B2: a draining server starts nothing new (the scan arm and the scheduler come through here too).
@@ -2762,6 +2782,8 @@ const startRunHandler = async (req, res) => {
     // Workspace scan (wf_workspace_scan): scanRequest hands the target in-process — a workspace
     // that may not exist yet ({ id, name, projectPaths, description:'' }, D3). Never from HTTP.
     const scanTarget = req._workspaceScan && typeof req._workspaceScan === 'object' ? req._workspaceScan : null;
+    const workflowTest = workflowTestOf(req), tryRefusal = tryStartRefusal(workflowTest, body);   // workflow tests (D20–D23, D42): in-process only, never from HTTP
+    if (tryRefusal) return badRequest(res, tryRefusal);
     const stored = internal && body.internal && typeof body.internal === 'object' ? body.internal : {};
     // Who started it (identity.mjs): this request's resolved identity; a scheduled run keeps the
     // identity of whoever scheduled it (stored with the request, never taken from an HTTP body).
@@ -2841,6 +2863,10 @@ const startRunHandler = async (req, res) => {
         return res.status(409).json({ error: `card is ${found.block.state}` });
       }
       askLink = { threadId: body.askThreadId, cardId: body.askCardId };
+      // The card's Runs in pick (docs/e2b.md): a request with no execEnv key at all comes from a page older than the
+      // field, so the run goes where the card said. The card's own "Default" sends '' and keeps the default.
+      const cardExecEnv = found.block.card && found.block.card.execEnv;
+      if (!Object.hasOwn(body, 'execEnv') && typeof cardExecEnv === 'string' && cardExecEnv) body.execEnv = cardExecEnv;
     }
 
     // Run on the source branch: an explicit boolean, validated before a schedule stores it.
@@ -2870,6 +2896,10 @@ const startRunHandler = async (req, res) => {
       if (!parsed.ok) return badRequest(res, parsed.error);
       sched = parsed;
     }
+
+    // Chat runs: source branch — a chat card's Start/Schedule with no branch is re-checked now (never a fired ticket or a sourceFromPrevious chain), before anything is written.
+    const branchless = askLink && !internal && !sched?.sourceFromPrevious && !body.sourceFromPrevious ? branchNeeds(await targetsForBody(body), body) : [];
+    if (branchless.length) return res.status(400).json(sourceBranchRefusal(branchless, { workspace: !!hasWorkspace }));
 
     // ── Shared resolution (factored BEFORE the target branch, §2.6) ──────────
     // NEW (plugins §7.3): body.source is the task-source descriptor; shape-check
@@ -2902,10 +2932,21 @@ const startRunHandler = async (req, res) => {
       }
     }
 
+    // FEAT-21: attached features: only seqs cross the boundary, re-resolved here from the newest start; before the prompt rule.
+    const attach = await resolveRunAttachments(body, { noProject, hasWorkspace, source },
+      { flagEnabled, resolveProjectDir, projectKey, runSummary: requirementsRunSummary, httpStatus: REQUIREMENTS_STATUS });
+    if (attach.refusal) return res.status(attach.refusal.status).json(attach.refusal.body);
+    const attachedRequirements = attach.attached;
+
     // prompt OR promptMarkdown. promptMarkdown is treated as the prompt text.
-    const prompt = typeof body.prompt === 'string' && body.prompt.trim() ? body.prompt : undefined;
-    const promptMarkdown =
+    let prompt = typeof body.prompt === 'string' && body.prompt.trim() ? body.prompt : undefined;
+    let promptMarkdown =
       typeof body.promptMarkdown === 'string' && body.promptMarkdown.trim() ? body.promptMarkdown : undefined;
+    if (attachedRequirements.length) {
+      if (promptMarkdown) promptMarkdown = composeAttachedPrompt(attach.items, promptMarkdown);
+      else if (prompt) prompt = composeAttachedPrompt(attach.items, prompt);
+      else promptMarkdown = composeAttachedPrompt(attach.items, '');
+    }
     const effectivePrompt = prompt || promptMarkdown;
     if (source && effectivePrompt) return badRequest(res, 'provide source OR prompt/promptMarkdown, not both');
     if (!source && !effectivePrompt) return badRequest(res, 'prompt or promptMarkdown is required');
@@ -2924,7 +2965,7 @@ const startRunHandler = async (req, res) => {
     // plan at run start; here we only normalize + reject an unknown id up front
     // so the client gets a clean 400 instead of a mid-run error event.
     // Shape it first (spec D9/D12): `shape` and the shape workflows.
-    const shapeReq = resolveShapeRequest({ shape: body.shape, workflowId: body.workflowId }, { internal: !!internal });
+    const shapeReq = resolveShapeStart({ shape: body.shape, workflowId: body.workflowId }, { internal: !!internal, person: presetOwner });
     if (!shapeReq.ok) return badRequest(res, shapeReq.error);
     const { shape: askedShape } = shapeReq;
     // L7: a sliced Shape-it-first run chains tickets per slice, and a run without a project cannot be scheduled. So with
@@ -2939,7 +2980,7 @@ const startRunHandler = async (req, res) => {
     // routes it off the row's version.
     let workflowRow;
     try {
-      workflowRow = await assertRunnableWorkflow(workflowId);
+      workflowRow = await assertRunnableWorkflow(workflowId, workflowTest ? { use: workflowTest.use } : {});   // D23: check what runs
     } catch (err) {
       return badRequest(res, err && err.message ? err.message : String(err));
     }
@@ -2996,7 +3037,7 @@ const startRunHandler = async (req, res) => {
     // Enforced tags (D10): fired tickets were checked by fireTicket; system and follow-up starts keep today's behaviour.
     // Their tags are stored data (a ticket's request, a predecessor's or parent's tags, a changes/route card's origin
     // run's tags), so the key:value rule skips them too.
-    const tagExempt = !!internal?.ticket || !!scanTarget || !!req._resolveOf || !!req._prWatchRunId
+    const tagExempt = !!internal?.ticket || !!scanTarget || !!req._resolveOf || !!req._prWatchRunId || !!req._workflowTest   // review I2: a hidden try carries no run tags
       || req._startedBy === 'pr-watch' || !!req._automation || body.workflowId === MEMORY_DEFRAG_WORKFLOW_ID
       || req._cardStart === true;   // Shaper s5 (D19): a run started from a changes/route card; its tags are the origin's stored tags
     let tags = [];
@@ -3048,6 +3089,13 @@ const startRunHandler = async (req, res) => {
       && await claudeRunSignedOut(hasWorkspace ? '' : (resolveProjectDir(body.projectDir) || ''))) {
       return res.status(409).json({ code: CLAUDE_SIGNED_OUT_CODE, error: CLAUDE_SIGNED_OUT_MESSAGE });
     }
+    // Where the run executes (e2b mode): `{}` for a local run, spread at the TOP level of the options.
+    // A Folder project or a run without a project cannot take a saved remote default (no git bundle to send in).
+    const execProjectDir = hasWorkspace || noProject ? null : resolveProjectDir(body.projectDir);
+    const execWorkMode = noProject ? 'none'
+      : execProjectDir ? workModeForStart({ projectDir: execProjectDir }, { getProjectByPath, gitAvailable: (await gitState()).available }) : 'git';
+    const execEnvShape = runExecEnvOpts(body, hasWorkspace ? { workspace: true } : { projectDir: execProjectDir, workMode: execWorkMode }, runEngine.engine || 'claude');
+    if (execEnvShape.error) return badRequest(res, execEnvShape.error);
 
     // Per-run agent picks (the Ask run card's lane; docs/models.md "Per-agent models for one run"): `overlay.nodes`
     // merges PER NODE over the project's saved agent settings for THIS run only and never writes them. Checked here
@@ -3100,7 +3148,7 @@ const startRunHandler = async (req, res) => {
     const resolveOf = req._resolveOf && typeof req._resolveOf === 'object' && typeof req._resolveOf.runId === 'string' ? req._resolveOf : null;
     // Shaper s5 (D4): a round of an earlier run (Ask for changes → Start round n, or a Watch PR fix run). Set in-process
     // by startRunAs / invokeStartRun only, never from HTTP.
-    const roundOf = req._roundOf && typeof req._roundOf === 'object' && typeof req._roundOf.pipelineId === 'string' ? req._roundOf : null;
+    const roundOf = req._roundOf && typeof req._roundOf === 'object' && typeof req._roundOf.pipelineId === 'string' ? req._roundOf : null; if (roundWhileShipping(roundOf?.pipelineId)) return res.status(409).json(roundWhileShipping(roundOf.pipelineId));   // the Ship lock
     // A6 D15: a requirements start's ticket (Report back). Set in-process by invokeStartRun only, never from HTTP, like _roundOf.
     const reportTo = req._reportTo && typeof req._reportTo === 'object' && typeof req._reportTo.plugin === 'string'
       && typeof req._reportTo.taskId === 'string' ? req._reportTo : null;
@@ -3108,8 +3156,8 @@ const startRunHandler = async (req, res) => {
     // auto-names its hidden branch, so a typed feature name is ignored (and never date-suffixed).
     // A Workspace scan or a memory defragment lands no work: the flag does not apply there.
     const sameAsSource = body.sameAsSource === true && !scanTarget && !memoryScope;
-    // PR when the run finishes: these runs never open one through the finisher (src/shared/pr-auto.mjs PR_EXEMPT).
-    const prExempt = req._automation ? 'automation' : req._prWatchRunId || startedBy === 'pr-watch' ? 'pr-watch' : roundOf ? 'round' : resolveOf ? 'resolve' : scanTarget || memoryScope || workflowId === MEMORY_DEFRAG_WORKFLOW_ID ? 'no-work' : sameAsSource ? 'same-as-source' : null;
+    // PR when the run finishes: these runs never open one through the finisher (src/shared/pr-auto.mjs PR_EXEMPT); the Verifier's run and a test try never do.
+    const prExempt = workflowTest ? 'workflow-test' : req._automation ? 'automation' : req._prWatchRunId || startedBy === 'pr-watch' ? 'pr-watch' : roundOf ? 'round' : shape?.verify ? 'verify' : resolveOf ? 'resolve' : scanTarget || memoryScope || workflowId === MEMORY_DEFRAG_WORKFLOW_ID ? 'no-work' : sameAsSource ? 'same-as-source' : null;
     // Smart run naming: a title that was given is kept (typed, or suggested on the form); read at start and at fire time.
     const smartNamingOn = flagEnabled('smartRunNaming');
     const titleLocked = smartNamingOn && typeof body.title === 'string' && !!body.title.trim();
@@ -3130,7 +3178,7 @@ const startRunHandler = async (req, res) => {
       onDiverged: body.syncOnDiverged === 'origin' || body.syncOnDiverged === 'fail' ? body.syncOnDiverged : null,  // schedules
     };
     // Scans are read-only (C10) and memory defrag is a reserved workflow: never sync them.
-    const syncAllowed = !scanTarget && !memoryScope;
+    const syncAllowed = !scanTarget && !memoryScope && !workflowTest;   // 3a: a try never syncs (Worca's copy has no remote)
 
     let orch, entry;
 
@@ -3172,6 +3220,9 @@ const startRunHandler = async (req, res) => {
         ...(nightMode ? { nightMode: true } : {}),
         tags,
         ...(shape ? { shape } : {}),
+        ...tryRunOptions(workflowTest),   // a test try: the version under test, hidden, no memory, a fixed title
+        ...(attachedRequirements.length ? { attachedRequirements } : {}), ...(typeof body.rerunOf === 'string' ? { rerunOf: body.rerunOf } : {}),
+        ...(scanTarget || memoryScope ? {} : { runSetup: await runSetupOf({ ...body, workflowId, guardrailsId }, {}) }),   // as the other arms: Rerun copies it
       });
       entry = {
         id: runId, orch, projectDir, projectKey: NO_PROJECT_KEY, workMode: 'none', kind: 'run', pipelineId,
@@ -3256,16 +3307,16 @@ const startRunHandler = async (req, res) => {
       if (await tagGate(res, body, { workspaceId: ws.id, startedBy, after: sched?.afterRef || null, exempt: tagExempt })) return;
       if (Array.isArray(body.tags)) tags = body.tags;
       if (sched) {
-        // The engine gate's early refusals answer when the run is scheduled, not hours later when it fires.
-        if (runEngine.engine) {
-          const probe = await createOrchestratorFor({
-            workspace: { id: ws.id, key: ws.id, name: ws.name, description: ws.description, projects: buildWorkspaceMembers(projects, branch, sourceByKey) },
-            prompt: effectivePrompt, title, agentsDir: AGENTS_DIR, workflowId, template: workflowRow, guardrailsId,
-            mcpOptOut: await knownMcpOptOut(optOut.list, mcpWorkspaceTarget(ws)), claude: { mock, ...runEngine },
-          });
-          const refusal = await probe.engineStartRefusal();
-          if (refusal) return res.status(409).json({ error: presetEngineMessage(presetRow, runEngine, engineRefusalFor(refusal.error, 'ui')), code: 'engine-refused', overridable: refusal.overridable });
-        }
+        // The engine gate's early refusals answer when the run is scheduled (whatever the default harness).
+        const probe = await createOrchestratorFor({
+          workspace: { id: ws.id, key: ws.id, name: ws.name, description: ws.description, projects: buildWorkspaceMembers(projects, branch, sourceByKey) },
+          prompt: effectivePrompt, title, agentsDir: AGENTS_DIR, workflowId, template: workflowRow, guardrailsId,
+          mcpOptOut: await knownMcpOptOut(optOut.list, mcpWorkspaceTarget(ws)), claude: { mock, ...runEngine },
+          ...(runOverlay ? { overlay: runOverlay } : {}),
+          ...execEnvShape.opts,
+        });
+        const refused = await scheduledStartRefusal(probe, runEngine, presetRow);
+        if (refused) return res.status(409).json(refused);
         return res.status(202).json(await scheduleRequest({ body: runOverlay ? { ...body, overlay: runOverlay } : body, sched, title, askLink, budget, workspaceId: ws.id, projectDir: projects[0].projectDir, startedBy,
           preset: presetRow ? { id: presetRow.id, name: presetRow.name, owner: presetOwner, overrides: overriddenKeys(body, presetRow.setup) } : null }));
       }
@@ -3316,13 +3367,15 @@ const startRunHandler = async (req, res) => {
         // Human in the loop is per run on a workspace (D-W1): the body wins, else on.
         humanInLoop: bodyHumanInLoop ?? true,
         claude: { permissionMode: stored.permissionMode || 'acceptEdits', ...(stored.model ? { model: stored.model } : {}), mock, ...runEngine },
+        ...execEnvShape.opts,
         // A CLI-made ticket may carry `--yes`: the explicit non-interactive choice survives the wait.
         ...(stored.auto ? { auto: true } : {}),
         ...(nightMode ? { nightMode: true } : {}),
         tags,
         labels,
         ...(shape ? { shape } : {}),
-        ...(runSetup ? { runSetup } : {}),
+        ...(attachedRequirements.length ? { attachedRequirements } : {}),
+        ...(runSetup ? { runSetup } : {}), ...(typeof body.rerunOf === 'string' ? { rerunOf: body.rerunOf } : {}),
       });
 
       entry = {
@@ -3347,12 +3400,14 @@ const startRunHandler = async (req, res) => {
 
       // A-m5: a registered project whose effective mode is Folder and whose folder is gone is refused, never recreated
       // empty (with git installed a Git project keeps today's mkdir + git init). The stored row (S7), read once.
-      const projectRow = getProjectByPath(projectDir); const gitOn = (await gitState()).available;
+      const projectRow = getProjectByPath(projectDir); let gitOn = (await gitState()).available;
       if (projectRow && !fs.existsSync(projectDir) && effectiveWorkMode(projectRow.vcs, gitOn) === 'folder') return badRequest(res, `The folder is missing: ${projectDir}`);
       // P1 (CONTRACT §2, U3, L4, S3): a registered Folder project — or any project while git is missing — runs on a
       // copy; an unregistered dir keeps git mode while git is installed. Replaces P0's start guard for projects.
       // gitOn and projectRow were read before the mkdir (A-m5): the stored row (S7), never projectKey(dir)
+      if (workflowTest && !gitOn) gitOn = (await gitState({ fresh: true })).available;   // F3: a stored "no git" can be a minute old
       const workMode = workModeForStart({ projectDir }, { getProjectByPath: () => projectRow, gitAvailable: gitOn });
+      if (workflowTest && workMode !== 'git') return badRequest(res, TRY_NEEDS_GIT_TEXT);
       // #693: a git run in a folder inside a repository it is not the top of would `git init` there (or act on the
       // parent). Refused before the mkdir, a row or a ticket; a missing path counts by its nearest existing ancestor.
       if (workMode === 'git') {
@@ -3431,24 +3486,24 @@ const startRunHandler = async (req, res) => {
       // …and the overlay as checked (the catalog's casing, each model with its effort): the ticket fires it verbatim.
       const storedBody = runOverlay ? { ...pairBody, overlay: runOverlay } : pairBody;
       if (sched) {
-        // The engine gate's early refusals answer when the run is scheduled, not hours later when it fires.
-        if (runEngine.engine) {
-          const probe = await createOrchestratorFor({
-            projectDir, prompt: effectivePrompt, title, agentsDir: AGENTS_DIR, workflowId, template: workflowRow, guardrailsId,
-            workMode, ...(projectRow && workMode !== 'git' ? { projectKey: projectRow.key } : {}),
-            mcpOptOut: await knownMcpOptOut(optOut.list, { kind: 'project', key: runKey, name: path.basename(projectDir), rank: 0 }),
-            claude: { mock, ...runEngine },
-          });
-          const refusal = await probe.engineStartRefusal();
-          if (refusal) return res.status(409).json({ error: presetEngineMessage(presetRow, runEngine, engineRefusalFor(refusal.error, 'ui')), code: 'engine-refused', overridable: refusal.overridable });
-        }
+        // The engine gate's early refusals answer when the run is scheduled (whatever the default harness).
+        const probe = await createOrchestratorFor({
+          projectDir, prompt: effectivePrompt, title, agentsDir: AGENTS_DIR, workflowId, template: workflowRow, guardrailsId,
+          workMode, ...(projectRow && workMode !== 'git' ? { projectKey: projectRow.key } : {}),
+          mcpOptOut: await knownMcpOptOut(optOut.list, { kind: 'project', key: runKey, name: path.basename(projectDir), rank: 0 }),
+          claude: { mock, ...runEngine }, ...(memoryScope ? { memoryScope } : {}),
+          ...(runOverlay ? { overlay: runOverlay } : {}),
+          ...execEnvShape.opts,
+        });
+        const refused = await scheduledStartRefusal(probe, runEngine, presetRow);
+        if (refused) return res.status(409).json(refused);
         return res.status(202).json(await scheduleRequest({ body: storedBody, sched, title, askLink, budget, projectDir, startedBy,
           preset: presetRow ? { id: presetRow.id, name: presetRow.name, owner: presetOwner, overrides: overriddenKeys(body, presetRow.setup) } : null }));
       }
       const mcpOptOut = await knownMcpOptOut(optOut.list, { kind: 'project', key: runKey, name: path.basename(projectDir), rank: 0 });
       // Run presets slice 2 (#712): the run's setup, kept on the row for Save setup as preset. The RAW body
       // overlay (D4): the checked runOverlay carries effort '' for model-only picks, which a New run save drops.
-      const runSetup = scanTarget || memoryScope ? null
+      const runSetup = scanTarget || memoryScope || workflowTest ? null
         : await runSetupOf({ ...body, workflowId, guardrailsId }, { projectDir });
 
       // Scans and defrag never sync: skip the default-branch lookup and settings reads entirely, so
@@ -3493,13 +3548,16 @@ const startRunHandler = async (req, res) => {
           mock,
           ...runEngine,
         },
+        ...execEnvShape.opts,
         // A CLI-made ticket may carry `--yes`: the explicit non-interactive choice survives the wait.
         ...(stored.auto ? { auto: true } : {}),
         ...(nightMode ? { nightMode: true } : {}),
         tags,
         labels,
         ...(shape ? { shape } : {}),
-        ...(runSetup ? { runSetup } : {}),
+        ...(attachedRequirements.length ? { attachedRequirements } : {}),
+        ...(runSetup ? { runSetup } : {}), ...(typeof body.rerunOf === 'string' ? { rerunOf: body.rerunOf } : {}),
+        ...tryRunOptions(workflowTest, { project: true }),   // 3a: a project try also keeps its checkout and runs its setup
       });
 
       entry = {
@@ -3520,19 +3578,23 @@ const startRunHandler = async (req, res) => {
     // The engine gate's early refusals answer here, before the run is registered or
     // announced, so New pipeline can show them inline and offer the consent when it
     // lifts them. run() checks them all again, with the node-level ones, which still
-    // arrive as the run's error event.
-    if (runEngine.engine) {
-      const refusal = await orch.engineStartRefusal();
-      if (refusal) return res.status(409).json({ error: presetEngineMessage(presetRow, runEngine, engineRefusalFor(refusal.error, 'ui')), code: 'engine-refused', overridable: refusal.overridable });
-    }
+    // arrive as the run's error event. Every start, whatever the default harness: a step may be pinned to another one.
+    const refusal = await orch.engineStartRefusal();
+    if (refusal) return res.status(409).json({ error: presetEngineMessage(presetRow, runEngine, engineRefusalFor(refusal.error, 'ui')), code: 'engine-refused', overridable: refusal.overridable, engines: refusal.engines });
+    // The e2b preflight (single-project, a remote engine and its sign-in, …): refused here, before anything is announced.
+    const execRefusal = orch.execEnvStartRefusal();
+    if (execRefusal) return res.status(409).json({ error: execRefusal, code: 'exec-env-refused' });
 
     if (internal) {
       entry.ticketId = internal.ticket.id;
       entry.scheduleId = internal.ticket.scheduleId || null;
       entry.scheduledFor = internal.ticket.runAt;
     }
+    const shipping = roundWhileShipping(roundOf?.pipelineId); if (shipping) return res.status(409).json(shipping);   // asked again, right before Ship can see the round (shipBusy) and its row is written
+    if (workflowTest) entry.isTest = true;   // D21: hidden from every tab, list and chat
     runs.set(runId, entry);
     wireRun(entry);
+    try { holdTryOrch(workflowTest, orch, runId); } catch (err) { runs.delete(runId); syncKeepAwake(); throw err; }   // correction 7
     if (askLink) {
       // Card-state TOCTOU: awaits (source-ref check, budget) sit between Hunk
       // B's `proposed` check and here — a concurrent Start may have flipped
@@ -3578,7 +3640,7 @@ const startRunHandler = async (req, res) => {
         console.error(`[worca-ui] ask run link failed: ${err && err.message ? err.message : err}`);
       }
     }
-    announceRun(entry);
+    if (!entry.isTest) announceRun(entry);   // D21: never in a tab's run list
 
     // Fire-and-forget; all progress is surfaced through events. Kept on the entry: a Stop of the
     // run once it paused waits for its pause to finish unwinding (stopPausedPipelineOnce).
@@ -3588,11 +3650,11 @@ const startRunHandler = async (req, res) => {
         const event = { runId, type: 'error', message: err && err.message ? err.message : String(err) };
         entry.status = 'error';
         entry.events.push(event);
-        broadcast(event);
+        broadcastFor(entry, event);   // review I7: a tab would upsert a phantom run from this runId (app.js:1973)
         syncKeepAwake();
       })
       // #620: the harness's post-run base check landed after the run's last frame; History re-reads it.
-      .finally(() => { entry.settled = true; emitChanged('pipelines-changed', 'updated'); afterRunSettled(orch); });
+      .finally(() => { entry.settled = true; if (entry.setupClashHeld) Promise.resolve().then(() => archivePipeline({ projectDir: entry.projectDir, id: entry.pipelineId, by: 'worca' })).catch((err) => console.error(`[worca-ui] setup-clash attempt not archived: ${err?.message || err}`)); emitChanged('pipelines-changed', 'updated'); afterRunSettled(orch); });
 
     // A scan's launcher needs the card attribution the wizard cannot compute (the key is a hash).
     res.json(scanTarget
@@ -3618,7 +3680,9 @@ import * as runSkillHost from '../src/core/skills-registry/host.mjs';
 import * as runSkillTexts from '../src/core/skills-registry/texts.mjs';
 import * as runSkillPolicy from '../src/core/policy/effective.mjs';
 import { ROUTE_SEGMENTS } from './routes/index.mjs';
-import { askCardRoute } from './routes/chat/thread-cards.mjs';
+import { noteStoreCheck, startSecretsProbe } from './routes/settings/secrets.mjs';
+import { migrateSecretsIfEnabled, vaultInUse } from '../src/core/secrets/flag.mjs';
+import { askCardRoute, askDesignHandoff } from './routes/chat/thread-cards.mjs';
 import { isPublicPart, publicRelPath } from '../src/core/public-assets.mjs';
 import { readIndexHtml } from '../src/core/read-index-html.mjs';
 import { readStyleCssEntry } from '../src/core/read-style-css.mjs';
@@ -3829,7 +3893,7 @@ async function validateResumeTarget(pipelineId) {
 async function storedRequestOf(body, stageId, projectDir, startedBy = null, preset = null) {
   const request = { ...body };
   // presetId: the link lives in the ticket's preset_id column (v63), never in the replayed body.
-  for (const k of ['scheduledFor', 'repeat', 'after', 'afterPolicy', 'sourceFromPrevious', 'ifMissed', 'graceMin', 'extras', 'internal', 'presetId']) delete request[k];
+  for (const k of ['scheduledFor', 'repeat', 'after', 'afterPolicy', 'sourceFromPrevious', 'ifMissed', 'graceMin', 'extras', 'internal', 'presetId', ...(body.repeat ? ['rerunOf'] : [])]) delete request[k];   // a one-off fire keeps rerunOf; a repeat's fires are not reruns
   // Text the user authored is part of the request: a prompt FILE is frozen now, so a
   // file deleted or half-edited overnight cannot fail an unattended run.
   if (request.source && request.source.type === 'markdown' && request.source.promptFile && !request.source.promptText) {
@@ -3899,27 +3963,7 @@ function releaseAskCard(item) {
   } catch (err) { console.error(`[worca-ui] ask card release failed: ${err && err.message ? err.message : err}`); }
 }
 
-/** A requirements start's run as the feature shows it (A2 D10): the live entry while the server has it,
- *  else the pipeline row on disk (after a restart). null when neither knows the run. A resume gives the run
- *  a new UUID, so the pipeline id finds the live entry first. `href`: the live run's page while the server
- *  has it, else the saved run's History page (#history/<projectKey | workspaces/<key>>/<pipelineId>). */
-function requirementsRunSummary({ runId, pipelineId }) {
-  const live = (pipelineId && liveRunEntry(pipelineId)) || liveRunEntry(runId);
-  const id = pipelineId || (live && live.pipelineId) || null;
-  let state = null;
-  if (id) { try { state = readPipelineStateById(id); } catch { state = null; } }
-  if (!live && !state) return null;
-  const key = state && (state.target === 'workspace' && state.workspaceKey ? `workspaces/${state.workspaceKey}` : state.projectKey);
-  return {
-    status: (live && live.status) || (state && state.status) || null,
-    phase: (state && state.phase) || null,
-    costUsd: state?.totalCostUsd ?? null,
-    pipelineId: id,
-    href: live ? `#running/${live.id}` : key && id ? `#history/${key}/${id}` : null,
-    // waits on a question, a gate or the Auto confirmation: entry.pendingQuestion, as the Running page reads it
-    waiting: !!(live && live.pendingQuestion && !SETTLED_RUN.has(String(live.status || ''))),
-  };
-}
+const requirementsRunSummary = createRunSummary({ liveRunEntry, readPipelineStateById, settled: SETTLED_RUN });
 
 /** A8 D14: a requirements start's staged copies go once createPipeline has copied them into <pipeline>/extras: the run
  *  and its agents read only that copy (run-harness _collectExtras; createPipeline is the one reader of opts.extras, and
@@ -3954,7 +3998,7 @@ async function invokeAskCard({ threadId, cardId, body, actor }) {
   return out;
 }
 
-async function invokeStartRun(body, internal, { startedBy = null, runId = null, prWatchRunId = null, roundOf = null, extrasFiles = null, reportTo = null, automation = false, mergeIn = null } = {}) {
+async function invokeStartRun(body, internal, { startedBy = null, runId = null, prWatchRunId = null, roundOf = null, extrasFiles = null, reportTo = null, automation = false, mergeIn = null, workflowTest = null } = {}) {
   const files = Array.isArray(extrasFiles) && extrasFiles.length ? extrasFiles : null;
   const id = files ? (runId || randomUUID()) : runId;   // the extras folder is named by the run id
   const run = async (extrasPaths, staged = null) => {
@@ -3966,7 +4010,7 @@ async function invokeStartRun(body, internal, { startedBy = null, runId = null, 
     };
     await startRunHandler({ body, headers: {}, _internal: internal, _startedBy: startedBy, _runId: id,
       _prWatchRunId: prWatchRunId, ...(roundOf ? { _roundOf: roundOf } : {}), ...(extrasPaths ? { _extrasPaths: extrasPaths } : {}),
-      ...(reportTo ? { _reportTo: reportTo } : {}), ...(automation ? { _automation: true } : {}), ...(mergeIn ? { _mergeIn: mergeIn } : {}) }, res);
+      ...(reportTo ? { _reportTo: reportTo } : {}), ...(automation ? { _automation: true } : {}), ...(mergeIn ? { _mergeIn: mergeIn } : {}), ...(workflowTest ? { _workflowTest: workflowTest } : {}) }, res);
     if (staged && out.status >= 200 && out.status <= 299) dropStagedOnceCopied(id, staged.drop);
     return out;
   };
@@ -4054,14 +4098,14 @@ async function fireResumeTicket(ticket, pipelineId) {
       mock: isTruthy(process.env.WORCA_MOCK ?? process.env.ORCH_MOCK),
       ...(engine ? { engine } : {}),
       ...(internal.autoLimitResume ? { autoLimitResume: true } : {}),
-    });
+    }); if (out?.held) return { ok: false, hold: true, error: `the run waits its turn (after run ${out.after})` };   // slice 7: kept for the next tick
     // The feed learns how the resumed run ends through the same recordOutcome hook a
     // schedule-started run uses (wireRun keys on entry.ticketId).
     const entry = out && out.runId ? runs.get(out.runId) : null;
     if (entry) entry.ticketId = ticket.id;
     return { ok: true, pipelineId };
   } catch (err) {
-    if (err instanceof ResumeError) {
+    if (err instanceof ResumeError) { if (err.body && err.body.code === 'RESUME_IN_FLIGHT') return { ok: false, hold: true, error: 'the run is being resumed' };   // slice 7: its held resume goes on; the next tick skips it
       return { ok: false, error: (err.body && err.body.error) || err.message, transient: false };
     }
     return { ok: false, error: err && err.message ? err.message : String(err), transient: false };
@@ -4096,24 +4140,25 @@ async function fireTicket(ticket) {
       return { ok: false, error: err && err.message ? err.message : String(err), transient: TRANSIENT_SOURCE_KINDS.has(err && err.kind) };
     }
   }
+  const { own, refusal: sliceRefusal } = sliceFireStart(ticket, body, { isLive: liveProbe, live: liveSliceOf }); if (sliceRefusal) return sliceRefusal;
   if (ticket.after) {
-    const p = predecessorState(ticket.after, { policy: ticket.after.policy, isLive: liveProbe });
-    if (p.state === 'waiting' && !ticket.forced) return { ok: false, error: 'the run before it is still going', transient: true };
+    const p = predecessorState(ticket.after, { policy: ticket.after.policy, isLive: liveProbe }), fromPid = (own && own.pipelineId) || p.pipelineId;
+    if (p.state === 'waiting' && !ticket.forced && !own) return { ok: false, error: 'the run before it is still going', transient: true };
     // #718: a chained run that names no tags of its own takes the previous run's tags, read at fire
     // time so a retag of the parent before the chain fires is honoured. An explicit [] opts out.
-    if (body.tags === undefined && p.pipelineId) {
-      const inherited = readRunTags(p.pipelineId);
+    if (body.tags === undefined && fromPid) {
+      const inherited = readRunTags(fromPid);
       if (inherited.length) body.tags = inherited;
     }
-    if (body.labels === undefined && p.pipelineId) {   // s2: labels inherit the same way; an explicit [] opts out
-      const inherited = readRunLabels(p.pipelineId);
+    if (body.labels === undefined && fromPid) {   // s2: labels inherit the same way; an explicit [] opts out
+      const inherited = readRunLabels(fromPid);
       if (inherited.length) body.labels = inherited;
     }
     if (ticket.sourceFromPrevious) {
       // Before the branch checks: isValidSourceRef answers false while git is missing, and "no longer exists" would be stored as a fact.
       if (!gitAvailable()) return { ok: false, error: GIT_MISSING.message, transient: false };
-      if (p.pipelineId && workModeOfRow(findPipelineRowById(p.pipelineId)) !== 'git') return { ok: false, error: "a Folder project run cannot start from the previous run's branch", transient: false };
-      const prev = p.pipelineId ? previousBranchesOf(p.pipelineId) : null;
+      if (fromPid && workModeOfRow(findPipelineRowById(fromPid)) !== 'git') return { ok: false, error: "a Folder project run cannot start from the previous run's branch", transient: false };
+      const prev = own ? (own.sourceBranch ? { sourceBranch: own.sourceBranch } : null) : p.pipelineId ? previousBranchesOf(p.pipelineId) : null;
       // Backstop only: the gate already waits for a merge back (pipelineGate). A FORCED ticket skips the gate.
       if (prev && prev.pending) return { ok: false, error: 'the run before it is still merging its work back', transient: true };
       if (!prev) return { ok: false, error: 'the run before it left no branch to start from', transient: false };
@@ -4135,6 +4180,7 @@ async function fireTicket(ticket) {
       Object.assign(body, prev);
     }
   }
+  const combine = await sliceCombineGate(ticket, own, combineGateDeps); if (combine) return combine;   // small runs: a clash holds it
   // Every occurrence of a series needs its own feature branch: the local date, plus the time
   // when the series runs several times a day — except a run on its source branch, which has
   // none of its own (the server ignores featureBranch for it).
@@ -4144,8 +4190,7 @@ async function fireTicket(ticket) {
     body.featureBranch = `${body.featureBranch.trim()}-${stamp}`;
   }
   // A "Run now" click names its clicker for this one firing (scheduleVerb records it).
-  const runNowBy = RUN_NOW_BY.get(ticket.id) || null;
-  RUN_NOW_BY.delete(ticket.id);
+  const runNowBy = RUN_NOW_BY.get(ticket.id) || null; RUN_NOW_BY.delete(ticket.id);
   // Enforced tags (D11): saved at creation; a firing fills only what became mandatory since (after #718
   // inheritance above), then re-checks. A start it would refuse is SKIPPED with the reason — never started
   // untagged, and never a failure (the handler gate exempts fired tickets, D10).
@@ -4180,9 +4225,9 @@ const ranMergeBack = (st) => !!st && [st.branch, ...Object.values(st.branches ||
 function afterRunSettled(orch) {
   let card;
   // Git event automations (#711): a finished event run writes back now, not at the next tick.
-  if (automationsOn()) kickAutomations();
+  if (automationsOn()) kickAutomations(); if (flagEnabled('shaperSmallRuns')) void deliverHeld();   // slice 3 (D4): an answer held while this run committed its work goes on
   try {
-    const st = orch.getState?.();
+    const st = orch.getState?.(); card = recordSettledFigures(st, { tick: () => void schedulerTick(), offerShip: offerShipCard, broadcastFeature, finishing: isFinishingRun });
     // The Ship card is offered once the last slice is done (offerShipCard checks).
     if (orch.runShape?.slice && st?.status === 'done' && st.id) {
       card = Promise.resolve().then(() => offerShipCard(st.id))
@@ -4209,11 +4254,11 @@ export async function schedulerTick({ now = Date.now() } = {}) {
   if (DRAIN.on) return null;   // B2: due tickets stay due; the next start's catch-up fires them
   _schedulerBusy = true;
   try {
-    const out = await runDueTickets({
+    deliverHeld(); const out = await runDueTickets({   // C3: a held stop answer goes on before any new run fires
       now,
       start: fireTicket,
       isLive: liveProbe,
-      staggerMs: SCHEDULER_STAGGER_MS, hold: featureHoldsTicket, // hold: "Ask me before each run" waits for Start now
+      staggerMs: SCHEDULER_STAGGER_MS, hold: featureHoldsTicket, chainGate: smallRunsChainGate(liveSliceOf), // hold: "Ask me before each run" waits for Start now
     });
     for (const id of [...out.failed, ...out.missed, ...out.skipped]) releaseAskCard(getTicket(id));
     const newlyHeld = out.held.filter((id) => !_schedulerHeld.has(id)); // a held card repaints once, when it becomes held
@@ -4247,6 +4292,19 @@ export async function schedulerTick({ now = Date.now() } = {}) {
 const RETENTION_EVERY_MS = 24 * 3600_000;
 let _retentionTimer = null;
 let _retentionBusy = false;
+/** One sweep: archive the finished runs older than `days`, and close their shells (issue 1064: a run's tool panel
+ *  terminals go with it, as on every other archive path). Returns pruneOldRuns' report; never throws. */
+async function sweepRunRetention(days) {
+  try {
+    const out = await pruneOldRuns({ days });
+    for (const id of out.archived) await terminals.closeWhere((s) => s.runId === id, 'system', 'run archived').catch(() => {});
+    if (out.archived.length) {
+      console.log(`[worca-ui] retention: archived ${out.archived.length} run(s) older than ${days} day(s)${out.skipped.length ? `, kept ${out.skipped.length}` : ''}`);
+      emitChanged('pipelines-changed', 'updated');
+    }
+    return out;
+  } catch (err) { console.warn(`[worca-ui] retention: ${err?.message || err}`); return { archived: [], skipped: [] }; }
+}
 function scheduleRunRetention(delayMs = 5000) {
   clearTimeout(_retentionTimer);
   _retentionTimer = setTimeout(async () => {
@@ -4254,14 +4312,7 @@ function scheduleRunRetention(delayMs = 5000) {
     const days = runLimits().keepRunsDays;
     if (days && !_retentionBusy) {
       _retentionBusy = true;
-      try {
-        const { archived, skipped } = await pruneOldRuns({ days });
-        if (archived.length) {
-          console.log(`[worca-ui] retention: archived ${archived.length} run(s) older than ${days} day(s)${skipped.length ? `, kept ${skipped.length}` : ''}`);
-          emitChanged('pipelines-changed', 'updated');
-        }
-      } catch (err) { console.warn(`[worca-ui] retention: ${err?.message || err}`); }
-      finally { _retentionBusy = false; }
+      try { await sweepRunRetention(days); } finally { _retentionBusy = false; }
     }
     scheduleRunRetention(RETENTION_EVERY_MS);
   }, delayMs);
@@ -4322,13 +4373,13 @@ function networkWatch() {
   return (_networkWatch ||= createNetworkWatch({
     settings: () => effectiveNetworkWait(),
     listRuns: () => listNetworkWaitRuns(),
-    hasResumeTicket: (id) => resumeTicketsFor(id).length > 0,
+    hasResumeTicket: (id) => resumeTicketsFor(id).length > 0 || heldStops.watchSkips(id),   // slice 7: a held resume goes on at its turn; a person's Pause dropped it
     probe: (origin) => _networkProbe(origin),
     resume: async (r) => {
       const out = await resumeRun(r.id, {
         by: NETWORK_ACTOR, auto: r.resumePoint.runAuto === true, resumeCause: 'network',
         mock: isTruthy(process.env.WORCA_MOCK ?? process.env.ORCH_MOCK),
-      });
+      }); if (out?.held) return out;   // slice 7: held for its turn, not resumed
       const since = new Date(r.resumePoint.network.since);
       appendAuditById(r.id, `Network back: ${hostOf(r.resumePoint.network.origin)} answers again. Run resumed${byActor(NETWORK_ACTOR)} (waiting since ${since.toISOString().slice(11, 16)} UTC).`, { actor: NETWORK_ACTOR });
       return out;
@@ -4516,7 +4567,7 @@ const chatContext = {
   incrementMuted: (k) => chatCtx().incrementMuted(k),
 };
 
-const chatActions = {
+const chatActions = { whereToAnswer: whereToAnswerOf(runs),   // slice 18 (D7): where a gap stop is answered, read at send time
   listRuns: () => summarizeRuns(),
   // Waiting + missed tickets, soonest first, with the time in this server's zone.
   listScheduled: () => listTickets().map((t) => ({
@@ -4807,7 +4858,7 @@ const channelHost = createChannelHost({
 });
 
 const chatNotifier = createNotifier({
-  channelHost,
+  channelHost, whereToAnswer: chatActions.whereToAnswer,
   getPrefs: chatPrefs,
   chatContext,
   logger: (level, msg) => console.error(`[worca-ui] chat ${level}: ${msg}`),
@@ -4835,8 +4886,8 @@ const chatNotifier = createNotifier({
 function answerRun(runId, id, payload, by = 'local') {
   const entry = runs.get(runId);
   if (!entry) throw new Error('unknown runId');
-  entry.orch.answer(id, payload, by || 'local');
-  resolvePending(entry, { id, reason: 'answered' });
+  const out = heldStops.answer(entry, id, payload, by || 'local'), done = (v) => (v?.held ? { held: true } : (resolvePending(entry, { id, reason: 'answered' }), undefined));   // C3: a stop's answer waits its turn
+  return out && typeof out.then === 'function' ? out.then(done) : done(out);   // slice 3 (D12): a promise only for a take-in
 }
 /** `by` = who asked (identity.mjs actorOf / chatActor); recorded on the entry and the run state.
  *  A PAUSED entry has no run loop to abort — orch.stop() would flip its status in memory only
@@ -4853,13 +4904,14 @@ async function stopRun(runId, by = 'local') {
   entry.orch.stop(entry.lastAction.by);
   entry.status = 'stopped';
   if (entry.pipelineId) cancelScheduledResumes(entry.pipelineId, { by, reason: `the run was stopped${byActor(by || 'local')}` });
-  resolvePending(entry, { reason: 'stopped' });
+  heldStops.clear(entry); resolvePending(entry, { reason: 'stopped' });
   syncKeepAwake();
   return { ok: true };
 }
 function pauseRun(runId, by = 'local') {
   const entry = runs.get(runId);
   if (!entry) throw new Error('unknown runId');
+  if (entry.isTest) throw Object.assign(new Error(TEST_TRY_PAUSE_TEXT), { code: 'TEST_TRY' }); if (entry.status === 'paused' && entry.pipelineId && heldStops.dropResume(entry.pipelineId, { paused: true })) return void cancelScheduledResumes(entry.pipelineId, { by, reason: `the run was paused${byActor(by || 'local')}` });   // slice 7 (D12)
   const ok = typeof entry.orch?.pause === 'function' && entry.orch.pause(by || 'local');
   if (!ok) throw Object.assign(new Error('cannot pause in the current state'), { code: 'CANNOT_PAUSE' });
   entry.lastAction = { kind: 'pause', by: by || 'local', at: new Date().toISOString() };
@@ -4889,7 +4941,7 @@ async function stopPausedPipeline(pipelineId, by = 'local') {
   if (running) return running;
   const p = stopPausedPipelineOnce(pipelineId, by);
   STOPS_IN_FLIGHT.set(pipelineId, p);
-  try { return await p; } finally { STOPS_IN_FLIGHT.delete(pipelineId); }
+  try { return await p; } finally { STOPS_IN_FLIGHT.delete(pipelineId); heldStops.dropResume(pipelineId); try { if (shaperSmallRunsOn() && getDb().prepare('SELECT status FROM pipelines WHERE id = ?').get(pipelineId)?.status === 'stopped' && bootResuming.delete(pipelineId)) { broadcastFeature(featureOfPipeline(pipelineId)?.featureId); void deliverHeld(); } } catch (err) { console.error(`[worca-ui] boot mark release failed: ${err?.message || err}`); }   /* A4: a stop in the boot window frees the turn */ recordSettledFigures({ id: pipelineId, status: 'stopped' }, { tick: () => void schedulerTick(), broadcastFeature, finishing: isFinishingRun }); }   // a stopped Verifier reads halted only now; a stopped round may start the check
 }
 
 /** One stop of a paused run. Called only through stopPausedPipeline, which joins concurrent stops. */
@@ -4932,7 +4984,7 @@ async function stopPausedPipelineOnce(pipelineId, by = 'local') {
           entry._outcomeRecorded = false;
           entry._chainNudged = false;
           wireRun(entry);                     // tab frames + chat notifier, on the same runId
-        } else {
+        } else if (!isTestPipeline(pipelineId)) {   // D21: no chat notifier for a test try
           try { chatNotifier.attach(orch, { runId: pipelineId }); }
           catch (err) { console.error(`[worca-ui] chat notifier attach failed: ${err && err.message ? err.message : err}`); }
         }
@@ -4976,8 +5028,8 @@ function settleStaleParked(pipelineId) {
     e.pauseDetail = null;
     // A later subscribe snapshots the entry's orchestrator (sendStateSnapshot): it must read the same.
     if (e.orch && e.orch.state) e.orch.state.status = status;
-    broadcast(bufferEvent(e, { type: 'state', status, id: pipelineId }));
-    broadcast(bufferEvent(e, { type: 'done', status, pipelineDir: null }));
+    broadcastFor(e, bufferEvent(e, { type: 'state', status, id: pipelineId }));   // a test try settles, sends nothing (D21)
+    broadcastFor(e, bufferEvent(e, { type: 'done', status, pipelineDir: null }));
   }
   syncKeepAwake();
 }
@@ -5000,14 +5052,15 @@ function settleStaleParkedEntries() {
   } catch (err) { console.error(`[worca-ui] stale paused entries: ${err && err.message ? err.message : err}`); }
 }
 
+const bootResuming = new Set(), bootResumingIds = () => [...bootResuming].sort(), markBootResumes = (picks, { mock = isTruthy(process.env.WORCA_MOCK ?? process.env.ORCH_MOCK) } = {}) => { const kept = heldStops.splitBootPicks(picks || [], { mock }); bootResuming.clear(); for (const p of kept) bootResuming.add(p.pipelineId); return kept; };   // slice 5 (D5): the pipelines the boot is about to resume, in memory only
 /** The live overlay featureView needs (L8): the entry driving this pipeline or run (liveRunEntry takes either, F26).
- *  A settled entry other than `paused` is ignored, so the pipelines row decides done / stopped / error. */
+ *  A settled entry other than `paused` is ignored, so the pipelines row decides done / stopped / error. Slice 5: being resumed adds `resuming`. */
 function liveSliceOf(id) {
   const e = id ? liveRunEntry(id) : null;
-  if (!e || !e.orch) return null;
-  const status = String(e.status || '');
-  if (SETTLED_RUN.has(status) && status !== 'paused') return null;
-  return liveSliceFrom({ runId: e.id, status, pendingQuestion: e.pendingQuestion, approved: e.orch.state?.shaping?.approved });
+  const resuming = !!id && bootResuming.has(id) && shaperSmallRunsOn();
+  const status = String(e?.status || '');
+  if (!e || !e.orch || (SETTLED_RUN.has(status) && status !== 'paused')) return heldStops.overlay(id, resuming ? liveSliceResuming() : null);
+  return heldStops.overlay(id, { ...liveSliceFrom({ runId: e.id, status, pendingQuestion: e.pendingQuestion, approved: e.orch.state?.shaping?.approved, heldStop: e.heldStop || null, going: !!e.takingIn, refused: e.takeInRefused && e.takeInRefused.id === e.pendingQuestion?.id ? e.takeInRefused.reason : null }), ...(resuming && status === 'paused' ? { resuming: true } : {}) });   // slice 3 (D11, D13), slice 5 (D1), slice 7 (D9)
 }
 function broadcastFeature(id) { if (id) broadcast({ type: 'shape-feature', id }); }
 /** F42: the run-event and tick hooks. Gate first (no query while it is off), and never let a throw escape: in wireRun
@@ -5018,15 +5071,15 @@ function broadcastFeaturesOf(lookup) {
 }
 
 // ── D24, D25: Ship as ─────────────────────────────────────────────────────────────────────────────────────────
-/** The last slice's run, its PR target and the feature's base (the chain root), or { error }. */
-function shipCtxOf(view, { base: forced = null } = {}) {
-  const last = view.slices[view.slices.length - 1];
+/** The last slice's run (or the `head` slice's), its PR target and the feature's base (the chain root), or { error }. */
+function shipCtxOf(view, { base: forced = null, head = null } = {}) {
+  const last = shipHeadRow(view, head) || view.slices[view.slices.length - 1];
   const state = last && last.pipelineId ? readPipelineStateById(last.pipelineId) : null;
   if (!state) return { error: 'the last slice has no run' };
   const target = prTargetFor(state);
   if (target.error) return { error: target.error };
   if (!target.repoDir || !target.feature) return { error: 'the last slice has no branch to ship' };
-  const base = forced || chainBaseBranchesOf(last.pipelineId)[0] || null;
+  const base = forced || shipHeadBase(view, head) || chainBaseBranchesOf(last.pipelineId)[0] || null;
   if (!base) return { error: 'the feature has no base branch' };
   return { state, target, base };
 }
@@ -5038,15 +5091,15 @@ async function refreshSliceBody(prUrl, pid, repoDir) {
   if (!cur.ok || !cur.body.startsWith('Part of ')) return null;
   // The preamble: the "Part of" line, a blank line, the "- Slice" list; it ends at the first blank line after the list.
   const lines = cur.body.split('\n');
-  let end = lines[1]?.startsWith('Satisfies: ') ? 2 : 1;   // the slice's agreed ids, under the "Part of" line
+  let end = 1; while (isSlicePreambleLine(lines[end])) end += 1;   // the agreed ids, the Care and Not met / Dropped lines (D1)
   while (end < lines.length && lines[end] === '') end += 1;
   while (end < lines.length && lines[end].startsWith('- Slice ')) end += 1;
   const fresh = slicePrPreamble(pid);
   if (!fresh) return null;
   return editPrBody({ projectDir: repoDir, prUrl, body: [fresh, ...lines.slice(end)].join('\n') });
 }
-const SHIPPING = new Set();     // feature ids with a Ship as in flight (ship_mode is written only at the end)
-const featureShipping = (id) => SHIPPING.has(String(id));   // s3 (D9): the acceptance PUT refuses while one is in flight
+/** Ship's `finishing` probe: a run still finishing, or one with a round that started and may have no row yet. */
+const shipBusy = (pid) => isFinishingRun(pid) || [...runs.values()].some((e) => !e.settled && e.orch?.branchOpts?.roundOf?.pipelineId === pid);
 /** One ship flow: a PR a ship opened or marked ready is stored as an open, ready PR at once, so the group page and its
  *  Runs row stop reading Draft (or Ready to ship) before the next PR lookup. persistPrState keeps an old verdict
  *  unless it is given one; a different PR (a closed draft's row taking the one PR) starts from a fresh verdict. */
@@ -5060,7 +5113,7 @@ function storeReadyPr(pid, pr) {
 async function shipFeatureNow(id, mode, { actor = null, release = null, watch = false, draft = false, base = null, onDraftFallback = null } = {}) {
   if (!SHIP_MODES.includes(mode)) return { status: 400, body: { error: 'mode must be stacked or one' } };
   if (SHIPPING.has(id)) return { status: 409, body: { code: 'SHIPPING', error: 'this feature is already shipping' } };
-  const view = featureView(id, { live: liveSliceOf });
+  const probes = { live: liveSliceOf, finishing: shipBusy }, view = featureView(id, probes);
   if (!view) return { status: 404, body: { error: 'unknown feature' } };
   if (view.ship.mode) return { status: 409, body: { code: 'ALREADY_SHIPPED', error: `this feature was already shipped as ${view.ship.mode === 'one' ? 'one PR' : 'stacked PRs'}` } };
   const round = liveRoundOf(id);                    // Shaper s5 (D16): a live round holds Ship back
@@ -5068,26 +5121,22 @@ async function shipFeatureNow(id, mode, { actor = null, release = null, watch = 
     const s = view.slices.find((x) => (x.rounds || []).some((r) => r.pipelineId === round.pipelineId));
     return { status: 409, body: { code: 'ROUND_LIVE', error: `a round of run ${s ? s.index : '?'} is still going` } };
   }
-  if (!view.ship.ready) return { status: 409, body: { code: 'NOT_READY', error: 'every slice must be done before the feature ships' } };
+  if (!view.ship.ready) return { status: 409, body: view.ship.smallRuns?.unowned?.length ? acceptanceRefusal(view) : { code: 'NOT_READY', error: 'every slice must be done before the feature ships' } };
   // Shaper requirements s3 (D8): every agreed requirement is marked before any PR, changelog, push or forge call.
   const unmarked = acceptanceRefusal(view);
   if (unmarked) return { status: 409, body: unmarked };
-  SHIPPING.add(id);
+  const made = [], cover = shipCover(id), stopped = (failed) => shipStopped(id, cover, probes, made, failed); SHIPPING.add(id);   // stopped: the rule, asked again
   try {
     // One ship flow: stacked gives each slice without a PR its own, ready, on its stacked base, in merge order;
     // One makes no slice PRs (shipFeature closes only those that exist, e.g. an in-flight feature's drafts).
     let shown = view;
     // D5: One closes slice drafts only; a ready slice PR (made by a partly finished stacked ship) is never closed.
-    if (mode === 'one' && shown.slices.some((s) => s.pr && s.pr.url && s.pr.state !== 'CLOSED' && !s.pr.draft)) {
-      return { status: 409, body: { code: 'HAS_SLICE_PR', error: 'a run in this feature already has a PR: create one PR per run' } };
-    }
+    const { head, refusal: shipRefusal } = await oneShipCheck(id, mode, shown, (h) => shipCtxOf(view, { base, head: h })); if (shipRefusal) return shipRefusal;
     clearShip(id);                                   // a withdrawn ship (its PRs all closed unmerged); no-op otherwise
-    // A slice whose PR was closed gets a new one (openMemberPr opens past a CLOSED PR).
-    const needsPr = (s) => s.pipelineId && (!s.pr || s.pr.state === 'CLOSED');
-    if (mode === 'stacked' && shown.slices.some(needsPr)) {
-      const made = [];
-      for (const s of shown.slices) {
-        if (!needsPr(s)) continue;
+    if (mode === 'stacked' && shown.slices.some(sliceNeedsPr)) {   // a closed PR gets a new one; the Ship screens count with it too
+      for (const s of shipOrder(shown)) {   // Feature D1: a marked feature's runs along the real branches (slice 4), else in finish order
+        if (!sliceNeedsPr(s)) continue;
+        const stop = stopped(); if (stop) return stop;
         const r = await openMemberPr(s.pipelineId, { actor });
         if (!r.ok) return { status: r.status || 500, body: { error: `could not create run ${s.index}'s PR: ${r.error}. Create PR again to continue.`, prs: made } };
         made.push(r.pr.url);
@@ -5095,19 +5144,20 @@ async function shipFeatureNow(id, mode, { actor = null, release = null, watch = 
       shown = featureView(id, { live: liveSliceOf }) || view;
     }
     const input = await featureShipInput(shown);
-    const ctx = shipCtxOf(shown, { base });
+    const ctx = shipCtxOf(shown, { base, head });
     if (ctx.error) return { status: 409, body: { error: ctx.error } };
-    let onePr = null;
-    const out = await shipFeature({ feature: input, mode, maxBody: PR_BODY_MAX - 2000 }, {
+    let onePr = null, raced = null;
+    const out = await shipFeature({ feature: input, mode, maxBody: PR_BODY_MAX - 2000, ...(head ? { headPipelineId: head } : {}) }, {
       commitChangelog: (pid, update) => commitFileOnBranch(ctx.target.repoDir, {
-        branch: ctx.target.feature, path: 'CHANGELOG.md', update, message: `Changelog: ${view.title}` }),
+        branch: ctx.target.feature, path: 'CHANGELOG.md', update, message: `Changelog: ${view.title}` }).then((r) => recordShipCommit(id, r)),
       push: async () => {
         const picked = await pickPrRemotes({}, ctx.target.repoDir);
         if (picked.error) return { ok: false, error: picked.error };
-        const p = await pushBranch(ctx.target.repoDir, ctx.target.feature, picked.pushRemote);
+        const p = stopped() ? { ok: false, stderr: 'the work changed' } : await pushBranch(ctx.target.repoDir, ctx.target.feature, picked.pushRemote);
         return p.ok ? { ok: true } : { ok: false, error: p.stderr };
       },
       openOnePr: async ({ pipelineId, title, body }) => {
+        if ((raced = oneShipRaced(id, shown, readPrState))) return { ok: false, error: raced.body.error };   // a run's own Create PR that started before this ship
         const r = await createPrWithDraftRetry(createRunPr, { id: pipelineId, state: ctx.state, target: ctx.target, base: ctx.base,
           description: body, title, actor, preamble: false, draft }, onDraftFallback);
         if (r.ok) onePr = { ...r.pr, newDraft: !!r.newDraft };
@@ -5132,7 +5182,8 @@ async function shipFeatureNow(id, mode, { actor = null, release = null, watch = 
       },
       refreshBody: (prUrl, pid) => refreshSliceBody(prUrl, pid, ctx.target.repoDir),
     });
-    if (!out.ok) return { status: out.status, body: { error: out.error } };
+    if (raced) return raced;
+    const late = stopped(out.error); if (late || !out.ok) return late || { status: out.status, body: { error: out.error } };
     // The one PR is every slice's PR, as a chain shipped as One records it on every run: the group reads In review.
     if (out.mode === 'one' && out.prUrl) {
       for (const s of shown.slices) if (s.pipelineId) storeReadyPr(s.pipelineId, { url: out.prUrl, number: onePr && onePr.url === out.prUrl ? onePr.number : null, draft: !!onePr?.newDraft });
@@ -5246,8 +5297,8 @@ async function offerShipCard(pipelineId) {
   const at = featureOfPipeline(pipelineId);
   if (!at) return null;
   const fid = currentFeatureId(at.featureId);
-  const view = featureView(fid, { live: liveSliceOf });
-  if (!view || !view.ship.ready) return null;
+  const view = featureView(fid, { live: liveSliceOf, finishing: isFinishingRun });
+  if (!view || !view.ship.ready || !chatShipCardOffered(view)) return null;
   const th = featureThread(fid);
   if (!th || !askGetThread(th.threadId) || findShipCardIn(th.threadId, fid)) return null;
   const stats = await featureShipSuggestion(view);
@@ -5399,12 +5450,13 @@ async function resumeTargetDirs(saved) {
   return { projectDir, workspace: undefined };
 }
 
-async function resumeRun(pipelineId, { ignoreCostCap = false, mock = false, pastTeamCap = false, policyReason = null, by = 'local', baseCheck = false, baseAck = false, engine = null, allowUnguardedEngine = undefined, model = null, effort = null, autoLimitResume = false, auto = false, resumeCause = null } = {}) {
+function resumeRun(pipelineId, opts = {}) { return heldStops.claimed(pipelineId, (ticket) => resumeRunOnce(pipelineId, opts, ticket)); } async function resumeRunOnce(pipelineId, opts = {}, ticket = null) { const { ignoreCostCap = false, mock = false, pastTeamCap = false, policyReason = null, by = 'local', baseCheck = false, baseAck = false, engine = null, allowUnguardedEngine = undefined, model = null, effort = null, autoLimitResume = false, auto = false, resumeCause = null, confirmModel = null } = opts;
   if (!pipelineId || typeof pipelineId !== 'string') throw new ResumeError(400, { error: 'pipelineId is required' });
   if (DRAIN.on) throw new ResumeError(503, DRAIN_REFUSAL);
   const engineOpts = resumeEngineOpts(engine, allowUnguardedEngine);
   const saved = readPipelineForResume(pipelineId);
   if (!saved) throw new ResumeError(404, { error: 'pipeline not found' });
+  if (saved.row.is_test) throw new ResumeError(409, { error: TEST_TRY_RESUME_TEXT });   // D22: nothing resumes a try (a new entry would lack isTest)
   if (workModeOfRow(saved.row) === 'git' && !(await gitState()).available) throw new ResumeError(409, { error: GIT_MISSING.message, code: GIT_MISSING.code });
   // Resume with another model (a usage limit spent on one provider): every remaining step runs on it. It must be a
   // catalog model the run's harness — the one it resumes on — can run (src/shared/connections.mjs).
@@ -5423,7 +5475,7 @@ async function resumeRun(pipelineId, { ignoreCostCap = false, mock = false, past
 
   if (saved.row.archived_at) {
     throw new ResumeError(409, { error: 'pipeline is archived' });
-  }
+  } const pre = budgetStatus(), capHit = pre.pipelineLimitUsd != null && Number(saved.row.total_cost_usd || 0) >= pre.pipelineLimitUsd && ignoreCostCap !== true && !readCostCapOverride(pipelineId); const held = pre.blocked || capHit ? null : heldStops.holdResume(pipelineId, opts, ticket); if (held) return held; const waits = pre.blocked || capHit ? null : await heldStops.takeInBeforeResume(pipelineId, opts); if (waits) return waits;   // small runs slice 7 (D3): before any write; a cost refusal answers now; slice 3 (A5): a take-in clash refuses here
   // No graph re-validation on RESUME, on purpose: _restoreFromResumePoint never
   // reads the workflow row — the frozen manifest supplies topology and port
   // identity (resolvedFromManifest: snapshot wins), so a template that drifted
@@ -5524,7 +5576,7 @@ async function resumeRun(pipelineId, { ignoreCostCap = false, mock = false, past
     agentsDir: AGENTS_DIR,
     claude: { permissionMode: 'acceptEdits', mock: effMock, ...engineOpts, ...modelOpts },
     resume: saved,
-    resumedBy: by || 'local',
+    resumedBy: by || 'local', ...(typeof confirmModel === 'string' && confirmModel.trim() ? { confirmModel: confirmModel.trim() } : {}),
     // The network watch keeps a --yes run --yes across its resume (a manual resume does not).
     ...(auto === true ? { auto: true } : {}),
     ...(resumeCause ? { resumeCause } : {}),
@@ -5533,10 +5585,12 @@ async function resumeRun(pipelineId, { ignoreCostCap = false, mock = false, past
   // The engine gate's refusals answer here, before the resume is committed, like POST
   // /api/run's: the run stays paused, and the UI can show why and offer the consent when
   // it lifts the refusal. resume() checks them all again.
-  if ((orch.claude?.engine || 'claude') !== 'claude') {
-    const refusal = await orch.engineResumeRefusal();
-    if (refusal) throw new ResumeError(409, { error: refusal.error, code: 'engine-refused', overridable: refusal.overridable, engine: orch.claude.engine });
-  }
+  const refusal = await orch.engineResumeRefusal();   // every resume: a frozen step may be pinned to another harness
+  if (refusal) throw new ResumeError(409, { error: refusal.error, code: 'engine-refused', overridable: refusal.overridable, engine: orch.claude.engine, engines: refusal.engines });
+  // The e2b preflight, also before the resume is committed (the kind comes back from the resume point;
+  // a local run answers null).
+  const execRefusal = orch.execEnvStartRefusal();
+  if (execRefusal) throw new ResumeError(409, { error: execRefusal, code: 'exec-env-refused' });
 
   // A scheduled resume for this run is moot the moment any resume is committed.
   cancelScheduledResumes(pipelineId, { by, reason: `the run was resumed${byActor(by || 'local')}` });
@@ -5667,19 +5721,15 @@ async function serveAskFile(res, runDir, askId, index) {
 const ARTIFACT_RAW_MAX_BYTES = 25 * 1024 * 1024;   // the text route caps at 2 MB; why-worca.standalone.html is 7 MB
 const safeFilename = (rel) => String(rel).split('/').pop().replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 120) || 'artifact';
 
-/** Stream one indexed artifact's bytes. `rel` only SELECTS among the run's
- *  indexed rows (never a filesystem path); a stored `..` row is unreachable.
- *  `download` (the routes' `?download=1`, the viewer's and the browser's Download)
- *  is always an `attachment` under a Windows-safe name, takes any extension (no
- *  known type -> application/octet-stream) and has no preview ceiling: sendFile
- *  streams it, nothing is buffered. The preview form keeps its 415, and its 25 MB
- *  413 for every kind EXCEPT audio/video: a player streams and seeks with HTTP
- *  Range (send's default, on both forms), so a long video plays inline at any size
- *  without the file ever being buffered. */
-async function sendArtifactRaw(res, row, rel, { download = false } = {}) {
-  const hit = await resolveIndexedArtifactFileForRow(row, rel);
-  if (!hit) return res.status(404).json({ error: 'artifact not found' });
-  const mime = mimeForPath(hit.rel);
+/** Stream one file's bytes under the raw-route rules (formerly sendArtifactRaw's body; the Files tab's route shares it).
+ *  `open()` → the file handle the CALLER's path guard opened (never a path opened here), or null → 404 `notFound`.
+ *  `download` (`?download=1`): always an `attachment` under a Windows-safe name, any extension, no preview ceiling.
+ *  `asPdf` (`?as=pdf`): an Office document as its PDF preview (src/core/office-preview.mjs). Otherwise the preview form
+ *  keeps its 415 for unknown types and its 25 MB 413 for every kind EXCEPT audio/video (players stream and seek with
+ *  HTTP Range). */
+async function sendRawFile(res, { rel, open, download = false, asPdf = false, notFound = 'artifact not found' }) {
+  if (asPdf) return sendOfficePdf(res, { name: rel, open, notFound });
+  const mime = mimeForPath(rel);
   // V16: the shell's CSP `script-src 'self'` admits any script on this origin. Agent-written JS is served
   // from here, so a script load from the worca origin itself is refused, and the JS is a script only for a
   // deck's sandboxed frame (an opaque origin: cross-site). Anything else gets it as text, which nosniff never
@@ -5691,10 +5741,10 @@ async function sendArtifactRaw(res, row, rel, { download = false } = {}) {
     return res.status(403).json({ error: 'artifact scripts do not run in the worca page' });
   }
   const servedMime = isScript && fetchHeader('sec-fetch-site') !== 'cross-site' ? 'text/plain; charset=utf-8' : mime;
-  if (!mime && !download) return res.status(415).json({ error: 'no preview for this file type', rel: hit.rel });
-  // Served from the file the link check passed, never by path again (V9: openArtifactUnder).
-  const fh = await openArtifactUnder(hit.base, hit.rel);
-  if (!fh) return res.status(404).json({ error: 'artifact not found' });
+  if (!mime && !download) return res.status(415).json({ error: 'no preview for this file type', rel });
+  // The caller's guard opened it (V9: openArtifactUnder for artifacts); never by path again here.
+  const fh = await open();
+  if (!fh) return res.status(404).json({ error: notFound });
   let streaming = false;
   try {
     const st = await fh.stat();
@@ -5706,9 +5756,9 @@ async function sendArtifactRaw(res, row, rel, { download = false } = {}) {
     if ((ifMatch && ifMatch !== '*') || (Number.isFinite(unmodifiedSince) && Math.floor(st.mtimeMs / 1000) * 1000 > unmodifiedSince)) {
       return res.status(412).end();
     }
-    const kind = viewerKindFor(hit.rel);
+    const kind = viewerKindFor(rel);
     const anySize = download || kind === 'audio' || kind === 'video';
-    if (!anySize && size > ARTIFACT_RAW_MAX_BYTES) return res.status(413).json({ error: 'artifact too large to preview', rel: hit.rel, size });
+    if (!anySize && size > ARTIFACT_RAW_MAX_BYTES) return res.status(413).json({ error: 'artifact too large to preview', rel, size });
     res.set('Accept-Ranges', 'bytes');
     // One byte range for the players' seeks (express's req.range); a Range the file cannot satisfy is a 416
     // with Content-Range, never the artifact's type or name. Several ranges get the whole file.
@@ -5727,8 +5777,8 @@ async function sendArtifactRaw(res, row, rel, { download = false } = {}) {
     res.set('Content-Length', String(size ? end - start + 1 : 0));
     res.set('Content-Type', servedMime || 'application/octet-stream');
     res.set('X-Content-Type-Options', 'nosniff');
-    res.set('Content-Disposition', download ? attachmentDisposition(hit.rel)
-      : `${kind === 'binary' ? 'attachment' : 'inline'}; filename="${safeFilename(hit.rel)}"`);
+    res.set('Content-Disposition', download ? attachmentDisposition(rel)
+      : `${kind === 'binary' || kind === 'office' ? 'attachment' : 'inline'}; filename="${safeFilename(rel)}"`);
     res.set('Cache-Control', 'no-store');                       // artifacts are mutable while a run is live
     // Defense in depth for scriptable markup: even opened in a top-level tab the
     // document runs in an opaque origin. The viewer's <iframe sandbox> is the primary guard.
@@ -5759,6 +5809,46 @@ async function sendArtifactRaw(res, row, rel, { download = false } = {}) {
   } finally {
     if (!streaming) await fh.close().catch(() => {});
   }
+}
+
+/** Stream one indexed artifact's bytes. `rel` only SELECTS among the run's indexed rows (never a filesystem path); a
+ *  stored `..` row is unreachable. Served from the file the link check passed (V9: openArtifactUnder). */
+async function sendArtifactRaw(res, row, rel, { download = false, asPdf = false } = {}) {
+  const hit = await resolveIndexedArtifactFileForRow(row, rel);
+  if (!hit) return res.status(404).json({ error: 'artifact not found' });
+  return sendRawFile(res, { rel: hit.rel, open: () => openArtifactUnder(hit.base, hit.rel), download, asPdf });
+}
+/** A raw route's query flags. */
+const rawOpts = (req) => ({ download: req.query.download === '1', asPdf: req.query.as === 'pdf' });
+
+const OFFICE_PDF_STATUS = Object.freeze({ NOT_OFFICE: 415, TOO_LARGE: 413, NO_CONVERTER: 501, CONVERT_FAILED: 422, TIMEOUT: 422 });
+/** An Office document's PDF preview (inline, nosniff, no-store; the PDF itself is cached by content hash). HEAD converts
+ *  too, so the viewer's probe and the frame's GET share one conversion (the second reads the cache). */
+async function sendOfficePdf(res, { name, open, notFound = 'file not found' }) {
+  if (!isOfficePath(name)) return res.status(415).json({ error: 'Only Office documents convert to PDF.', code: 'NOT_OFFICE' });
+  const fh = await open();
+  if (!fh) return res.status(404).json({ error: notFound });
+  let buf;
+  try {
+    const st = await fh.stat();
+    if (!st.isFile()) return res.status(404).json({ error: notFound });
+    if (st.size > OFFICE_LIMITS.maxBytes) return res.status(413).json({ error: 'This document is too large to preview.', code: 'TOO_LARGE' });
+    buf = await fh.readFile();
+  } finally { await fh.close().catch(() => {}); }
+  let pdf;
+  try { pdf = await officePdf(buf, name); } catch (e) {
+    if (e instanceof OfficePreviewError) return res.status(OFFICE_PDF_STATUS[e.code] || 422).json({ error: e.message, code: e.code });
+    throw e;
+  }
+  const base = String(name).split('/').pop().replace(/\.[^.]+$/, '') || 'document';
+  res.status(200).set({
+    'Content-Type': 'application/pdf', 'Content-Length': String(pdf.size), 'X-Content-Type-Options': 'nosniff',
+    'Content-Disposition': `inline; filename="${safeFilename(`${base}.pdf`)}"`, 'Cache-Control': 'no-store',
+  });
+  if (res.req?.method === 'HEAD') return res.end();
+  const stream = fs.createReadStream(pdf.path);
+  stream.on('error', () => res.destroy());
+  stream.pipe(res);
 }
 
 /** The run dir behind a LIVE id: the pipeline id (what /api/runs/:id/artifact
@@ -6170,13 +6260,14 @@ actions.on('status', (snap) => {
   emitChanged('actions-changed', snap.status);
 });
 
-/**
- * The bare `wks-…` id of a workspace row, else null. Live rows store it bare. Rows from the legacy fs→DB
- * migration can hold the composite `workspaces/<dir>` and even `target = 'project'`
- * (migrate-fs-to-db.mjs:360-374), which is why artifacts.mjs reads `target === 'workspace' || !!workspace_key`.
- */
-const bareWorkspaceKey = (row) =>
-  (row.target === 'workspace' || row.workspace_key) && row.workspace_key ? String(row.workspace_key).replace(/^workspaces\//, '') : null;
+function runRowForScope(req, res) {
+  const scope = resolveRunScope(req, res);          // query params; answers 400/404 itself
+  if (!scope) return null;
+  const row = findPipelineRowById(req.params.id);
+  const matches = row && (scope.workspaceId ? bareWorkspaceKey(row) === scope.workspaceId : (row.project_key === (scope.projectKey || projectKey(scope.projectDir))));
+  if (!matches || row.archived_at) { res.status(404).json({ error: 'pipeline not found' }); return null; }
+  return row;
+}
 const isLiveRun = (id) => liveRunIds().includes(id);
 /**
  * D30: this process is still inside the run's orch.run()/orch.resume() promise. liveRunIds() drops a run
@@ -6264,6 +6355,16 @@ function prWatchFrame(pipelineId, memberKey) {
 }
 const prWatcherDeps = {
   originOf: prWatchOrigin,
+  // Watch.trustedReviewers: extra reviewer logins (usually review bots) whose feedback on a watched PR may
+  // start a fix run, as if they were collaborators. Read here, once per tick, from the origin project's settings.
+  trustedLogins: (origin) => {
+    try { const v = resolveSetting('watch.trustedReviewers', { projectKey: origin?.projectKey }).value; return Array.isArray(v) ? v : []; }
+    catch { return []; }
+  },
+  // Before a listed reviewer's PR-level comment starts a fix run, a short helper-model call asks whether it wants
+  // code changes (bots also post notices and placeholders). A mock run never calls a model: every comment counts.
+  triageComment: ({ origin, comment }) => origin?.mock ? true : triagePrComment({ body: comment.body, author: comment.author?.login || null,
+    projectKey: origin.projectKey, engine: origin.engine, pipelineId: origin.pipelineId }),
   host: { snapshot: prWatchSnapshot, jobLog: prWatchJobLog, rerun: prWatchRerun, reply: prWatchReply, comment: prWatchComment },
   git: {
     fetch: ({ projectDir, remote }) => fetchRemote(projectDir, { remote, maxAgeMs: 0 }),
@@ -6613,6 +6714,91 @@ const askCommands = createAskCommands({
   onFinish: (threadId, block) => { startTerminalEventTurn(threadId, block).catch((e) => console.warn(`[worca-ui] ask: terminal event for ${threadId}: ${e?.message || e}`)); },
 });
 
+/** A chat's tool folder: its newest worktree of its pinned project that still exists, else that project's own folder.
+ *  { gone } for a chat that is missing, archived or someone else's; { error, code } for a chat with no single project. */
+async function chatToolFolder(threadId, req, { trusted = false } = {}) {
+  const t = askGetThread(threadId);
+  if (!t || t.archivedAt || (!trusted && !askThreadVisible(t, req))) return { gone: true };
+  const scope = chatScopeOf(t.context);
+  if (!scope || !scope.projectKey) return designToolFolder(threadId) || { error: 'This chat has no project. Pick one in the chat to use its tools.', code: 'NO_PROJECT' };
+  const p = (await listProjects()).find((x) => x.key === scope.projectKey);
+  if (!p) return { error: `No project ${scope.projectKey}.`, code: 'NO_PROJECT' };
+  const wt = askListWorktrees(threadId)
+    .filter((w) => w.projectKey === p.key && w.path && fs.existsSync(w.path))
+    .sort((a, z) => String(z.updatedAt).localeCompare(String(a.updatedAt)))[0] || null;
+  return wt ? { dir: wt.path, label: `${p.name} · ${wt.ref}`, projectKey: p.key, worktree: true }
+    : { dir: p.path, label: p.name, projectKey: p.key, worktree: false };
+}
+
+// ── Chat links (issue 1064 §1–§2): the root a chat's file links resolve against ───────────────────────────────────────
+const chatLinks = createChatLinks();
+const RUN_ROOT_RE = /^run:([0-9a-f]{8})$/;
+/** The run a chat follows, as the root spec chatLinkRoots parses (`run:<id>`, never the bare id), or null: its newest
+ *  run link with a saved, not deleted run (there is no "follows" field; D1). An archived run still counts: its
+ *  branch is read (D2). */
+function followedRunOf(threadId) {
+  for (const l of askListRunLinks(threadId)) {
+    if (typeof l.pipelineId !== 'string' || !/^[0-9a-f]{8}$/.test(l.pipelineId)) continue;
+    const row = findPipelineRowById(l.pipelineId);
+    if (row && !row.deleted_at) return `run:${l.pipelineId}`;
+  }
+  return null;
+}
+/** A run's link roots, one per member: its folder while it has one (worktree, checkout), else its feature branch. */
+async function runLinkRoots(pid) {
+  const row = findPipelineRowById(pid);
+  if (!row || row.deleted_at) return { error: 'This run is gone.', code: 'ROOT_GONE' };
+  const root = `run:${pid}`;
+  const label = row.title || pid;
+  const targets = row.archived_at ? null : terminalTargets(row, { isLive: isLiveRun });
+  const roots = [];
+  for (const m of membersOfRow(row)) {
+    const member = row.workspace_key ? m.projectKey : null;
+    const t = targets?.members.find((x) => x.projectKey === m.projectKey);
+    if (t?.cwd && fs.existsSync(t.cwd)) { roots.push({ kind: 'dir', dir: t.cwd, root, member, label }); continue; }
+    const feature = m.br?.feature;
+    if (feature && m.projectDir && await branchExists(m.projectDir, feature)) {
+      roots.push({ kind: 'branch', repoDir: m.projectDir, ref: `refs/heads/${feature}`, root, member, label });
+    }
+  }
+  return roots.length ? { roots, root, label } : { error: "This run's files are gone: it has no folder and no branch.", code: 'ROOT_GONE' };
+}
+/** A chat's link roots: { roots, root, label } | { gone } | { error, code }. `spec` undefined = the default (the followed
+ *  run, else the chat's folder); '' = that folder; 'run:<id>' = a run it links; 'out' = its output folder. `trusted`: the tab bridge. */
+async function chatLinkRoots(threadId, req, { spec, trusted = false } = {}) {
+  const t = askGetThread(threadId);
+  if (!t || t.archivedAt || (!trusted && !askThreadVisible(t, req))) return { gone: true };
+  if (spec === 'out') return askOutRoot(threadId);   // issue 1064 D7: no project needed (the Overview's saved files)
+  const want = spec === undefined ? followedRunOf(threadId) : spec;
+  if (want) {
+    const pid = RUN_ROOT_RE.exec(String(want))?.[1];
+    if (!pid || !askListRunLinks(threadId).some((l) => l.pipelineId === pid)) return { error: 'This chat does not follow that run.', code: 'ROOT_REFUSED' };
+    const r = await runLinkRoots(pid);
+    // A default root that is gone falls back to the chat's folder; an explicit one answers why.
+    if (!r.error || spec !== undefined) return r;
+  }
+  const f = await chatToolFolder(threadId, req, { trusted });
+  if (f.gone || f.error) return f;
+  return { roots: [{ kind: 'dir', dir: f.dir, root: null, member: null, label: f.label }], root: null, label: f.label };
+}
+
+// A run keeps its run diff (live while it runs, the saved one after); a project's or chat's folder shows its
+// uncommitted work against its last commit.
+/** Run statuses whose Changes tab reads the saved diff (app.js RD_TERMINAL's ended ones). */
+const TOOL_RUN_ENDED = new Set(['done', 'stopped', 'error']);
+
+// The Browser tab's framing check (issue 1064 §3, src/core/frame-check.mjs). A remote Worca follows the chat's web
+// policy (no chat = web off: nothing is asked); a local one asks for the person at the keyboard; none behind the egress proxy.
+const frameCheck = createFrameCheck({ proxied: () => (egressNow()?.status || 'off') !== 'off' });
+
+/** Archiving or deleting a chat closes its shells: its agent-mode ones (askCommands) and the ones its tabs opened. */
+function closeChatTerminals(threadId, reason) {
+  return Promise.allSettled([
+    askCommands.closeThread(threadId),
+    terminals.closeWhere((s) => s.chatId === threadId, 'system', reason),
+  ]);
+}
+
 /** The folder an Ask command runs in: a run member's terminal target, or
  *  a project's folder only inside the chat scope (P4): the named member of its workspace, else the chat's project.
  *  The person routes' logic without their `res`; no folder ever comes from the model. */
@@ -6735,19 +6921,28 @@ function ensureSetup(runId, pk, { enabled, rerun = false }) {
 
 function sendCheckoutError(res, e) {
   const map = { NOT_FOUND: 404, BAD_REQUEST: 400, NOT_FINISHED: 409, RETAINED: 409, BRANCH_MISSING: 409,
-    BRANCH_CHECKED_OUT: 409, TARGET_EXISTS: 409, SNAPSHOT_FAILED: 409, NOT_AFFECTED: 409 };
+    BRANCH_CHECKED_OUT: 409, TARGET_EXISTS: 409, SNAPSHOT_FAILED: 409, NOT_AFFECTED: 409, TEST_TRY: 409 };
   res.status(map[e?.code] || 500).json({ error: e?.message || String(e), code: e?.code || 'ERROR',
     ...(e?.holder ? { holder: e.holder, projectKey: e.projectKey || null } : {}) });
 }
 
-/** Start now, or, while setup is pending/running/interrupted, queue behind it (D25). */
+/** Re-running `npm ci` under a live dev server would pull node_modules out from under it. */
+const liveActionsOf = (runId, pk) => actions.listFor(runId)
+  .some((s) => s.member === pk && s.actionId !== SETUP_ACTION_ID && ['starting', 'running', 'ready'].includes(s.status));
+/** A setup command saved after this checkout ran with none (Use this adds one) runs before its next start: never in a
+ *  linked folder (the person's own clone runs setup only when asked) and never under a live action of that member. */
+const setupLate = (rec, runId, pk) => rec.setup?.status === 'none' && !rec.external && !!readProjectActions(pk).setup
+  && !liveActionsOf(runId, pk);
+
+/** Start now, or, while setup is pending/running/interrupted (or added since, `setupLate`), queue behind it (D25). */
 async function startOrQueue(req, res, row, m, action, extra = {}) {
   const rec = checkoutRecOf(row.id, m.projectKey);
   if (!rec) return res.status(409).json({ error: 'Check out the run first.', code: 'NOT_CHECKED_OUT' });
   const setup = rec.setup?.status;
   if (setup === 'failed') return res.status(409).json({ error: 'The setup command failed. Fix it and run setup again.', code: 'SETUP_FAILED' });
   const spec = { runId: row.id, member: m.projectKey, worktreeDir: rec.worktreeDir, branch: rec.branch, action };
-  if (['pending', 'running', 'interrupted'].includes(setup) || setupJobs.has(`${row.id}:${m.projectKey}`)) {
+  const late = setupLate(rec, row.id, m.projectKey);
+  if (late || ['pending', 'running', 'interrupted'].includes(setup) || setupJobs.has(`${row.id}:${m.projectKey}`)) {
     const instanceId = instanceIdFor(row.id, m.projectKey, action.id);
     // A queued start that cannot start must say so; nobody is waiting on the HTTP answer any more.
     const report = (text) => {
@@ -6759,7 +6954,7 @@ async function startOrQueue(req, res, row, m, action, extra = {}) {
       recordActionFrame(instanceId, { type: 'action-status', snapshot: null, error: text });
       emitChanged('actions-changed', 'queued-failed');
     };
-    ensureSetup(row.id, m.projectKey, { enabled: true, rerun: setup === 'interrupted' })   // every caller passed requireActions
+    ensureSetup(row.id, m.projectKey, { enabled: true, rerun: setup === 'interrupted' || late })   // every caller passed requireActions
       .then((ok) => (ok ? actions.start(spec) : report('Not started: the setup command did not finish successfully.')))
       .catch((e) => report(`Not started: ${e?.message || e}`));
     return res.status(202).json({ ...extra, queued: true, instanceId });
@@ -6771,6 +6966,126 @@ async function startOrQueue(req, res, row, m, action, extra = {}) {
     res.status(status).json({ error: e.message, code: e.code || 'ERROR' });
   }
 }
+
+// ── The Browser tab's preview proxy (issue 1064, src/core/preview-proxy.mjs) ─────────────────────────────────────────
+// /preview/<port>/<token>/… forwards to 127.0.0.1 (then ::1) only. Allowed ports: every loopback port by default, or
+// the Actions range and running instances' ports (Settings › Runs › Actions › Preview ports); a hosted Worca is always
+// "Actions range only" — any loopback port there reaches the server's own internal services. Never Worca's own port.
+// Same gates as the Actions routes: hosted Worca proxies only with WORCA_ACTIONS_REMOTE=1. A token is minted per tab
+// (POST below, an exact-origin /api request) and names one port; the frame's own requests carry no cookie (opaque
+// origin), so the token is their auth.
+const isPreviewPath = (p) => typeof p === 'string' && p.startsWith('/preview/');
+/** The host guard without its Origin half: a preview page's Origin is `null` on purpose. */
+const previewHostOk = (req) => hostGuard({ headers: { host: req.headers.host } });
+const previewTokens = createPreviewTokens();
+/** 'all' | 'range' — what the proxy applies. Hosted is ENFORCED to 'range': no stored setting can lift it. */
+const previewPortMode = () => (REMOTE_MODE ? 'range' : actionsSettings().previewPorts);
+const previewRefusal = (port, { model = false } = {}) => portRefusal(port, { all: !model && previewPortMode() === 'all',
+  range: parsePortRange(actionsSettings()), held: actions.running().flatMap((s) => Object.values(s.ports || {})), self: updatePort() });
+const previewProxy = createPreviewProxy({
+  tokens: previewTokens,
+  refuse: previewRefusal,
+  pageOrigins: (req) => (req.headers.host ? [`http://${req.headers.host}`, `https://${req.headers.host}`] : []),
+  drop: () => [UI_TOKEN_HEADER, String(process.env.WORCA_IDENTITY_HEADER || '').trim()],
+  // Another Worca (a run's Action of worca itself): asked again whenever the proxy re-resolves a port's host, so a token
+  // minted for a dev server is refused once a Worca answers on that port instead.
+  isWorca: async (host, port) => (await probeUi({ host, port, timeoutMs: 1000 })).state === 'worca',
+});
+const PREVIEW_ACTIONS_OFF = 'Actions are turned off on this hosted deployment, and local previews with them. An administrator can enable them with WORCA_ACTIONS_REMOTE=1.';
+function handlePreview(req, res) {
+  if (!actionsEnabledHere(req)) return sendPreviewNote(res, 403, 'ACTIONS_DISABLED', PREVIEW_ACTIONS_OFF);
+  previewProxy.handle(req, res).catch((e) => {
+    console.warn(`[worca-ui] preview: ${e?.message || e}`);
+    if (!res.headersSent) sendPreviewNote(res, 502, 'UPSTREAM', 'The preview failed.');
+  });
+}
+/** A /preview/ WebSocket upgrade (dev-server HMR): upgrades bypass express, so the HTTP gates run here by hand. */
+async function upgradePreview(req, socket, head) {
+  const refuse = (status, text) => { socket.end(`HTTP/1.1 ${status} ${text}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`, () => socket.destroy()); };
+  socket.on('error', () => socket.destroy());
+  if (!isTrustedPeer(req)) return refuse(403, 'Forbidden');
+  dropUntrustedIdentityHeader(req);
+  if (!previewHostOk(req)) return refuse(403, 'Forbidden');
+  let who = null;
+  try { who = await requestIdentity(req); } catch { return refuse(503, 'Service Unavailable'); }
+  if (!who) return refuse(401, 'Unauthorized');
+  req.worcaUser = who;
+  if (!admitThisBoxCaller(req, { ws: true }) || !actionsEnabledHere(req)) return refuse(403, 'Forbidden');
+  return previewProxy.upgrade(req, socket, head);
+}
+function closePreviewSockets() { previewProxy.closeAll(); }
+const PREVIEW_REFUSED = {
+  BAD_PORT: [400, () => 'port must be a whole number from 1 to 65535.'],
+  SELF: [403, () => 'Worca does not preview itself.'],
+  PORT_NOT_ALLOWED: [403, (port) => {
+    const r = parsePortRange(actionsSettings());
+    return REMOTE_MODE
+      ? `Port ${port} is outside the ports Worca previews on this hosted deployment: ${r.low}–${r.high} and running Actions.`
+      : `Port ${port} is outside the ports Worca previews: ${r.low}–${r.high} and running Actions. Choose "All local ports" under Preview ports in Settings › Runs › Actions, or widen the range.`;
+  }],
+};
+
+// ── The tool panel's tabs for the chat (issue 1064 slice 3, src/core/tab-tools.mjs) ───────────────────────────────
+// The page mirrors its chat and project tabs (PUT /api/tools/tabs); open_tab adds the assistant's; screenshot_tab,
+// read_tab and Pick element load a page in headless Chrome through the same preview rules the Browser tab follows.
+const toolTabs = createToolTabsMirror();
+let pageCapture = createPageCapture();
+/** Who owns a chat's mirrored tabs: its creator on a shared deployment, '' otherwise (askViewer(req) on the page side). */
+const tabOwnerOf = (t) => (askSharedOwner(t) ? t.createdBy : '');
+const PREVIEW_ACTIONS_OFF_SHORT = 'Actions are turned off on this hosted deployment, and local previews with them.';
+const tabTools = createTabTools({
+  mirror: toolTabs,
+  thread: (threadId) => {
+    const t = askGetThread(threadId);
+    if (!t || t.archivedAt) return null;
+    return { owner: tabOwnerOf(t), projectKey: chatScopeOf(t.context)?.projectKey || null };
+  },
+  web: (threadId) => askWebAccessFor(threadId, askGetThread(threadId)?.context),
+  previewRefusal: async (port, { model = false } = {}) => {
+    if (!actionsEnabledHere(null)) return PREVIEW_ACTIONS_OFF_SHORT;
+    const why = previewRefusal(port, { model });
+    if (why) return model && why === 'PORT_NOT_ALLOWED' ? modelPortRefusal(port, parsePortRange(actionsSettings())) : PREVIEW_REFUSED[why][1](port);
+    if (await previewProxy.worcaAt(port)) return 'This port runs a Worca. Open it in a browser tab of its own.';
+    return null;
+  },
+  // Headless Chrome on THIS machine reaches Worca's own loopback listener (the command bridge's address). The token
+  // is the capture's own and is revoked when the capture ends (done), so captures never evict a live tab's token.
+  previewBase: async (port) => {
+    const token = previewTokens.issue(port);
+    return { origin: `http://127.0.0.1:${updatePort()}`, prefix: previewPrefix(port, token), done: () => previewTokens.revoke(token) };
+  },
+  capture: (o) => pageCapture.capture(o),
+  saveImage: (threadId, { name, png }) => {
+    const used = askListAttachments(threadId).reduce((n, a) => n + (Number(a.bytes) || 0), 0);
+    if (used + png.length > ASK_LIMITS.showFiles.threadBytes) {
+      throw new TabToolError(`screenshot_tab: this chat's files would pass ${Math.round(ASK_LIMITS.showFiles.threadBytes / 1048576)} MiB`, 'BUDGET');
+    }
+    const att = askAddAttachment(threadId, null, { name, kind: 'image', mime: 'image/png', data: png });
+    return { id: att.id, name: att.name, bytes: att.bytes };
+  },
+  notify: (threadId, extra = {}) => broadcast({ type: 'ask-tool-tabs', threadId, ...extra }),   // ask-*: askFrameOwner keeps it to the chat's owner
+  // open_tab files (issue 1064 §1): the chat's link root, checked by chat-links.mjs; its refusals reach the assistant.
+  fileTarget: async (threadId, input) => {
+    const r = await chatLinkRoots(threadId, null, { trusted: true });
+    if (r.gone) throw new TabToolError('open_tab: this chat is gone', 'NOT_FOUND');
+    if (r.error) throw new TabToolError(`open_tab: ${r.error}`, r.code || 'NO_ROOT');
+    try { return await chatLinks.target(r.roots, input); }
+    catch (e) { if (e instanceof ChatLinkError) throw new TabToolError(`open_tab: ${e.message}`, e.code); throw e; }
+  },
+});
+
+// The tab bridge (classic mode only: relay mode is agent isolation, where the preview proxy refuses agent callers).
+const askTabsEnabled = () => !agentIdentity(), toolPanelOn = () => flagEnabled('toolPanel');   // toolPanel: the tab tools (Labs)
+const askTabBridges = new Map();   // token -> threadId (one per turn, dropped when the turn ends)
+function askTabBridge({ threadId }) {
+  const design = askDesignHandoff(threadId), tabs = toolPanelOn(); if (!askTabsEnabled() || (!tabs && !design)) return null;
+  const token = randomBytes(24).toString('base64url');
+  askTabBridges.set(token, threadId);
+  const port = server.address()?.port || PORT;
+  return { url: `http://127.0.0.1:${port}/api/ask/tabs`, token, ...(tabs ? { tabs: true } : {}), ...(design ? { design: true } : {}), dispose: () => { askTabBridges.delete(token); tabTools.endTurn(token); } };
+}
+const tabFailure = (res, e) => res.status(e instanceof TabToolError || e?.name === 'CaptureError' ? 409 : 500)
+  .json({ error: e?.message || String(e), code: e?.code || null });
 
 // ---------------------------------------------------------------------------
 // PR remotes (fork support). The ship-it dialog picks (1) the remote the feature
@@ -6882,6 +7197,7 @@ async function resolvePrPipeline(src, res) {
     return null;
   }
   if (!state) { res.status(404).json({ error: 'pipeline not found' }); return null; }
+  if (isTestPipeline(state.id || id)) { res.status(409).json({ error: TRY_NEVER_SHIPS_TEXT }); return null; }   // 3a D45: every push, PR and publish route
   return { id, state };
 }
 
@@ -6919,7 +7235,7 @@ function chainRootFor(pipelineId, target) { return chainOf(pipelineId, target)[0
 /** A chained run's own PR base: stacked on the previous run's branch until that run's PR merges; the root otherwise. */
 function stackedBaseFor(pipelineId, target) {
   const chain = chainOf(pipelineId, target);
-  try { return stackedPrBaseOf(pipelineId, chain) || chain[0] || null; } catch { return chain[0] || null; }
+  try { return stackedPrBase(pipelineId, chain) || chain[0] || null; } catch { return chain[0] || null; }
 }
 /** One ship flow: a member's own PR, ready for review, on its stacked base (feature slices and chain runs). */
 async function openMemberPr(pipelineId, { actor = null, draft = false, onDraftFallback = null } = {}) {
@@ -6950,6 +7266,7 @@ async function openMemberPr(pipelineId, { actor = null, draft = false, onDraftFa
  */
 async function createRunPr({ id, state, target, base, memberKey = null, remotes: chosen = {}, description = '',
   draft = false, actor = null, title = null, preamble = true }) {
+  if (isTestPipeline(id)) return { ok: false, status: 409, error: TRY_NEVER_SHIPS_TEXT };   // 3a D45: also from the ship flows
   const { repoDir, feature, source } = target;
   if (!repoDir || !feature || !source) return { ok: false, status: 400, error: 'pipeline has no branch info to create a PR' };
   const picked = await pickPrRemotes(chosen, repoDir);
@@ -6988,8 +7305,6 @@ async function createRunPr({ id, state, target, base, memberKey = null, remotes:
   const pushed = await pushBranch(repoDir, feature, pushRemote);
   if (!pushed.ok) return { ok: false, status: 500, error: `git push failed: ${pushed.stderr}` };
 
-  // A PR opened by a shared bot still names the person behind it (identity.mjs); none for 'local'.
-  const footer = prAttributionFooter(state.startedBy);
   const pipelineIdForPr = state?.id || id;   // prefer the canonical state id
   // A run from the Azure Boards source links its work item to the PR.
   const sourceRef = provider.forge === 'azure' ? findPipelineRowById(pipelineIdForPr)?.source_ref ?? null : null;
@@ -6997,11 +7312,11 @@ async function createRunPr({ id, state, target, base, memberKey = null, remotes:
   // A workspace automation's work item (#711) is linked by the PR of the member it came through only, as only the
   // issue's own repository's PR closes a GitHub issue.
   if (workItemId && memberKey && !automationSourceIsRepo(sourceRef, baseR)) workItemId = null;
-  // The run's GitHub issue, closed on merge: after the description, before the footer.
+  // The run's GitHub issue, closed on merge: after the description.
   const closing = runSourceIssue(pipelineIdForPr, { baseRemote: baseR, memberKey })
     ? issueClosingLine({ sourceUrl: runSourceUrl(pipelineIdForPr), baseRepo: repo, body: description }) : '';
-  // Spec D7: a shaped run's PR ends with its checklist (the latest review cycle that has one), before the
-  // attribution footer; skipped when the description already carries it. Guarded like runSourceUrl: the branch is
+  // Spec D7: a shaped run's PR ends with its checklist (the latest review cycle that has one);
+  // skipped when the description already carries it. Guarded like runSourceUrl: the branch is
   // already pushed, so a DB error must not become a failed PR.
   let cl = null;
   if (!description.includes(CHECKLIST_PR_MARKER)) {
@@ -7012,8 +7327,8 @@ async function createRunPr({ id, state, target, base, memberKey = null, remotes:
   let lead0 = '';
   if (preamble && !memberKey) { try { lead0 = slicePrPreamble(pipelineIdForPr); } catch { lead0 = ''; } }
   const lead = description || title || state.title || feature;
-  const prBody = lead0 || description || closing || checklistMd || footer
-    ? `${lead0 ? `${lead0}\n\n` : ''}${lead}${closing ? `\n\n${closing}` : ''}${checklistMd ? `\n\n${checklistMd}` : ''}${footer}` : '';
+  const prBody = lead0 || description || closing || checklistMd
+    ? `${lead0 ? `${lead0}\n\n` : ''}${lead}${closing ? `\n\n${closing}` : ''}${checklistMd ? `\n\n${checklistMd}` : ''}` : '';
   const pr = await createPr({
     projectDir: repoDir, base, head: feature, title: title || state.title || feature, repo, headOwner,
     baseRemote: baseR, pushRemote: pushR, workItemId, draft,
@@ -7032,9 +7347,10 @@ async function createRunPr({ id, state, target, base, memberKey = null, remotes:
     // A workspace member's PR is recorded per member; the row keeps the rollup (stats count the run once).
     if (memberKey) persistMemberPrState(pipelineIdForPr, memberKey, facts);
     else persistPrState(pipelineIdForPr, facts);
-    // Who shipped it (the footer names who STARTED the run). No actor: worca opened it (a slice's draft).
+    // Who shipped it. No actor: worca opened it (a slice's draft).
     const where = memberKey ? ` in \`${target.memberName}\`` : '';
     appendAuditById(pipelineIdForPr, `PR ${pr.existed ? 'linked' : (newDraft ? 'created (draft)' : 'created')}${where}${byActor(actor)}: ${pr.url}`, { actor });
+    if (!pr.existed) announcePrOpened(pipelineIdForPr, { prUrl: pr.url, draft: newDraft, memberName: memberKey ? target.memberName : null });
   }
   return { ok: true, pr, newDraft, remotes, pushRemote, baseRemote, repo, headOwner, baseR, pipelineIdForPr, closes: !!closing || !!workItemId };
 }
@@ -7061,10 +7377,10 @@ function automationSourceIsRepo(sourceRef, baseR) {
 // from the body); baseBranch must be a well-formed ref other than the feature
 // branch; a base the base remote does not have is refused (409) before anything is pushed.
 // `body` is the "Ship it?" modal's PR description (a string of at most PR_BODY_MAX
-// characters): it becomes the PR body, the attribution footer after it. Absent,
+// characters): it becomes the PR body. Absent,
 // null or blank keeps the title-only body exactly as before. `draft` (boolean) opens a
-// new PR as a draft; the run's GitHub issue source adds a `Closes` line between the
-// description and the footer. `title` (a string of at most 256 characters) replaces the run title as the PR title;
+// new PR as a draft; the run's GitHub issue source adds a `Closes` line after the
+// description. `title` (a string of at most 256 characters) replaces the run title as the PR title;
 // blank keeps the run title.
 // ---------------------------------------------------------------------------
 const PR_TITLE_MAX = 256;
@@ -7356,7 +7672,7 @@ registerRequirementsRoutes(app, { broadcast, server, deps: {
   startRun: (body, opts) => invokeStartRun(body, null, opts),   // D6: through the run handler, as PR watch does
   runSummary: requirementsRunSummary,
 } });
-registerDesignRoutes(app, { broadcast, deps: { designBuilds, brokerStartRefusal, deleteThread: deleteAskThreadFully, dropGrants: (id) => previewGrants.revokeDesign(id), versions: { list: listVersions, restore: (id, n) => restoreVersion({ designId: id, n }) }, postSystemNotice: postAskSystemNotice, thumbs: designThumbs, soundCards } });
+const designApi = registerDesignRoutes(app, { broadcast, deps: { designBuilds, brokerStartRefusal, renameThread: (id, title, from) => { try { const t = askGetThread(id); if (t && (t.title == null || t.title === String(from).slice(0, 120))) askUpdateThread(id, { title: String(title).slice(0, 120) }); } catch { /* the chat went */ } }, dropGrants: (id) => previewGrants.revokeDesign(id), versions: { list: listVersions, restore: (id, n) => restoreVersion({ designId: id, n }) }, postSystemNotice: postAskSystemNotice, thumbs: designThumbs, soundCards } });
 registerPreviewTokenRoute(app, { flagGate: requireFlag('design'), grants: previewGrants, getDesign, viewerOf: askViewer });
 /** These routes push notes off the machine or rewrite them: a browser page must be served by THIS Worca —
  *  isLocalRequest checks the hostname, never the port, and a body-less POST needs no CORS preflight (decision E8).
@@ -7756,7 +8072,7 @@ function askChatTurnDeps(turnReader) {
   return {
     awaySwitch: (req) => askChatActions.awaySwitch(req, { actor: turnReader || 'local', person: turnReader }),
     // Shaper's two card tools need the thread (what it follows); every other kind is the chat action host's.
-    chatAction: (req, o = {}) => (req && (req.kind === 'changes' || req.kind === 'route')
+    chatAction: (req, o = {}) => (req && (req.kind === 'changes' || req.kind === 'route' || req.kind === 'requirement')
       ? askShapeAction(req, o.threadId || null)
       : askChatActions.apply(req, { actor: askActorFor(turnReader) })),
   };
@@ -7969,27 +8285,24 @@ function drainServer({ timeoutMs = drainTimeoutMs(), reason = 'stop' } = {}) {
  * (`interruptedIds`), each as the person who last started or resumed it. Resumes go through resumeRun's whole guard chain (budget gates
  * included); a refusal is logged and leaves the run waiting for a person.
  */
-async function autoResumeOnBoot({ interruptedIds = [], env = process.env, mock = isTruthy(process.env.WORCA_MOCK ?? process.env.ORCH_MOCK) } = {}) {
-  const mode = autoResumeMode(env);
-  if (mode === 'off') return { enabled: false, resumed: [], failed: [] };
+function bootResumePicks({ interruptedIds = [], env = process.env } = {}) {   // slice 5 (D7): the runs a start resumes
+  const mode = autoResumeMode(env); if (mode === 'off') return [];
   const rows = getDb().prepare(`SELECT id, status, started_by, archived_at, resume_point FROM pipelines
-    WHERE status IN ('paused', 'interrupted') AND archived_at IS NULL ORDER BY started_at ASC`).all()
-    .map((r) => { let rp = null; try { rp = r.resume_point ? JSON.parse(r.resume_point) : null; } catch { /* unreadable point */ } return { ...r, resumePoint: rp }; });
-  const picks = autoResumeCandidates(rows, {
-    interruptedNow: new Set(interruptedIds),
-    hasResumeTicket: (id) => resumeTicketsFor(id).length > 0,
-    includeInterrupted: mode === 'all',
-  });
-  const resumed = [];
-  const failed = [];
+    WHERE status IN ('paused', 'interrupted') AND archived_at IS NULL AND is_test IS NULL ORDER BY started_at ASC`).all().map((r) => { let rp = null; try { rp = r.resume_point ? JSON.parse(r.resume_point) : null; } catch { /* unreadable point */ } return { ...r, resumePoint: rp }; });
+  return autoResumeCandidates(rows, { interruptedNow: new Set(interruptedIds), hasResumeTicket: (id) => resumeTicketsFor(id).length > 0, includeInterrupted: mode === 'all' });
+}
+function autoResumeOnBoot(opts) { return autoResumeEach(opts).finally(() => bootResuming.clear()); }   // slice 5 (D8): no "being resumed" mark outlives it
+async function autoResumeEach({ interruptedIds = [], env = process.env, mock = isTruthy(process.env.WORCA_MOCK ?? process.env.ORCH_MOCK), resume = resumeRun } = {}) {
+  if (autoResumeMode(env) === 'off') return { enabled: false, resumed: [], failed: [] };
+  const picks = markBootResumes(bootResumePicks({ interruptedIds, env }), { mock }), resumed = [], failed = [];
   for (const p of picks) {
     try {
-      const out = await resumeRun(p.pipelineId, { by: p.by, mock });
+      const out = await resume(p.pipelineId, { by: p.by, mock }); if (out?.held) continue;   // slice 7 (D17)
       resumed.push({ ...p, runId: out?.runId || null });
       appendAuditById(p.pipelineId, `Pipeline resumed automatically after ${p.why === 'drain' ? 'a restart' : 'an interruption'}${byActor(p.by)}.`, { actor: p.by });
     } catch (err) {
       failed.push({ ...p, error: (err instanceof ResumeError && err.body?.error) || err?.message || String(err) });
-    }
+    } finally { bootResuming.delete(p.pipelineId); }
   }
   if (resumed.length) console.log(`[worca-ui] auto-resume: resumed ${resumed.length} run(s): ${resumed.map((r) => r.pipelineId).join(', ')}`);
   for (const f of failed) console.warn(`[worca-ui] auto-resume: ${f.pipelineId} stays ${f.why === 'drain' ? 'paused' : 'interrupted'}: ${f.error}`);
@@ -8064,6 +8377,7 @@ async function applySettingsPatch(body, { person = null } = {}) {
   const hasSmartNaming = has('smartNaming');      // null clears the stored block
   const hasDebugSpawnKey = has('debugSpawnEnabled');
   const hasKeepAwakeKey = has('keepAwake');
+  const hasChatLinksKey = has('chatLinksInPanel');
   const hasLimitResumeKey = has('resumeAfterUsageLimit');
   const hasAutoPrDescKey = has('autoGeneratePrDescription');
   const hasUpdateCheckKey = has('updateCheck');
@@ -8090,6 +8404,8 @@ async function applySettingsPatch(body, { person = null } = {}) {
   const csModels = hasCommandSummaryModelKey ? (autoModels || defragModels || agentGenModels || namingModels || await listModels('')) : null; const secondOpinionModels = has('secondOpinionModel') ? (autoModels || defragModels || agentGenModels || namingModels || csModels || await listModels('')) : null;
   const hasWorkspaceScanKey = has('workspaceScan');
   const hasRunEngineKey = has('runEngine');
+  const hasExecEnvKey = has('execEnv');
+  const e2bIntKeys = EXEC_ENV_SETTING_KEYS.filter((k) => has(k));   // the backends' limits and dockerSandbox
   const hasStepModelsKey = has('stepModels'); const hasDesignModelsKey = has('designModels');   // designModels: Models › Jobs › Design
   const hasModelRolesKey = has('modelRoles');
   const hasUtilityModelsKey = has('utilityModels');
@@ -8165,6 +8481,8 @@ async function applySettingsPatch(body, { person = null } = {}) {
     if (hasCommandSummaryModelKey) asSettingsField('commandSummaryModel', () => assertCommandSummaryModelInput(body.commandSummaryModel, csModels)); if (secondOpinionModels) asSettingsField('secondOpinionModel', () => assertSecondOpinionModelInput(body.secondOpinionModel, secondOpinionModels));
     if (hasWorkspaceScanKey) asSettingsField('workspaceScan', () => assertWorkspaceScanInput(body.workspaceScan, wsScanModels));
     if (hasRunEngineKey) asSettingsField('runEngine', () => assertRunEngineInput(body.runEngine));
+    if (hasExecEnvKey) asSettingsField('execEnv', () => assertExecEnvInput(body.execEnv));
+    for (const k of e2bIntKeys) asSettingsField(k, () => assertExecEnvSettingInput(k, body[k]));
     if (hasAskEngineKey) asSettingsField('askEngine', () => assertAskEngineInput(body.askEngine));
     if (hasRequirementsInterviewKey) await asSettingsField('requirementsInterview', async () => {
       const v = assertRequirementsInterviewInput(body.requirementsInterview);
@@ -8197,7 +8515,14 @@ async function applySettingsPatch(body, { person = null } = {}) {
     });
     if (has('nightModeToggle')) asSettingsField('nightModeToggle', () => assertNightModeToggleInput(body.nightModeToggle));
     if (hasActionsKey) asSettingsField('actions', () => assertActionsInput(body.actions));
+    if (hasActionsKey && REMOTE_MODE) asSettingsField('actions', () => {
+      if (body.actions && typeof body.actions === 'object' && body.actions.previewPorts === 'all') {
+        throw new Error('actions.previewPorts stays "Actions range only" on a hosted Worca');
+      }
+    });
     if (hasKeepAwakeKey) asSettingsField('keepAwake', () => assertKeepAwakeInput(body.keepAwake));
+    if (hasChatLinksKey) asSettingsField('chatLinksInPanel', () => assertChatLinksInPanelInput(body.chatLinksInPanel));
+    if (has('chat') && body.chat && typeof body.chat === 'object' && 'sourceBranch' in body.chat) asSettingsField('chat', () => assertChatSourceBranchInput(body.chat.sourceBranch));   // Chat runs: source branch, before root is written
     if (has('sync')) asSettingsField('sync', () => assertSyncSettingsInput(body.sync));
     if (hasNetworkWaitKey) asSettingsField('networkWait', () => assertNetworkWaitInput(body.networkWait));
     if (hasRunLimitsKey) asSettingsField('runLimits', () => assertRunLimitsInput(body.runLimits));
@@ -8231,6 +8556,7 @@ async function applySettingsPatch(body, { person = null } = {}) {
     if (hasSmartNaming) await setSmartNaming(body.smartNaming);
     if (hasDebugSpawnKey) await setDebugSpawnEnabled(body.debugSpawnEnabled);
     if (hasKeepAwakeKey) { await setKeepAwake(body.keepAwake); syncKeepAwake(); }
+    if (hasChatLinksKey) await setChatLinksInPanel(body.chatLinksInPanel);
     if (hasLimitResumeKey) await setResumeAfterUsageLimit(body.resumeAfterUsageLimit);
     if (hasAutoPrDescKey) await setAutoGeneratePrDescription(body.autoGeneratePrDescription);
     if (hasUpdateCheckKey) {
@@ -8251,6 +8577,8 @@ async function applySettingsPatch(body, { person = null } = {}) {
     if (hasWorkspaceScanKey) await setWorkspaceScanModels(body.workspaceScan, { models: wsScanModels });
     if (hasRunEngineKey) await asSettingsField('runEngine', () => setRunEngineSetting(body.runEngine));
     if (hasRunEngineKey) void reevaluateAllReadiness();   // which tool each project judges follows run.engine
+    if (hasExecEnvKey) await asSettingsField('execEnv', () => setExecEnvSetting(body.execEnv));
+    for (const k of e2bIntKeys) await asSettingsField(k, () => setExecEnvSettingKey(k, body[k]));
     if (hasStepModelsKey) await asSettingsField('stepModels', () => setStepModels(body.stepModels)); if (hasDesignModelsKey) await asSettingsField('designModels', () => setDesignModels(body.designModels));
     if (hasModelRolesKey) await asSettingsField('modelRoles', () => setModelRoles(modelRolesPatch));
     if (hasUtilityModelsKey) await asSettingsField('utilityModels', () => setUtilityModels(body.utilityModels));
@@ -8272,7 +8600,7 @@ async function applySettingsPatch(body, { person = null } = {}) {
     // Other open tabs repaint their Settings cards (a stale tab could otherwise
     // "save" its old checkbox state over this one with no feedback to either).
     if (hasSmartNaming || hasNamingModelKey) cachedPick = undefined;
-    if (hasAskKey || hasAskWeb || hasSmartNaming || hasDebugSpawnKey || hasTitleModelKey || hasHideBuiltinKey || hasHideEnginesKey || hasThemeKey || hasScreensaverKey || hasUiLevelKey || hasAutoKey || hasPrDescKey || hasAutoPrDescKey || hasHumanRateKey || hasMemoryDefragKey || hasAgentGenKey || hasNamingModelKey || hasCommandSummaryModelKey || secondOpinionModels || hasWorkspaceScanKey || has('schedule') || has('sync') || has('tagDimensions') || has('enforceTags') || has('chat') || hasAskEngineKey || hasAskModelsKey || hasRequirementsInterviewKey || hasNetworkWaitKey || hasRunLimitsKey || hasActionsKey || hasNightKey || hasRunEngineKey || hasStepModelsKey || hasDesignModelsKey || hasModelRolesKey || hasUtilityModelsKey || hasUpdateCheckKey || hasKeepAwakeKey) emitChanged('settings-changed');
+    if (hasAskKey || hasAskWeb || hasChatLinksKey || hasSmartNaming || hasDebugSpawnKey || hasTitleModelKey || hasHideBuiltinKey || hasHideEnginesKey || hasThemeKey || hasScreensaverKey || hasUiLevelKey || hasAutoKey || hasPrDescKey || hasAutoPrDescKey || hasHumanRateKey || hasMemoryDefragKey || hasAgentGenKey || hasNamingModelKey || hasCommandSummaryModelKey || secondOpinionModels || hasWorkspaceScanKey || has('schedule') || has('sync') || has('tagDimensions') || has('enforceTags') || has('chat') || hasAskEngineKey || hasAskModelsKey || hasRequirementsInterviewKey || hasNetworkWaitKey || hasRunLimitsKey || hasActionsKey || hasNightKey || hasRunEngineKey || hasStepModelsKey || hasDesignModelsKey || hasModelRolesKey || hasUtilityModelsKey || hasUpdateCheckKey || hasKeepAwakeKey) emitChanged('settings-changed');
     // Editor / Terminal: saved as typed; a program Worca cannot find comes back as a warning on its field.
     const actionsWarnings = hasActionsKey ? Object.fromEntries(['editor', 'terminal']
       .map((k) => [k, launcherWarning(actionsSettings()[k], { findOnPath: (n) => findOnPath(n) })]).filter(([, w]) => w)) : null;
@@ -8330,7 +8658,8 @@ async function presetScopeExists(scope) {
 
 /** The engine gate's early refusal for a setup on a target, without starting anything (pick-time check only). */
 async function presetEngineRefusal(setup, target, runEngine) {
-  const base = { prompt: 'probe', agentsDir: AGENTS_DIR, workflowId: setup.workflowId || 'wf_default', guardrailsId: setup.guardrailsId || defaultGuardrailSetId(), claude: { mock: !!setup.mock, ...runEngine } };
+  const overlay = setup.overlay && typeof setup.overlay === 'object' ? setup.overlay : null;
+  const base = { prompt: 'probe', agentsDir: AGENTS_DIR, workflowId: setup.workflowId || 'wf_default', guardrailsId: setup.guardrailsId || defaultGuardrailSetId(), claude: { mock: !!setup.mock, ...runEngine }, ...(overlay ? { overlay } : {}) };
   const probe = await createOrchestratorFor(target.workspaceId
     ? { ...base, workspace: { id: target.workspaceId, key: target.workspaceId, name: target.workspaceId, projects: [] } }
     : { ...base, projectDir: target.projectDir });
@@ -8352,8 +8681,8 @@ async function presetCheckCtx(scope, target, setup, { probeEngine }) {
     guardrailExists: async (id) => !!(await readGuardrailSet(id)),
     defaultGuardrailsId: defaultGuardrailSetId,
     engineRefusal: engineError ? async () => engineError
-      // Same rule as the start gate: only a non-Claude engine is probed, so a Claude preset's check builds no orchestrator.
-      : probeEngine && runEngine.engine && runEngine.engine !== 'claude' && (t.workspaceId || t.projectDir) ? () => presetEngineRefusal(setup, t, runEngine) : null,
+      // Same rule as the start gate: probed whatever the engine (a step may be pinned to another harness).
+      : probeEngine && (t.workspaceId || t.projectDir) ? () => presetEngineRefusal(setup, t, runEngine) : null,
   };
 }
 
@@ -8375,13 +8704,11 @@ async function snapshotFor(setup, basis) {
   return completeSnapshot({ ...setup, overlay: parsed.overlay || undefined }, resolved);
 }
 
-/**
- * The run's setup for pipelines.run_setup (v62): the normalized body's preset keys as full picks for the run's own
- * target — the value Save setup as preset stores. Never blocks a start: any failure (or > 32 KB) keeps nothing.
- */
+/** The run's setup for pipelines.run_setup (v62): the normalized body's preset keys as full picks for the run's own target
+ *  (none: a No-project run's global setup, no branch keys) — what Save setup as preset stores. Never blocks a start: a failure or > 32 KB keeps nothing. */
 async function runSetupOf(normalized, basis) {
   try {
-    const setup = setupFromBody(normalized, { scope: basis.workspaceId ? 'workspace' : 'project' });
+    const setup = setupFromBody(normalized, { scope: basis.workspaceId ? 'workspace' : basis.projectDir ? 'project' : 'global' });
     const json = JSON.stringify(await snapshotFor(setup, basis));
     return Buffer.byteLength(json) <= PRESET_LIMITS.setupBytes ? json : null;
   } catch (err) {
@@ -8414,7 +8741,7 @@ function askProxyBridge({ threadId }) {
 const relayProxyDeps = () => ({
   status: async () => proxyHost.chatStatus(),
   test: null,
-  testOff: PROXY_AGENT_TEXT,
+  testOff: PROXY_AGENT_TEXT, liveRun: (id) => liveRunEntry(id),   // get_run's sandbox state (security-deps.mjs runExecEnvOf)
   validateChange: validateProxyChange,
   validateFlagOn: validateProxyFlagOn,
 });
@@ -8424,7 +8751,7 @@ const relayProxyDeps = () => ({
 const SETUP_JOBS = new Map();            // id -> { id, state, results, ok, retry, startedAt, endedAt }
 const SETUP_JOB_TTL_MS = 60 * 60_000;
 let setupRunning = null;
-let setupDepsOverride = {};
+let setupDepsOverride = {}; let combineGateDeps;   // the fire-time combine gate's test seam (setCombineGateDeps)
 let setupProbesOverride = null;
 const SETUP_AGENT_TEXT = 'Setup cannot run from inside the container while agent isolation is on. Open Worca through its published address.';
 
@@ -8434,6 +8761,8 @@ function setupDeps() {
     fixedPortNow: () => proxyHost.fixedPortNow(),
     applyProxy: (np, beforeFixed) => proxyHost.applyWritten(np, beforeFixed),
     reloadLogin: () => egressNow()?.reloadLogin?.(),
+    // Through proxyHost: next to the egress sidecar the login goes there, never into the box.
+    saveLogin: async (l) => { const r = await proxyHost.login(l); if (r.status !== 200) throw new Error(r.body?.error || `the proxy login answered ${r.status}`); return r.body.login; },
     checkModelRoles: (patch, o) => checkModelRolesPatch(patch, o),
     checkAskModels: (patch, o) => checkAskModelsPatch(patch, o),
     testModel: async (id) => {
@@ -8703,7 +9032,9 @@ async function deleteAskThreadFully(id) {
   // Outside the `if (job)` block below: a thread deleted while it had a queued
   // event turn but no live job entry would otherwise keep its queue forever.
   askDeferred.delete(id);
-  await askCommands.closeThread(id).catch(() => {});        // #574: its Ask terminal sessions
+  await closeChatTerminals(id, 'chat deleted');        // #574: its Ask terminal sessions
+  // Issue 1064 slice 3: its mirrored tool panel tabs. Best-effort: a throw here must not leave the id in askDeleting.
+  try { toolTabs.dropScope(tabScope('chat', id)); } catch { /* the rows stay; no chat reaches them once it is gone */ }
   try {
     const stopJob = () => {
       const job = askJobs.get(id);
@@ -8794,10 +9125,10 @@ function askWebAccessFor(threadId, ctx) {
  *  (`edits`) — with the runtimes this host actually has (the python probe, cached 60 s); plus the web section when `web`
  *  (askWebAccess() for this turn) is on, and the MCP servers section when the turn has registry copies (`mcp`,
  *  askMcpPromptInput()). Memory is mounted, not rendered. */
-async function askSystemPromptFor(catalog, { web = null, mcp = null, commands = false, engine = 'claude', chat = null } = {}) {
+async function askSystemPromptFor(catalog, { web = null, mcp = null, commands = false, engine = 'claude', chat = null, tabs = false, design = false, designChat = false } = {}) {
   const scripts = { ...(await askScriptPromptInput({ enabled: true })), edits: scriptToolsEnabled() };
-  return askBuildSystemPrompt(catalog, { scripts, deployment: DEPLOYMENT, web, mcp, commands, git: gitAvailable(),
-    ...(engine !== 'claude' ? { engine } : {}), shape: true, ...(chat ? { chat } : {}) });
+  return askBuildSystemPrompt(catalog, { scripts, deployment: DEPLOYMENT, web, mcp, commands, tabs, design, designChat, git: gitAvailable(),
+    ...(engine !== 'claude' ? { engine } : {}), shape: true, ...(chat ? { chat } : {}), ...(flagEnabled('secretVault') ? { vault: true } : {}) });
 }
 
 /** The Workflows chat's system prompt (D10): composer rules + catalog + scripts/web — no MCP, no commands, no hosting rule. */
@@ -8805,11 +9136,6 @@ async function askComposerSystemPromptFor(catalog, { web = null, engine = 'claud
   // `enabled: true`: draft_script is ALWAYS a composer tool, so its program contract ("Scripts you can create") must
   // be in the prompt even when Ask's "Create and run scripts" setting is off (that setting gates test_script only).
   return askBuildComposerSystemPrompt(catalog, { scripts: await askScriptPromptInput({ enabled: true }), web, ...(engine !== 'claude' ? { engine } : {}) });
-}
-
-/** The Design chat's system prompt (Design P5): its own rules + the web section — no catalog, MCP, commands or hosting rule. */
-async function askDesignSystemPromptFor({ web = null, engine = 'claude' } = {}) {
-  return buildDesignSystemPrompt({ web, ...(engine !== 'claude' ? { engine } : {}) });
 }
 
 /** "scheduled Sat Sep 19, 02:00 (run 1a2b…)" / "repeats: Every weekday at 02:00 (sch_…)" / "proposes: …" — or ''. */
@@ -8886,7 +9212,7 @@ async function resolveAskContext(threadId, ctx = {}, listedAttachments = [], cur
   // Where worca runs (absent on a local install) and who the sign-in proxy verified for this request.
   try {
     const facts = deploymentFacts(process.env, { remoteMode: REMOTE_MODE, projectsRoot: getProjectsRoot() });
-    if (facts) out.deployment = facts;
+    if (facts) out.deployment = facts; out.security = await askSecurityFacts({ proxyStatus: () => proxyHost.status() }) || undefined;   // the security: line (setup, broker, agent users, network, proxy login, default sandbox)
   } catch { /* absent line */ }
   if (typeof signedIn === 'string' && signedIn) out.signedIn = signedIn;
   const scope = chatScopeOf(ctx);
@@ -8996,7 +9322,7 @@ async function resolveAskContext(threadId, ctx = {}, listedAttachments = [], cur
         // Workflows chat (D13): a composer card names its type, state and name — never the run-card shape.
         const cc = composerHeaderCard(b);
         if (cc) { cards.push(cc); continue; }
-        if (b.card && (b.card.type === 'metrics' || b.card.type === 'policy' || b.card.type === 'clone' || b.card.type === 'web' || b.card.type === 'workspace' || b.card.type === 'actions' || b.card.type === 'mcp' || b.card.type === 'away' || b.card.type === 'scope-switch' || b.card.type === 'project' || b.card.type === 'proxy' || b.card.type === 'design-round' || b.card.type === 'design-questions' || b.card.type === 'design-sound')) {
+        if (b.card && (b.card.type === 'metrics' || b.card.type === 'policy' || b.card.type === 'clone' || b.card.type === 'web' || b.card.type === 'workspace' || b.card.type === 'actions' || b.card.type === 'mcp' || b.card.type === 'away' || b.card.type === 'scope-switch' || b.card.type === 'project' || b.card.type === 'proxy' || b.card.type === 'environment' || b.card.type === 'design-round' || b.card.type === 'design-questions' || b.card.type === 'design-sound')) {
           cards.push({ id: b.id, type: b.card.type, state: b.state, summary: b.card.summary || '' });
           continue;
         }
@@ -9006,7 +9332,7 @@ async function resolveAskContext(threadId, ctx = {}, listedAttachments = [], cur
         }
         // worca Chat P2: a receipt, a stop warning or a pull-request offer in one line — the next turn sees a revert.
         if (b.card && (b.card.type === 'receipt' || b.card.type === 'run-stop' || b.card.type === 'pull-request' || b.card.type === 'ship'
-          || b.card.type === 'changes' || b.card.type === 'route')) {
+          || b.card.type === 'changes' || b.card.type === 'route' || b.card.type === 'req-change')) {
           cards.push({ id: b.id, type: b.card.type, state: b.state, summary: chatActionSummary(b.card) });
           continue;
         }
@@ -9130,7 +9456,10 @@ function askSignedIn(req) {
   return who.source === 'local' ? null : who.name;
 }
 
-async function startAskTurn({ threadId: id, thread, ctx, model, effort, text, files = [], synthetic = null, signedIn = null, reader = null, mcpOff = undefined, agentMode = undefined, client = null, onUserRow = null, chatContext = null, scopeNote = null }) {
+/** The voice-merge pre-check startAskTurn runs (tests swap it to reach the write's own in-tx refusal). */
+let askSupersedePrecheck = askSupersedeRefusal;
+
+async function startAskTurn({ threadId: id, thread, ctx, model, effort, text, files = [], synthetic = null, signedIn = null, reader = null, mcpOff = undefined, agentMode = undefined, handsFree = false, client = null, onUserRow = null, chatContext = null, scopeNote = null, supersedes = null, sendId = null }, { features = [] } = {}) {
   // §6.2.2 ATOMIC re-check + slot reservation. Today every await between the
   // top 409/429 pair and here resolves in microtasks (validateModelEffort ->
   // composeCatalog; askBuildCatalog -> three synchronous better-sqlite3
@@ -9139,8 +9468,9 @@ async function startAskTurn({ threadId: id, thread, ctx, model, effort, text, fi
   // any of those readers ever becomes genuinely async: it is synchronous —
   // check-and-set cannot interleave — and runs BEFORE the first write, so a
   // loser leaves no rows.
-  if (askDeleting.has(id)) return { ok: false, status: 409, error: 'thread is being deleted' };
-  if (askInFlight(id)) return { ok: false, status: 409, error: 'turn in flight' };
+  const supersedeAt = Date.now();   // one instant for the pre-check and the write's re-check: they cannot disagree on age
+  const busy = askDeleting.has(id) ? { error: 'thread is being deleted' } : askInFlight(id) ? { error: 'turn in flight' } : supersedes ? askSupersedePrecheck(id, supersedes, { now: supersedeAt }) : null;   // + a voice merge (docs/speech.md); its write re-checks in the tx
+  if (busy) return { ok: false, status: 409, error: busy.error, ...(busy.code ? { code: busy.code } : {}) };
   // #943: an engine switch can commit while the caller awaited after reading `thread` (a scope change, askEventPick).
   // A turn from that snapshot would run on the engine the chat just left, resume its session and store it again.
   const live = askGetThread(id);
@@ -9148,8 +9478,8 @@ async function startAskTurn({ threadId: id, thread, ctx, model, effort, text, fi
     return { ok: false, status: 409, error: 'this chat moved to another engine meanwhile: send your message again', code: 'engine-changed' };
   }
   const composerMode = thread.mode === 'composer';
-  const designMode = thread.mode === 'design';   // Design P5: a design's own chat
-  const surfaceMode = composerMode || designMode;   // a page's own chat: no MCP registry, skills, commands or join notice
+  const dChat = flagEnabled('design') ? designIdForThread(id) : null;   // a chat with a design (designs.thread_id): Ask plus the design kit
+  const surfaceMode = composerMode;   // a page's own chat: no MCP registry, skills, commands or join notice
   // D5 backstop, before anything is stored: an engine Ask does not run on (Cursor). The catalog filter
   // (ask/models.mjs) already makes such a model unknown to validateModelEffort.
   const modelEngine = model ? askTurnEngine(id, thread, model) : null;
@@ -9173,13 +9503,8 @@ async function startAskTurn({ threadId: id, thread, ctx, model, effort, text, fi
 
   let asstMsg = null;
   let turn;
-  let echoAttachments = [];
+  let echoAttachments = [], superseded = [], userMsg;
   try {
-    // Writes. Store the LAST context + model/effort on the thread (§6.5 tail, D8).
-    // `ctx` (pin-merged) rather than cv.context: the stored row is what restores
-    // the selector on reopen and what the MCP child reads for tool defaulting.
-    // The engine is stored with the model (#635): a chat stays on it even if its model later leaves the catalog.
-    askUpdateThread(id, { context: ctx, model, effort, engine: modelEngine || 'claude', ...(mcpOff !== undefined ? { mcpOff } : {}), ...(agentMode !== undefined ? { agentMode } : {}) });
     // §7.4 — NOTHING is stamped on the row before the 202: the thread stays
     // untitled (the header reads "Ask Worca") until the D13 background title
     // announces itself. titleWasAuto gates that call: a title given at THREAD
@@ -9187,16 +9512,22 @@ async function startAskTurn({ threadId: id, thread, ctx, model, effort, text, fi
     // (§17 Q&A 1). deterministicTitle is only the turn's fallback for an
     // empty haiku result (turn.mjs _kickoffTitle), never written here.
     const titleWasAuto = thread.title == null;
-    const deterministicTitle = titleWasAuto && !synthetic ? (askSanitizeTitle(stripIntentLead(text).slice(0, 80)) || 'New chat') : thread.title;
+    const deterministicTitle = titleWasAuto && !synthetic ? ((dChat && getDesign(dChat)?.title) || askSanitizeTitle(stripIntentLead(text).slice(0, 80)) || 'New chat') : thread.title;   // a design chat falls back to its design's title
     // P3: a synthetic row keeps the EVENT as its text (buildRestoredPrompt replays it truthfully) and carries the
     // human notice as a block the panel renders instead of a bubble.
     // Ask worca beside the page: the page a message was sent from ("on Run · Diff") leads its blocks; none for a Chat-page
     // message or an event turn. whereOf is pure, so the row is still written before the first await.
     const where = synthetic ? null : whereOf(ctx);
     const whereBlocks = where ? [{ kind: 'where', label: where.label, icon: where.icon }] : [];
-    const userMsg = askAppendMessage(id, synthetic
+    ({ message: userMsg, superseded } = askAppendSupersedingMessage(id, synthetic   // supersedes null = a plain append
       ? { role: 'user', text, blocks: [{ kind: 'notice', synthetic: true, ...(synthetic.quiet ? { quiet: true } : {}), text: synthetic.notice }] }
-      : { role: 'user', text, ...(whereBlocks.length ? { blocks: whereBlocks } : {}) });
+      : { role: 'user', text, ...(whereBlocks.length ? { blocks: whereBlocks } : {}) }, supersedes, { now: supersedeAt }));
+    // Writes. Store the LAST context + model/effort on the thread (§6.5 tail, D8), AFTER the user row: a voice merge
+    // the write's re-check refuses then leaves the thread as it was.
+    // `ctx` (pin-merged) rather than cv.context: the stored row is what restores
+    // the selector on reopen and what the MCP child reads for tool defaulting.
+    // The engine is stored with the model (#635): a chat stays on it even if its model later leaves the catalog.
+    askUpdateThread(id, { context: ctx, model, effort, engine: modelEngine || 'claude', ...(mcpOff !== undefined ? { mcpOff } : {}), ...(agentMode !== undefined ? { agentMode } : {}) });
     job.userMessageId = userMsg.id;
     // Freeform chat (M4): the caller records where this row came from BEFORE any listener can see it — the broadcast
     // below wakes the chat bridge's reconciler on another queue, and enqueueChatWork runs an idle queue on the next
@@ -9217,7 +9548,10 @@ async function startAskTurn({ threadId: id, thread, ctx, model, effort, text, fi
     // reachable per running thread.
     for (const f of files) f.data = null;
     echoAttachments = attRows.map((a) => ({ id: a.id, name: a.name, bytes: a.bytes, kind: a.kind, mime: a.mime }));
-    if (attRows.length || chatBlock) {
+    // FEAT-21: one frozen `feature` block per attached requirement (A-10): the snapshot the turn prompt reads and the thread keeps.
+    const featureBlocks = features.map((f) => ({ kind: 'feature', seq: f.seq, id: f.id, title: f.title, version: f.version,
+      criteriaCount: f.criteriaCount, ready: f.ready, markdown: f.markdown }));
+    if (attRows.length || chatBlock || featureBlocks.length) {
       // `kind` is the BLOCK kind, so the attachment's own kind rides as attKind
       // (the UI keys image thumbnails off it, #398).
       // P3: keep the synthetic notice in front of the attachment blocks (unreachable today — event turns pass no files — but
@@ -9229,9 +9563,10 @@ async function startAskTurn({ threadId: id, thread, ctx, model, effort, text, fi
         // A chat file keeps where it came from: the platform, which message (its own, the reply, history) and its link.
         ...attRows.map((a, i) => ({ kind: 'attachment', id: a.id, name: a.name, bytes: a.bytes, attKind: a.kind, mime: a.mime,
           ...(files[i].source ? { origin: { platform: chatPlatform, from: files[i].source.from, link: files[i].source.link ?? null } } : {}) })),
+        ...featureBlocks,
       ]);
     }
-    broadcast({ type: 'ask-message', threadId: id, message: askGetMessage(userMsg.id) }); // echo for other tabs
+    broadcast({ type: 'ask-message', threadId: id, message: askGetMessage(userMsg.id), ...(sendId ? { sendId } : {}) }); if (superseded.length) broadcast({ type: 'ask-superseded', threadId: id, messageIds: superseded, by: userMsg.id });   // echo for other tabs, then the rows a voice merge hid (not replay-buffered)
     asstMsg = askAppendMessage(id, { role: 'assistant', text: '', status: 'streaming', model, effort, engine: modelEngine || 'claude' });   // #943: per-reply engine
     job.messageId = asstMsg.id;
 
@@ -9264,11 +9599,10 @@ async function startAskTurn({ threadId: id, thread, ctx, model, effort, text, fi
     // can attach (ask/mcp.mjs mcpForEngine): a locked-down chat's lockdown allows them by name beside worca's own server.
     const engine = ASK_ENGINES.includes(modelEngine) ? modelEngine : 'claude';
     const lockedDown = engine !== 'claude';
-    // Design P8 (L8.13): every Design chat turn claims its design for the turn's person's agent (a turn with none: the
+    // Design P8 (L8.13): every turn of a chat with a design claims it for the turn's person's agent (a turn with none: the
     // design's maker's). A refused claim throws its own safe text, which the catch below answers.
-    const dChat = designMode ? designIdForThread(id) : null;   // null: the design row went before its thread
     if (dChat) designBuilds.claim(dChat, { owner: currentOwner() ?? getDesign(dChat)?.createdBy ?? null });
-    // Design P8 (L8.10): a locked-down Design chat reads its design with worca's file tools: work/ first, then its project.
+    // Design P8 (L8.10): a locked-down chat with a design reads its design with worca's file tools: work/ first, then its project.
     const did = lockedDown ? dChat : null;
     const dKey = did ? getDesign(did)?.projectKey : null;
     const dProj = dKey ? (await listProjects()).find((p) => p.key === dKey)?.path : null;
@@ -9280,20 +9614,24 @@ async function startAskTurn({ threadId: id, thread, ctx, model, effort, text, fi
     // Agent mode (#574; worca Chat R5): an Ask chat is ALWAYS in agent mode where the host allows commands at all.
     // The thread's agentMode column and a message's agentMode are still validated and stored — never read here.
     const agentOn = !surfaceMode && chatAgentModeFor(id, chatBound);
-    const systemPrompt = designMode ? await askDesignSystemPromptFor({ web, engine }) : composerMode
-      ? await askComposerSystemPromptFor(catalog, { web, engine })
-      : await askSystemPromptFor(catalog, { web, mcp: await askMcpPromptInput(mcp), commands: agentOn, engine,
-        chat: chatConv ? { platform: chatConv.platform } : null });
+    // Issue 1064 slice 3: the tab tools. Like agent mode, never in a chat bound to a platform conversation: no page or
+    // tool panel takes its tabs.
+    const tabsOn = !surfaceMode && !chatBound && askTabsEnabled();
+    const systemPrompt = composerMode ? await askComposerSystemPromptFor(catalog, { web, engine })
+      : await askSystemPromptFor(catalog, { web, mcp: await askMcpPromptInput(mcp), commands: agentOn, engine, tabs: tabsOn && toolPanelOn(), design: tabsOn && askDesignHandoff(id),
+        designChat: !!dChat, designPictures: designPicturesReady(), chat: chatConv ? { platform: chatConv.platform } : null });
     // Shared terminal: what the user ran in this chat's Ask tabs since its last user turn (their commands never wake
     // the chat; an event turn leaves them for the next user turn).
     if (!synthetic && !chatBound && askCommandsEnabled()) headerCtx.personCommands = askCommands.takePersonCommands(id);
+    if (tabsOn && toolPanelOn()) headerCtx.tabs = tabTools.headerTabs(id);
     const header = askBuildContextHeader(headerCtx);
-    // The open canvas rides the composer chat's turn prompt (never the 1 KB context header, which clips); a design chat's
-    // [design chat] block (the design, its plan, the open build and the pins) rides it the same way.
-    const composerBlock = designMode ? await designPromptBlock(askGetThread(id)) : composerMode ? await composerPromptBlock(askGetThread(id)) : '';
+    // The open canvas rides the composer chat's turn prompt (never the 1 KB context header, which clips); a chat with a
+    // design gets its [design chat] block (the design, its plan, the open build and the pins) the same way.
+    const composerBlock = dChat ? await designPromptBlock(askGetThread(id)) : composerMode ? await composerPromptBlock(askGetThread(id)) : '';
     const prompt = askBuildTurnPrompt(composerBlock ? `${header}\n\n${composerBlock}` : header, text, inline,
-      chatBlock ? askRenderChatContextPrompt(chatBlock) : '');
-    const prior = askListMessages(id).filter((m) => m.seq < userMsg.seq);
+      chatBlock ? askRenderChatContextPrompt(chatBlock) : '', askRenderAttachedRequirementsPrompt(featureBlocks),
+      { spoken: handsFree === true && !synthetic, supersedes: superseded.length > 0 });
+    const prior = askListMessages(id).filter((m) => m.seq < userMsg.seq && !m.supersededBy);   // rows a voice merge hid stay out
     const restoredPrompt = askBuildRestoredPrompt(prior, prompt);
     // #943: no provider session but replies already — the first turn after an engine switch, or after a failed resume
     // cleared the session — starts fresh WITH the transcript (text plus one line per tool call, card, run, attachment;
@@ -9307,8 +9645,8 @@ async function startAskTurn({ threadId: id, thread, ctx, model, effort, text, fi
     // A shared sign-in's name: the MCP child reads/marks notifications per person (step 3); Away mode
     // switches are attributed to it.
     const turnReader = reader || (thread.createdBy && askSharedOwner(thread) ? thread.createdBy : null);
-    // No hidden AI (L30): a design chat makes no title call and no suggestion call; an event turn makes neither.
-    const helpers = turnHelperFlags({ mode: thread.mode || null, synthetic: !!synthetic, userSeq: userMsg.seq, titleWasAuto });
+    // An event turn makes no title call and no suggestion call; a title the person or a design gave is never replaced.
+    const helpers = turnHelperFlags({ synthetic: !!synthetic, userSeq: userMsg.seq, titleWasAuto });
     turn = createAskTurn({
       threadId: id, assistantMessageId: asstMsg.id, userMessageId: userMsg.id,
       reader: turnReader,
@@ -9324,7 +9662,7 @@ async function startAskTurn({ threadId: id, thread, ctx, model, effort, text, fi
       skills: skills.result,
       agentMode: agentOn,
       composer: composerMode ? ((askGetThread(id) || {}).composer || null) : null,
-      design: designMode,
+      design: !!dChat,
       ...(designRoots ? { designRoots } : {}),
       suggest: helpers.suggest,                     // ask-suggestion: a user's message only — an event turn suggests nothing
       ...(lockedDown ? {
@@ -9343,6 +9681,7 @@ async function startAskTurn({ threadId: id, thread, ctx, model, effort, text, fi
         agentRelay: agentIdentity() ? (o) => askAgentRelay({ ...o, engine }) : null,
         commandBridge: askCommandBridge,                     // #574: null unless agent mode can work here
         proxyBridge: askProxyBridge,                         // the corporate proxy bridge: null for an agent caller
+        tabsBridge: tabsOn ? askTabBridge : null,   // issue 1064 slice 3: the tab tools
         onFrame: stampAskFrames(id, job),
         onOutOfTurn: (f) => broadcast({ ...f, threadId: id }),
         onCommentMutation: ({ runId }) => { emitDiffCommentsChanged(runId); },
@@ -9364,7 +9703,7 @@ async function startAskTurn({ threadId: id, thread, ctx, model, effort, text, fi
         // set_away_now / set_run_away_mode and (worca Chat P2) the chat's act-then-undo tools: askChatTurnDeps.
         ...askChatTurnDeps(turnReader),
         // Design P5: a start_design_build / change_design result hands over to the engine, billed to the chat's person.
-        ...(designMode ? { designAction: (req, o = {}) => designChatActions.apply(req, { ...o, by: turnReader || thread.createdBy || 'local' }) } : {}),
+        ...(dChat ? { designAction: (req, o = {}) => designChatActions.apply(req, { ...o, by: turnReader || thread.createdBy || 'local' }) } : {}),
         resolveMentions: resolveAskMentions,
         // pause / resume / skip / mark-read in the MCP child: the Schedules page and the badges repaint.
         onScheduleMutation: () => { emitChanged('schedules-changed', 'ask'); emitChanged('notifications-changed'); },
@@ -9383,7 +9722,7 @@ async function startAskTurn({ threadId: id, thread, ctx, model, effort, text, fi
         });
       } catch { /* thread gone */ }
     }
-    return { ok: false, status: 500, error: err && err.message ? err.message : String(err) };
+    return { ok: false, status: err?.code === 'supersede-refused' ? 409 : 500, error: err && err.message ? err.message : String(err), ...(err?.code === 'supersede-refused' ? { code: err.code } : {}) };   // 409: the supersede re-check in the write's tx refused, nothing written
   }
   const settleJob = (status) => {
     if (askJobs.get(id) !== job) return;
@@ -9405,7 +9744,7 @@ async function startAskTurn({ threadId: id, thread, ctx, model, effort, text, fi
       console.error(`[worca-ui] ask turn crashed: ${err && err.message ? err.message : err}`);
       settleJob('error');
     });
-  return { ok: true, job, userMessageId: job.userMessageId, assistantMessageId: job.messageId, attachments: echoAttachments };
+  return { ok: true, job, userMessageId: job.userMessageId, assistantMessageId: job.messageId, attachments: echoAttachments, superseded };
 }
 /** The text of the system row that marks a switch (and that the handoff transcript then carries). */
 const askEngineSwitchText = (from, to) => `Switched from ${engineLabel(from)} to ${engineLabel(to)}`;
@@ -9421,7 +9760,7 @@ async function askContextTokens(model) {
 /** The turns the first turn after a switch leaves out of its transcript, counted WITH the switch's own row (that turn
  *  sees it). Synchronous, so the commit can recount with no await before its transaction. */
 function askSwitchTranscript(id, { from, to, budget }) {
-  const rows = [...askListMessages(id), { role: 'system', text: askEngineSwitchText(from, to), blocks: [] }];
+  const rows = [...askListMessages(id).filter((m) => !m.supersededBy), { role: 'system', text: askEngineSwitchText(from, to), blocks: [] }];   // rows a voice merge hid are not turns
   const hand = askBuildHandoffPrompt(rows, '', { to, maxChars: budget });
   return { totalTurns: hand.totalTurns, droppedTurns: hand.droppedTurns };
 }
@@ -9431,7 +9770,7 @@ function askSwitchTranscript(id, { from, to, budget }) {
 // the Models page's Command summaries helper job — the redacted command alone, cached per process.
 // ---------------------------------------------------------------------------
 const commandSummariser = createCommandSummariser({
-  pickModel: async () => resolveNamingModel(withRole(storedCommandSummaryModel(), 'claude', 'commandSummaryModel'), await listModels(''), modelCostConfig),
+  pickModel: async () => resolveNamingModel(withRole(storedCommandSummaryModel(), 'claude', 'commandSummaryModel', { floor: false }), await listModels(''), modelCostConfig),
   onCost: (c) => { try { recordUtilityCost('commandSummary', c); } catch { /* a ledger write never fails a summary */ } },
 });
 /** Read before the call and after the answer: the Labs flag, the person's Settings › Chat switch, no mock, the cost limit not reached. */
@@ -9451,7 +9790,7 @@ const NAMING_PICK_TTL_MS = 60_000;
 const warnedStaleNaming = new Set();
 async function namingCatalog() {
   const rows = await listModels('');
-  const picked = resolveNamingModel(withRole(storedNamingModel(), 'claude', 'namingModel'), rows, modelCostConfig);
+  const picked = resolveNamingModel(withRole(storedNamingModel(), 'claude', 'namingModel', { floor: false }), rows, modelCostConfig);
   if (picked.stale && !warnedStaleNaming.has(picked.stale)) {
     warnedStaleNaming.add(picked.stale);
     console.warn(`[worca] namingModel ${JSON.stringify(picked.stale)} is no longer in the catalog — run naming uses the cheapest ready Claude model`);
@@ -9579,9 +9918,9 @@ async function startMetricsEventTurn(threadId, block) {
   const state = block.state === 'declined' ? 'declined' : block.state === 'failed' ? 'failed' : 'applied';
   const result = card.result || null;
   // One event turn for every non-workflow card; the type picks the wording. Metrics is the fallback.
-  const kind = card.type === 'policy' || card.type === 'schedule' || card.type === 'model' || card.type === 'clone' || card.type === 'web' || card.type === 'workspace' || card.type === 'actions' || card.type === 'mcp' || card.type === 'away' || card.type === 'project' || card.type === 'proxy' || card.type === 'script-approval' ? card.type : 'metrics';
-  const eventPrompt = { policy: policyEventPrompt, schedule: scheduleEventPrompt, model: modelEventPrompt, clone: cloneEventPrompt, web: webEventPrompt, workspace: workspaceEventPrompt, actions: actionsEventPrompt, mcp: mcpEventPrompt, away: awayEventPrompt, project: projectEventPrompt, proxy: proxyEventPrompt, 'script-approval': scriptEventPrompt, metrics: metricsEventPrompt }[kind];
-  const noticeText = { policy: policyNoticeText, schedule: scheduleNoticeText, model: modelNoticeText, clone: cloneNoticeText, web: webNoticeText, workspace: workspaceNoticeText, actions: actionsNoticeText, mcp: mcpNoticeText, away: awayNoticeText, project: projectNoticeText, proxy: proxyNoticeText, 'script-approval': scriptNoticeText, metrics: metricsNoticeText }[kind];
+  const kind = card.type === 'policy' || card.type === 'schedule' || card.type === 'model' || card.type === 'clone' || card.type === 'web' || card.type === 'workspace' || card.type === 'actions' || card.type === 'mcp' || card.type === 'away' || card.type === 'project' || card.type === 'proxy' || card.type === 'environment' || card.type === 'script-approval' ? card.type : 'metrics';
+  const eventPrompt = { policy: policyEventPrompt, schedule: scheduleEventPrompt, model: modelEventPrompt, clone: cloneEventPrompt, web: webEventPrompt, workspace: workspaceEventPrompt, actions: actionsEventPrompt, mcp: mcpEventPrompt, away: awayEventPrompt, project: projectEventPrompt, proxy: proxyEventPrompt, environment: envEventPrompt, 'script-approval': scriptEventPrompt, metrics: metricsEventPrompt }[kind];
+  const noticeText = { policy: policyNoticeText, schedule: scheduleNoticeText, model: modelNoticeText, clone: cloneNoticeText, web: webNoticeText, workspace: workspaceNoticeText, actions: actionsNoticeText, mcp: mcpNoticeText, away: awayNoticeText, project: projectNoticeText, proxy: proxyNoticeText, environment: envNoticeText, 'script-approval': scriptNoticeText, metrics: metricsNoticeText }[kind];
   const text = eventPrompt({ cardId: block.id, state, card, result });
   const notice = noticeText({ state, card, result });
   const mv = await askEventPick(threadId, thread);
@@ -10014,12 +10353,12 @@ app.use((err, _req, res, next) => {
  * everything up to the first `await` — including the reconcile — still runs before
  * `server.listen`, exactly as it did when this was an inline block.
  *
- * @param {{log?: (scope:'run-root'|'legacy'|'ask-worktrees'|'repo-look', level:string, msg:string) => void}} [args]
+ * @param {{log?: (scope:'run-root'|'workflow-tests'|'legacy'|'ask-worktrees'|'repo-look', level:string, msg:string) => void}} [args]
  *        optional sink for the per-candidate lines both sweeps emit; omitted, each
  *        sweep keeps its own console default.
  */
-export async function bootMaintenance({ log } = {}) {
-  const summary = { reconciled: 0, sweptV1: 0, recoveredBriefs: 0, recoveredAttachmentReads: 0, attachmentReadFolders: null, attachmentTempBodies: null, runRoots: null, legacy: null, ask: null, askWorktrees: null, repoLooks: null, requirementsRepoLooks: null, bench: null };
+export async function bootMaintenance({ log, onReconciled } = {}) {
+  const summary = { reconciled: 0, sweptV1: 0, recoveredBriefs: 0, recoveredAttachmentReads: 0, attachmentReadFolders: null, attachmentTempBodies: null, runRoots: null, testCopies: null, legacy: null, ask: null, askWorktrees: null, repoLooks: null, requirementsRepoLooks: null, bench: null, e2b: null };
   const sink = (scope) => (typeof log === 'function' ? (level, msg) => log(scope, level, msg) : undefined);
 
   // Runs left 'running' by a previous process that died before writing a terminal
@@ -10032,6 +10371,7 @@ export async function bootMaintenance({ log } = {}) {
   } catch (err) {
     console.error(`[worca-ui] stale-run reconcile failed: ${err && err.message ? err.message : err}`);
   }
+  if (typeof onReconciled === 'function') try { onReconciled(summary.reconciledIds || []); } catch (err) { console.error(`[worca-ui] boot resume marks failed: ${err?.message || err}`); }   // slice 5 (D6): before the first await
 
   // A DB stamped past 24 by a divergent ladder can still hold v1 resume points
   // (crash-reconciled runs keep theirs). One idempotent sweep per boot.
@@ -10050,6 +10390,7 @@ export async function bootMaintenance({ log } = {}) {
   } catch (err) {
     console.error(`[worca-ui] requirements sweep failed: ${err && err.message ? err.message : err}`);
   }
+  recoverTestsAtBoot();   // workflow tests (D27, 3b M2): interrupted tests and stale Claude staging folders; synchronous, never throws
   // Requirements A7 (D15): a product brief left `making` by this restart gets INTERRUPTED. This runs before the
   // first await, but boot maintenance is not awaited before listen, so recoverBriefs skips a brief whose job runs.
   try {
@@ -10082,6 +10423,11 @@ export async function bootMaintenance({ log } = {}) {
   } catch (err) {
     console.error(`[worca-ui] run-root sweep failed: ${err && err.message ? err.message : err}`);
   }
+  summary.testCopies = await sweepTestCopiesAtBoot(sink('workflow-tests'));   // workflow tests (D61): after the run-root sweep; never rejects
+
+  // Orphan sandboxes of this instance, per backend (docs/e2b.md, sweep.mjs sweepAllBackends): before autoResumeOnBoot.
+  summary.execEnvs = await sweepAllBackends();
+  summary.e2b = summary.execEnvs.e2b ?? null;
 
   // The one-time legacy sweep (§6 Phase 7). A TOTAL no-op while the effective mode is
   // `legacy` — under legacy those paths hold every live and every paused run, so
@@ -10308,8 +10654,10 @@ if (isMain) {
   // else runs, so every child and worca's own fetch() (useEnvProxy, next) go through it. It fails
   // closed: without the proxy, agents would have no restriction at all.
   // D6: the old Labs flag becomes networkProxy.enabled, once, before the proxy reads it.
-  await migrateCorporateProxyFlag();
+  tightenSettingsFileMode(); await migrateCorporateProxyFlag(); primeSettingsVaultIfEnabled().catch(() => {});   // settings.json 0600 first, never fatal; the vault key's prime starts here (with the flag on the start waits a bounded time for it below)
   await migrateKeepAwakeFlag();   // the graduated flag becomes the keepAwake setting
+  if (vaultInUse()) await primeSettingsVaultIfEnabled({ settle: true });   // the proxy login, channels, the notifier, plugin models and the proxy host read vaulted secrets once at start: they wait for the settle (at most the store time limit + 250 ms)
+  noteStoreCheck(await migrateSecretsIfEnabled({ reason: 'start', deployment: DEPLOYMENT }));   // flag on, local install: file-stored secrets saved before the vault move into it (never rejects; the Settings line shows a failed OS-store check)
   let fetchProxy = null;
   try {
     EGRESS_LIVE = await startLiveEgress({
@@ -10319,6 +10667,7 @@ if (isMain) {
     });
     const egressLine = egressNotice(EGRESS_LIVE.current());
     if (egressLine) console[egressLine.level === 'warn' ? 'warn' : 'log'](`[worca-ui] ${egressLine.text}`);
+    startSidecarBoot({ networkProxy: networkProxySettings, log: (lv, t) => console[lv === 'warn' ? 'warn' : 'log'](`[worca-ui] ${t}`) });
   } catch (err) {
     console.error(`[worca-ui] outbound network policy: the policy proxy could not start (${err && err.message ? err.message : err}). Not starting.`);
     process.exit(78);
@@ -10351,6 +10700,10 @@ if (isMain) {
     }
   }
 
+  // Secret files Worca read at start, with agent users on: 0600 and Worca's own (secret-files.mjs; the broker's in checkBrokerAtBoot).
+  const badSecretFiles = secretFileRefusals({ names: ['WORCA_EGRESS_SECRET_FILE', 'WORCA_GH_APP_KEY_FILE'] });
+  if (badSecretFiles.length) { for (const e of badSecretFiles) console.error(`[worca-ui] secrets: ${e}`); console.error('[worca-ui] not starting.'); process.exit(78); }
+
   // Credential broker (docs/credential-broker.md): with WORCA_BROKER_URL set, worca holds no
   // model credential. Refuse to serve while one is still reachable by agents, or while the
   // broker can't be reached.
@@ -10382,7 +10735,7 @@ if (isMain) {
     console.error(`[worca-ui] builtin marketplace seed skipped: ${err && err.message ? err.message : err}`);
   }
 
-  bootMaintenance().then((summary) => {
+  bootMaintenance({ onReconciled: (ids) => markBootResumes(bootResumePicks({ interruptedIds: ids })) }).then((summary) => {
     // B3: continue what the last stop paused (and, with WORCA_AUTO_RESUME=1, what a crash interrupted).
     autoResumeOnBoot({ interruptedIds: summary?.reconciledIds || [] })
       .then((boot) => {
@@ -10400,7 +10753,7 @@ if (isMain) {
       })
       .catch((err) => console.error(`[worca-ui] auto-resume failed: ${err && err.message ? err.message : err}`));
   }, (err) => {
-    bootMaintenanceFailed = true;
+    bootMaintenanceFailed = true; bootResuming.clear();
     console.error(`[worca-ui] boot maintenance failed: ${err && err.message ? err.message : err}`);
   });
 
@@ -10463,11 +10816,13 @@ if (isMain) {
     }).then(() => { wroteInstanceFile = true; }, (err) => {
       console.error(`[worca-ui] could not write the instance file (\`worca ui stop\` cannot stop this server — use Ctrl+C): ${err && err.message ? err.message : err}`);
     });
+    ensureSetupMarker({ isFresh: isFreshInstall() }).catch((err) => console.error(`[worca-ui] setup marker at boot failed: ${err && err.message ? err.message : err}`));
     try { channelHost.start(); } catch (err) {
       console.error(`[worca-ui] chat channel host failed to start: ${err && err.message ? err.message : err}`);
     }
     try { for (const c of listActiveConversations()) { watchChatThread(c.askThreadId); enqueueChatWork(`${c.platform}:${c.chatId}`, () => chatBridge.reconcile(c)); } }
     catch (err) { console.error(`[worca-ui] chat reconcile at boot failed: ${err && err.message ? err.message : err}`); }
+    try { startSecretsProbe({ log: (m) => console.log(m) }); } catch { /* never awaited; a hung OS key store cannot hold up the start */ }
     try { startTeamMetricsBackground({ log: (m) => console.warn(m) }); }
     catch (err) { console.warn(`[worca-ui] team metrics background: ${err?.message || err}`); }
     try {
@@ -10528,20 +10883,23 @@ if (isMain) {
   });
 }
 
-export { app, server, runs };
-export { AGENTS_DIR, APP_INFO, APP_REPO_URL, ASK_DEFERRED_REPLIES_MAX, ASK_SCOPE_BUSY, ASK_TEXT_PREVIEW_MAX, BRANCH_SETTLED, BUGS_SLUG, CLONE_JOBS, HOST, MARKETPLACE_ID_RE, MARKET_JOBS, NO_PR_HOST, PKG_VERSION, PLAN_TEXT_MAX, PLUGIN_NAME_RE, PORT, PROJECT_ROOT, PR_TITLE_MAX, REMOTE_MODE, RUNNING_VERSION, ResumeError, SETTLED_RUN, SETUP_AGENT_TEXT, SETUP_JOBS, SKILLS_DIR, SKILL_FOLDER_IMPORTS, SKILL_MD_UNREACHABLE, STORE_ERROR_CODES, actions, actionsEnabledHere, activeActionSnaps, adoWebhookSecret, afterMembersChanged, afterProjectRegistered, agentErrorStatus, agentMayBeCaller, answerRun, applyProjectSettingsPatch, applySettingsPatch, askBusyReason, askChatActions, askChatEngine, askChatEngineGate, askCommandBridges, askCommands, askCommandsEnabled, askContextTokens, askCredentialGate, askDeferred, askDeferredReplies, askDeleting, askEngineSwitchText, askEventPick, askFilesRunDir, askFilesStoreDir, askFollowers, askGroupFor, askGroupThreads, askIdParam, askInFlight, askLiveRun, askProxyBridges, askRefResolver, askRelays, askRunFromPipelineRow, askRunningCount, askSignedIn, askSwitchTranscript, askThreadVisible, askTrackingCount, askTurnEngine, askValidateScope, askViewer, askWebAccessFor, askWorktreesEnvelope, autoDetectedBuiltins, automationWorkspaceMembers, automations, awayPersonOf, badRequest, bareWorkspaceKey, bearerMatches, broadcast, broadcastFeature, brokerStartRefusal, builtins, busyActionRunIds, channelHost, chatGroupError, chatNotifier, chatRefusals, checkoutRecOf, commentIdParam, commentsCreate, commentsDelete, commentsFail, commentsList, commentsPatch, commentsReply, createRunPr, crosslinkMemberPrs, currentUpdateEligibility, defaultPrRemotes, deleteAskThreadFully, designBuilds, designChatActions, detectSystemProxyImpl, detectTeamMemorySoon, drainServer, effectiveUiLevel, egressNow, emitAskWorktrees, emitChanged, emitMemoryChanged, emitPluginsChanged, ensureSetup, extensionPairing, factDeps, failedEventTurn, featureShipping, findScheduleItem, findShipCardIn, flipCard, followCloneCard, forkPrRefusal, fsAllowedRoots, fsLimitedHere, gitMissing, isFinishingRun, isFreshInstall, isLiveRun, isPlainObject, isPrStoreKey, isTruthy, kickAutomations, kickPrWatch, labelsOn, lastUpdateResult, liveAutoRescan, liveDefragRun, liveDiffOf, livePr, liveProbe, liveRunEntry, liveRunIds, liveSliceOf, marketJobFailure, mcpRunPreview, mcpTargetOf, memberFor, memoryError, modelTestsInFlight, namingBucket, namingCatalog, namingOn, namingPick, noRawCommand, notifReader, openMemberPr, ownsWorkspaceTarget, parseMcpOptOut, pauseRun, pickPrRemotes, pinUiLevel, postAskSystemNotice, postDirection, prTargetFor, prWatchFrame, prWatcher, presetCheckCtx, presetScopeOf, primaryMemberOf, projectAutomationRepo, projectDirForKey, projectSettingsState, proxyHost, pruneMarketJobs, prunedNote, publicCloneJob, readInstalledManifest, refuseAgentCaller, refuseSignedOutClaude, registeredProjectForDir, rejectRawTerminalFields, removeRecommendation, requireActions, requireFsAllowed, requireTerminal, resolvePrPipeline, resolveProjectDir, resolveRunScope, resumeEngineOpts, resumeRun, resumeTargetDirs, runGroupIds, runSourceIssue, scanModelsFor, scanRequest, scheduleVerb, sendArtifactRaw, sendCheckoutError, sendMetricsError, sendPolicyError, sendPresetError, serveAskFile, serverMockMode, settleShipped, setupJobs, setupProbesOverride, shipChainNow, shipCtxOf, shipFeatureNow, skillRunPreview, snapshotFor, sockets, soundCards, stackStates, stackTokens, startAgentGen, startAskTurn, startCloneJob, startMetricsEventTurn, startOrQueue, startRunAs, startRunHandler, startScopeEventTurn, startScriptBench, stopCheckoutServices, stopMemberServices, stopPausedPipeline, stopRun, switchThreadScope, syncMode, syncProjectAction, syncRoute, teamOriginOk, teamWarn, terminalCallerOk, terminalEnabledHere, terminalError, terminalSameOrigin, terminals, tmProject, uiControl, unsyncableBlock, updateChecker, updatePort, updatePreview, validateResumeTarget, versionLister, versionPayload, webhookSecret, withAfter, workspaceMembersBusy };
+export { app, server, runs, reqChanges };
+export { AGENTS_DIR, APP_INFO, APP_REPO_URL, ASK_DEFERRED_REPLIES_MAX, ASK_SCOPE_BUSY, ASK_TEXT_PREVIEW_MAX, BRANCH_SETTLED, BUGS_SLUG, CLONE_JOBS, DEPLOYMENT, HOST, MARKETPLACE_ID_RE, MARKET_JOBS, NO_PR_HOST, PKG_VERSION, PLAN_TEXT_MAX, PLUGIN_NAME_RE, PORT, PREVIEW_REFUSED, PROJECT_ROOT, PR_TITLE_MAX, REMOTE_MODE, RUNNING_VERSION, ResumeError, SETTLED_RUN, SETUP_AGENT_TEXT, SETUP_JOBS, SKILLS_DIR, SKILL_FOLDER_IMPORTS, SKILL_MD_UNREACHABLE, STOPS_IN_FLIGHT, STORE_ERROR_CODES, TOOL_RUN_ENDED, actions, actionsEnabledHere, activeActionSnaps, adoWebhookSecret, afterMembersChanged, afterProjectRegistered, agentErrorStatus, agentMayBeCaller, answerRun, applyProjectSettingsPatch, applySettingsPatch, askBusyReason, askChatActions, askChatEngine, askChatEngineGate, askCommandBridges, askCommands, askCommandsEnabled, askContextTokens, askCredentialGate, askDeferred, askDeferredReplies, askDeleting, askEngineSwitchText, askEventPick, askFilesRunDir, askFilesStoreDir, askFollowers, askGroupFor, askGroupThreads, askIdParam, askInFlight, askLinkIsPrFix, askLiveRun, askProxyBridges, askRefResolver, askRelays, askRunFromPipelineRow, askRunningCount, askSignedIn, askSupersedePrecheck, askSwitchTranscript, askTabBridges, askTabsEnabled, askThreadVisible, askTrackingCount, askTurnEngine, askValidateScope, askViewer, askWebAccessFor, askWorktreesEnvelope, attachAskFollower, autoDetectedBuiltins, automationWorkspaceMembers, automations, awayPersonOf, badRequest, bareWorkspaceKey, bearerMatches, broadcast, broadcastFeature, brokerStartRefusal, builtins, busyActionRunIds, channelHost, chatGroupError, chatLinkRoots, chatLinks, chatNotifier, chatRefusals, chatToolFolder, checkoutRecOf, closeChatTerminals, commentIdParam, commentsCreate, commentsDelete, commentsFail, commentsList, commentsPatch, commentsReply, createRunPr, crosslinkMemberPrs, currentUpdateEligibility, defaultPrRemotes, deleteAskThreadFully, designApi, designBuilds, designChatActions, detectSystemProxyImpl, detectTeamMemorySoon, drainServer, effectiveUiLevel, egressNow, emitAskWorktrees, emitChanged, emitMemoryChanged, emitPluginsChanged, ensureSetup, extensionPairing, factDeps, failedEventTurn, featureShipping, findScheduleItem, findShipCardIn, flipCard, followCloneCard, followedRunOf, forkPrRefusal, frameCheck, fsAllowedRoots, fsLimitedHere, gitMissing, invokeStartRun, isFinishingRun, isFreshInstall, isLiveRun, isPlainObject, isPrStoreKey, isTruthy, kickAutomations, kickPrWatch, labelsOn, lastUpdateResult, liveActionsOf, liveAutoRescan, liveDefragRun, liveDiffOf, livePr, liveProbe, liveRunEntry, liveRunIds, liveSliceOf, marketJobFailure, mcpRunPreview, mcpTargetOf, memberFor, memoryError, modelTestsInFlight, namingBucket, namingCatalog, namingOn, namingPick, noRawCommand, notifReader, openMemberPr, ownsWorkspaceTarget, parseMcpOptOut, pauseRun, pickPrRemotes, pinUiLevel, postAskSystemNotice, postDirection, prTargetFor, prWatchFrame, prWatcher, prWatcherDeps, presetCheckCtx, presetScopeOf, previewPortMode, previewProxy, previewRefusal, previewTokens, primaryMemberOf, projectAutomationRepo, projectDirForKey, projectSettingsState, proxyHost, pruneMarketJobs, prunedNote, publicCloneJob, rawOpts, readInstalledManifest, refuseAgentCaller, refuseSignedOutClaude, registeredProjectForDir, rejectRawTerminalFields, removeRecommendation, requireActions, requireFsAllowed, requireTerminal, resolvePending, resolvePrPipeline, resolveProjectDir, resolveRunScope, resumeEngineOpts, resumeRun, resumeTargetDirs, runGroupIds, runRowForScope, runSourceIssue, runSyncOpts, scanModelsFor, scanRequest, scheduleVerb, sendArtifactRaw, sendCheckoutError, sendMetricsError, sendOfficePdf, sendPolicyError, sendPresetError, sendRawFile, serveAskFile, serverMockMode, settleShipped, setupJobs, setupLate, setupProbesOverride, shipChainNow, shipCtxOf, shipFeatureNow, skillRunPreview, snapshotFor, sockets, soundCards, stackStates, stackTokens, startAgentGen, startAskTurn, startCloneJob, startMetricsEventTurn, startOrQueue, startRunAs, startRunHandler, startScopeEventTurn, startScriptBench, stopCheckoutServices, stopMemberServices, stopPausedPipeline, stopRun, switchThreadScope, syncMode, syncPrecheck, syncProjectAction, syncRoute, tabFailure, tabOwnerOf, tabTools, teamOriginOk, teamWarn, terminalCallerOk, terminalEnabledHere, terminalError, terminalSameOrigin, terminals, tmProject, toolPanelOn, toolTabs, uiControl, unsyncableBlock, updateChecker, updatePort, updatePreview, validateResumeTarget, versionLister, versionPayload, webhookSecret, withAfter, workspaceMembersBusy };
 export const _testing = {
-  chatBridge, invokeAskCard, askBus, chatAgentModeFor, chatTurnIdentity,
+  toolTabs, tabTools, askTabBridge, previewTokens, setPageCapture: (c) => { pageCapture = c || createPageCapture(); },
+  chatBridge, invokeAskCard, askBus, chatAgentModeFor, chatTurnIdentity, settleStaleParkedEntries,
   updateChecker,
   // Chat context: tests never reach a CDN (null = the real fetch again).
   setChatFileFetch: (fn) => { chatFileFetch = typeof fn === 'function' ? fn : defaultChatFileFetch; },
+  // Voice merge: swap startAskTurn's pre-check (null = the real one again) to reach the write's in-tx refusal.
+  setSupersedePrecheck: (fn) => { askSupersedePrecheck = typeof fn === 'function' ? fn : askSupersedeRefusal; },
   // The startEgressPolicy() result the /api/proxy routes read, or a startLiveEgress() that also applies saves.
   setEgress: (e) => { EGRESS = e; },
   setLiveEgress: (l) => { EGRESS_LIVE = l; },
   setSystemProxyDetect: (fn) => { detectSystemProxyImpl = fn || detectSystemProxy; },
   proxyHost,
   // Setup assistant: swap the apply side effects / detect probes; resetSetup drops overrides, the lock and the jobs.
-  setSetupDeps: (o) => { setupDepsOverride = o || {}; },
+  setSetupDeps: (o) => { setupDepsOverride = o || {}; }, setCombineGateDeps: (d) => { combineGateDeps = d || undefined; },
   setSetupProbes: (p) => { setupProbesOverride = p || null; },
   resetSetup: () => { setupDepsOverride = {}; setupProbesOverride = null; setupRunning = null; SETUP_JOBS.clear(); },
   setUpdateFetcher: (fn) => { updateFetcherOverride = typeof fn === 'function' ? fn : null; updateChecker.clear(); },
@@ -10561,12 +10919,12 @@ export const _testing = {
   uiControl, bearerMatches, uiToken: () => UI_TOKEN,
   broadcast, sockets, askFilesRunDir,
   validateResumeTarget, resumeTargetDirs, maybeScheduleLimitResume, resumeTargetOf, fireResumeTicket, cancelScheduledResumes, stopPausedPipeline,
-  trackHeartbeat, heartbeatTick, BOOT_ID, drainServer, autoResumeOnBoot, DRAIN, collectPlatformHeartbeat, closeAtTokenExpiry, settleShutdownSteps,
+  trackHeartbeat, heartbeatTick, BOOT_ID, drainServer, autoResumeOnBoot, bootResumePicks, markBootResumes, bootResumingIds, liveSliceOf, heldStops, DRAIN, collectPlatformHeartbeat, closeAtTokenExpiry, settleShutdownSteps,
   askCommandBridge, askProxyBridge, askCommands, askCommandsEnabled, askCommandTarget, drainAskDeferred, startScopeEventTurn, startTerminalEventTurn, terminals, prWatcher, automations, automationHost, automationDraftPr, liveRunOnBranch, terminalResolveOnBranch, prWatchMergeBase, prWatchOrigin, prWatchFrame,
   prWatcherDeps, askPrFixRun, askLinkIsPrFix, prFixRoundOf,
   applySettingsPatch, applyProjectSettingsPatch, askChatActions, askChatSettings, askChatTurnDeps, askShapeAction,
   openMemberPr, stackedBaseFor, chainRootFor, shipChainNow, afterRunSettled, offerShipCard, syncShipCard, draftReleasesOnMerge,
-  startAutoRescan,
+  startAutoRescan, sweepRunRetention,
   networkWatchTick: () => networkWatch().tick(),
   setNetworkProbe(fn) { _networkProbe = fn; },
   setAutoRescan(on) { autoRescanOn = on !== false; },

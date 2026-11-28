@@ -4,7 +4,7 @@
     "history": "History has no docs page yet",
     "settings": "Settings has no docs page yet",
     "new-run": "the New run page has no docs page yet",
-    "projects": "the Projects page has no docs page yet"
+    "tool-panel": "the tool panel has no docs page of its own yet (docs/terminal.md covers its Terminal tab)"
   },
   "naming": {
     "minLines": 40,
@@ -93,6 +93,7 @@
         "stacks": "checkout-and-actions",
         "builtins": "checkout-and-actions",
         "preset": "checkout-and-actions",
+        "rerun": "rerun",
         "publish": "publish",
         "base-check": "publish",
         "update-branch": "publish",
@@ -132,7 +133,9 @@
         "settings": "settings",
         "config": "config",
         "workflow": "config",
-        "models": "config"
+        "models": "config",
+        "exec-envs": "exec-env",
+        "exec-env": "exec-env"
       },
       "shape": {
         "pipelines": "features",
@@ -289,7 +292,11 @@
         "defaults": "workflows",
         "export": "workflows",
         "generate": "agents",
-        "agents": "agents"
+        "agents": "agents",
+        "versions": "versions",
+        "history": "versions",
+        "tests": "workflow-tests",
+        "workflow-tests": "workflow-tests"
       },
       "network-proxy": {
         "status": "proxy",
@@ -308,6 +315,10 @@
     "cssPrefixes": {
       "req": {
         "name": "requirements",
+        "feature": "requirements"
+      },
+      "fp": {
+        "name": "feature-pull",
         "feature": "requirements"
       }
     },
@@ -512,10 +523,20 @@
         "name": "about-update"
       },
       {
+        "section": "^Browser extension pairings",
+        "selectors": [
+          "#secret-vault-card",
+          ".sv-field-note"
+        ],
+        "feature": "settings",
+        "name": "secret-vault"
+      },
+      {
         "section": "^Model plugins",
         "selectors": [
           ".hd ",
           ".hd-",
+          ".pd-header",
           ".pd-row1",
           ".hist-sic"
         ],
@@ -582,12 +603,8 @@
       {
         "section": "^Team policy",
         "selectors": [
-          ".mcp-sets",
-          ".mcp-setlist",
-          ".mcp-setrow",
-          ".mcp-dot",
           ".mcp-usedby",
-          "[data-view=\"connectors\"] .topbar"
+          ".cx-"
         ],
         "feature": "mcp-servers",
         "name": "server-sets"
@@ -622,17 +639,13 @@
       {
         "section": "^Team policy",
         "selectors": [
-          ".mcp-member",
           "[data-view=\"connectors\"] .mono",
-          ".mcp-fld",
           ".mcp-secret",
           ".mcp-state",
-          ".mcp-server-row",
           ".mcp-def-row",
           ".mcp-def-fill",
           ".mcp-res-",
           ".mcp-resolution",
-          "#plugin-modal .card:has(.mcp-imp)",
           ".mcp-imp"
         ],
         "feature": "mcp-servers",
@@ -663,7 +676,10 @@
           ".card.house-brief",
           ".house-brief",
           ".readiness-settings-card",
-          ".rs-"
+          ".rs-",
+          ".exec-env-backend",
+          ".exec-env-spec",
+          ".exec-env-log"
         ],
         "feature": "projects",
         "name": "project-settings"
@@ -699,10 +715,23 @@
           ".wfv",
           "#wfv-",
           "input.wfv-",
+          ".badge.wfv-",
           ".wfl"
         ],
         "feature": "workflows",
         "name": "workflow-canvas"
+      },
+      {
+        "section": "^Actions",
+        "selectors": [
+          ".wft",
+          "input.wft-",
+          ".badge.wft-",
+          "button.badge.wft-",
+          ".mk-dialog-body > .wft-"
+        ],
+        "feature": "workflows",
+        "name": "workflow-tests"
       },
       {
         "section": "^Actions",
@@ -751,7 +780,16 @@
           ".viewer-modal.req-dlg-wrap",
           ":root:not([data-git=\"off\"]) .req-",
           ".form-msg.req-msg-warn",
-          "a.chip.req-export-chip"
+          "a.chip.req-export-chip",
+          ".fp-",
+          ".feature-pick",
+          ".ask-chip-feature",
+          ".ask-chip-id",
+          ".ask-chip-status",
+          ".mention-item[aria-disabled",
+          ".sent-feature",
+          ".shape-attached-list",
+          ".attached-feature"
         ],
         "feature": "requirements",
         "name": "requirements"
@@ -819,7 +857,8 @@
           ".wf-engine-",
           ".rs-session-note",
           ".field-grid-2",
-          ".field-compact"
+          ".field-compact",
+          ".exec-env-"
         ],
         "feature": "new-run",
         "name": "field-rows"
@@ -1093,7 +1132,9 @@
         "/api/notifications",
         "/api/memory",
         "/api/credentials",
-        "/api/engines"
+        "/api/engines",
+        "/api/exec-envs",
+        "/api/exec-env"
       ],
       "css": [
         "^Info tooltips \\(settings\\)",
@@ -1112,7 +1153,8 @@
       "css": [
         "^Saved\\-markdown viewer",
         "^typed artifact viewer",
-        "^per\\-step artifacts"
+        "^per\\-step artifacts",
+        "^simplified Office preview"
       ],
       "html": [
         "<!-- ===== Saved-markdown viewer"
@@ -1123,6 +1165,7 @@
       "doc": "docs/workflows.md",
       "routes": [
         "/api/workflows",
+        "/api/workflow-tests",
         "/api/agents"
       ],
       "css": [
@@ -1155,7 +1198,7 @@
     },
     {
       "name": "projects",
-      "doc": null,
+      "doc": "docs/projects.md",
       "routes": [
         "/api/projects"
       ],
@@ -1450,6 +1493,16 @@
       "doc": "docs/git-automations.md",
       "routes": [
         "/api/automations"
+      ],
+      "css": [],
+      "html": []
+    },
+    {
+      "name": "tool-panel",
+      "doc": null,
+      "routes": [
+        "/api/tools",
+        "/api/preview"
       ],
       "css": [],
       "html": []

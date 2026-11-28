@@ -7,8 +7,9 @@
 import { decorFromState, applyDecor, manifestTemplate, manifestPortsFn, manifestAgents, isGraphManifest, fmtDur, fmtUsd } from './graph/run-decor.mjs';
 import { mountStaticGraph } from './graph/view.mjs';
 import { FLOW_SCALE } from './graph/model.mjs';
-import { engineReportsCost } from '../../src/shared/engine-switch.mjs';
+import { runCostKnown } from '../../src/shared/engine-switch.mjs';
 import { runProgress } from '../../src/shared/run-progress.mjs';
+import { runHeadlineMs } from '../../src/shared/run-elapsed.mjs';
 import { workModeOf } from './run-kind.mjs';
 
 export const PROGRESS_CARD_TYPE = 'progress';
@@ -18,7 +19,7 @@ export const TERMINAL_RUN_STATUS = new Set(['done', 'error', 'stopped', 'aborted
 const LIVE_STATUS = new Set(['starting', 'running', 'pausing']);
 /** The six manifest colours the view's h-* / --c vocabulary knows (style.css .gv-world .h-*; app.js PILL_FAMILIES). */
 const NODE_COLORS = new Set(['violet', 'blue', 'green', 'red', 'peach', 'amber']);
-const PAUSE_WHY = { cost_pipeline: 'cost limit', cost_total: 'total budget', cost_pipeline_policy: 'team cap', cost_total_policy: 'team total', error: 'error', recoverable: 'recoverable', usage_limit: 'usage limit', drain: 'restart' };
+const PAUSE_WHY = { cost_pipeline: 'cost limit', cost_total: 'total budget', cost_pipeline_policy: 'team cap', cost_total_policy: 'team total', error: 'error', recoverable: 'recoverable', usage_limit: 'usage limit', drain: 'restart', model_confirm: 'confirm model' };
 
 /** Chat P3 (U10): the active nodes with what the chat run card's agent chips show — the node's model (the run's
  *  manifest cell, as app.js activeNodes reads it) named through `modelLabel` (app.js: the catalog label; REST: the
@@ -67,8 +68,8 @@ export function snapshotFromState(state, { now = Date.now(), extras = null } = {
     live,
     terminal: TERMINAL_RUN_STATUS.has(status),
     startedAt: state.startedAt || null,
-    elapsedMs: Number(state.totalActiveMs) || 0,
-    costUsd: engineReportsCost(state.runEngine) ? (Number(state.totalCostUsd) || 0) : null,   // null: cost unknown (Cursor), never $0.00
+    elapsedMs: runHeadlineMs(state) || 0,
+    costUsd: runCostKnown(state.runEngine, state.runEngines) !== 'none' ? (Number(state.totalCostUsd) || 0) : null,   // null: cost unknown (Cursor), never $0.00; a mixed run: the known part
     progress: decor ? decor.progress : null,
     stageProgress: graph ? runProgress(state) : null,   // a frozen state is final: no memo
     active: decor ? activeAgents(decor, state.stepper) : [],   // a v1 row names no agent even when state.active is set

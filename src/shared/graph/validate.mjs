@@ -1,5 +1,6 @@
 // src/shared/graph/validate.mjs
-// THE authority on v2 graph legality (base spec §2, V1-V24, sessions V25-V30, role reviews V31; V22 (script config)
+// THE authority on v2 graph legality (base spec §2, V1-V24, sessions V25-V30, role reviews V31, extra inputs V32,
+// shell warnings V33; V22 (script config)
 // reuses the number the retired single-wire rule freed). Server save (422), plugin import, the composer's
 // live report, the run-time check and the seed drift guard all come through
 // here, so it is pure, never throws on a malformed template, and every lookup
@@ -10,7 +11,9 @@ import { portsOf, findPort, resolveOrOutType, EXTRA_INPUTS_MAX } from './ports.m
 import { classifyLoops } from './loops.mjs';
 import { sessionsOf, consecutiveIssue } from './sessions.mjs';
 import { roleReviewOf, roleReviewIssues } from './role-review-step.mjs';
-import { paramValueError, mockErrors, MIN_TIMEOUT_MS, MAX_TIMEOUT_MS, pythonMissingSentence, wirableParams, WIRABLE_PARAM_TYPES } from './script-meta.mjs';
+import { lintShell } from '../shell-lint.mjs';
+import { MODEL_ENGINE_NAMES } from '../engine-switch.mjs';
+import { paramValueError, effectiveScriptParams, mockErrors, MIN_TIMEOUT_MS, MAX_TIMEOUT_MS, pythonMissingSentence, wirableParams, WIRABLE_PARAM_TYPES } from './script-meta.mjs';
 
 const ARITY_SET = new Set(['and', 'or', 'combine']);
 const IN_PORT_RE = /^in\d+$/;
@@ -21,7 +24,7 @@ const AWAIT_PORT_ID = 'await';
  *  would warn on the task node and an agent-only `awaitAll` would pass silently
  *  on a flow card. Unknown keys are PRESERVED and ignored, never stripped. */
 const KNOWN_CONFIG = {
-  agent: new Set(['model', 'effort', 'fanOut', 'askQuestions', 'awaitAll', 'subagentModel', 'subagentEffort',
+  agent: new Set(['model', 'effort', 'engine', 'fanOut', 'askQuestions', 'awaitAll', 'subagentModel', 'subagentEffort',
     'approve', 'maxQuestions', 'promptHints', 'roleReview', 'timeLimitMinutes', 'idleLimitMinutes', 'verdictOptional', 'session', 'extraInputs']),
   script: new Set(['params', 'ports', 'timeoutMs', 'awaitAll', 'mock', 'paramsPort']),
   task: new Set(['planStoreSeed']),
@@ -36,7 +39,7 @@ const KNOWN_WIRE_CONFIG = new Set(['maxCycles', 'onExhausted']);
  *  source for every writer that splits tunables from topology keys
  *  (workflows.mjs#setWorkflowNodeDefaults, ui/server.mjs template save). A
  *  strict subset of KNOWN_CONFIG.agent: awaitAll is TOPOLOGY, not a tunable. */
-export const AGENT_TUNABLES = ['model', 'effort', 'fanOut', 'askQuestions', 'subagentModel'];
+export const AGENT_TUNABLES = ['model', 'effort', 'fanOut', 'askQuestions', 'subagentModel', 'engine'];
 /** The per-node SCRIPT tunables (P2's per-project overlays); unused by v1 writers. */
 export const SCRIPT_TUNABLES = ['params', 'timeoutMs'];
 
@@ -799,10 +802,50 @@ export const RULES = [
       });
     }
   } },
+
+  // Shell warnings (shell-lint.mjs): ONE issue per script node, carrying the total across its `command` params
+  // (the effective values, sidecar defaults included). A warning only — it never blocks a save.
+  { code: 'V33', level: 'W', check({ nodes, portsFor }, add) {
+    // Per call: cards sharing a (large) default command lint it once; nothing outlives the call.
+    const counts = new Map();
+    const countOf = (text) => {
+      if (!counts.has(text)) counts.set(text, lintShell(text).length);
+      return counts.get(text);
+    };
+    for (const n of nodes) {
+      if (n.kind !== 'script' || !n.key) continue;
+      const p = portsFor(n.id);
+      if (!p.known) continue;
+      const meta = p.meta || {};
+      const commands = (Array.isArray(meta.params) ? meta.params : []).filter((d) => d && d.type === 'command');
+      if (!commands.length) continue;
+      const values = effectiveScriptParams(meta, isObject(n.config) ? n.config : {});
+      let count = 0;
+      for (const d of commands) if (typeof values[d.id] === 'string') count += countOf(values[d.id]);
+      const issue = shellWarningIssue(n.id, count);
+      if (issue) add(issue.message, { nodeId: n.id, count });
+    }
+  } },
+
+  // A pinned harness (config.engine beside config.model): the check that needs no catalog. The save checks that the
+  // model runs there (workflow-share.mjs nodeDefaultsError).
+  { code: 'V34', level: 'E', check({ nodes }, add) {
+    for (const n of nodes) {
+      if (n.kind !== 'agent' || !isObject(n.config) || n.config.engine === undefined) continue;
+      if (!MODEL_ENGINE_NAMES.includes(n.config.engine)) add(`node '${n.id}' config.engine must be one of ${MODEL_ENGINE_NAMES.join(', ')}`, { nodeId: n.id });
+      else if (!(typeof n.config.model === 'string' && n.config.model.trim())) add(`node '${n.id}' config.engine needs config.model beside it`, { nodeId: n.id });
+    }
+  } },
 ];
 
+/** The ONE source of V33's code and message: the rule above and the composer's live (uncommitted) path both build it. */
+export function shellWarningIssue(nodeId, count) {
+  if (!Number.isInteger(count) || count < 1) return null;
+  return { code: 'V33', message: `script node '${nodeId}' has ${count} shell warning${count === 1 ? '' : 's'}`, nodeId, count };
+}
+
 /** The warnings the editor surfaces on a card (D15). V15 (unreachable) is left to the "ports to wire" chip. */
-export const CANVAS_WARNING_CODES = Object.freeze(['V16', 'V17', 'V18', 'V19']);
+export const CANVAS_WARNING_CODES = Object.freeze(['V16', 'V17', 'V18', 'V19', 'V33']);
 
 /** The session rules (spec §4). Their issues carry `sessionId` (always null on V25, which is card-level). */
 export const SESSION_ISSUE_CODES = Object.freeze(['V25', 'V26', 'V27', 'V28', 'V29', 'V30']);

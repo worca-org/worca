@@ -8,7 +8,7 @@
 // home is sufficient isolation (no late-write hazard).
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import http from 'node:http';
+import { appServer } from './helpers/app-server.mjs';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
@@ -93,7 +93,7 @@ before(async () => {
   process.env.WORCA_MOCK = '1';
   ({ dir: repoDir, sha: repoSha } = await makeFixtureRepo());
   const { app } = await import('../ui/server.mjs'); // imported => no port bind
-  srv = http.createServer(app);
+  srv = appServer(app);
   await new Promise((r) => srv.listen(0, '127.0.0.1', r));
   base = `http://127.0.0.1:${srv.address().port}`;
 });
@@ -223,6 +223,19 @@ test('config: PUT stores, GET redacts secrets to { set: true }; value never echo
   assert.equal((await get('/api/plugins/nope/config')).status, 404);
   assert.equal((await put('/api/plugins/local-src/config', { sourceId: 'main' })).status, 400, 'missing values -> 400');
   assert.equal((await put('/api/plugins/local-src/config', { sourceId: 'bogus', values: {} })).status, 400, 'unknown sourceId -> 400');
+
+  // An fs failure writing secrets.json answers its code only: never the home path.
+  if (process.platform !== 'win32' && process.getuid?.() !== 0) {
+    const { chmodSync } = await import('node:fs');
+    chmodSync(pluginDataDir('local-src'), 0o500);
+    try {
+      const f = await put('/api/plugins/local-src/config', { sourceId: 'main', values: { token: 'other-token-456' } });
+      const text = await f.text();
+      assert.equal(f.status, 500, text);
+      assert.equal(JSON.parse(text).error, 'the plugin data could not be read or saved (EACCES)');
+      assert.ok(!text.includes(process.env.WORCA_HOME), text);
+    } finally { chmodSync(pluginDataDir('local-src'), 0o700); }
+  }
 });
 
 test('POST /api/plugins/:name/doctor -> { ok, checks }', async () => {

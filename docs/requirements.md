@@ -20,7 +20,8 @@ turn on **Requirements** in Settings › Labs (the `requirements` flag), or star
 4. **The spec** fills in as you answer: goal, actors, main flow, edge cases, business rules, out of scope,
    acceptance criteria (`R-po-1`, `R-po-2`, …), assumptions (`A-1`, …) and open questions. Edit any section:
    Worca keeps your text (**Let Worca rewrite this** hands it back). Add or remove criteria: a criterion
-   you removed never comes back. Confirm or reject each assumption.
+   you removed never comes back. Confirm or reject each assumption. Each item (the goal, the success measure,
+   a criterion or any other line) can be up to 10,000 characters; Worca refuses a longer one rather than cutting it.
 5. **Export ▾** → **Save to specs/** writes `specs/FEAT-<n>-<title>.md` into the project's folder without committing.
    **Copy Markdown** and **Download .md** work for workspaces too.
 
@@ -192,6 +193,10 @@ a call's cost is known only once the model reports it.
 answers you can submit answers, edit the spec, add files or start a round. Only what you accept or submit reaches the
 interview. **Send**, **Accept** and **Clear chat** wait while Worca answers.
 
+**Using a feature in another chat.** The Ask panel's Requirements icon button (its tooltip reads **Pull from Requirements**; see
+[Pull from Requirements](#pull-from-requirements)) attaches a started feature's spec to a message, so a chat can use it without leaving the chat. It is not the same as **Feature chat**,
+which talks about a feature and its interview; the attached text is context only.
+
 **Clear chat** (⋯) deletes the feature's chat; changes you accepted stay in the spec. An archived feature's chat can be read,
 not used. Everything here is behind the `requirements` flag.
 
@@ -236,13 +241,13 @@ and says "Gemini CLI keeps its own copy of this step in its history on this comp
 Worca stores no more of it than before.
 
 **Cost words.** "$0.03" is billed, "≈$0.04" is estimated from list prices because that harness reports none ("Cost estimated:
-Gemini CLI reports none."), and "cost unknown" means no price is known: never "$0.00". The feature's chip shows ≈ as soon as any
+Gemini CLI reports none."), and "cost unknown" means no price is known: never "$0.00". The feature's cost button shows ≈ as soon as any
 part is estimated, and "Cost unknown so far" when every step's cost is unknown; the dialog's total then reads "cost unknown".
 Estimated costs count toward the Requirements budget; steps with cost unknown cannot. The dialog's budget line says so ("The
 Requirements budget counts nothing of $50.00 this month; the step with cost unknown is not counted."), and the list's line says
 "plus N steps with cost unknown".
 
-**Changing a running feature.** The chip after the cost chip names the model and harness; it opens **Model for this feature**
+**Changing a running feature.** The button after the cost button names the model and harness; it opens **Model for this feature**
 with the same three selects. A change applies from the next step: a step already running keeps its model, and steps already done
 keep their answers and their cost. When the new choice loses something, or sends your text to another company, Worca asks first
 ("Switch this feature to Gemini CLI?", with what changes) and saves nothing if you cancel. A harness that is not signed in stops
@@ -261,7 +266,7 @@ Every step on the feature page (a round, the code look, a Feature chat reply) na
 "Opus 5.5 on Claude · $0.19" (billed), "≈$0.04" (estimated from list prices) or "cost unknown", never $0.00. The code look is a
 step of its own ("Code look · 3 files", with its first sentence and **Show what it found**). What a step could not do, such as
 the repo it could not read or a file it skipped, is listed under it in grey. A harness that is not signed in stops the step with
-**Change the model** and **Try again**; Worca never switches to Claude by itself. The **so far** chip in the header opens
+**Change the model** and **Try again**; Worca never switches to Claude by itself. The **so far** button in the header opens
 **Cost of this feature**: each step, what it ran on and its cost, with what the Requirements budget counts and the steps with
 cost unknown (counted apart, not against the limit).
 
@@ -322,11 +327,12 @@ and the next time you start the feature the box opens with it. A run that starts
   card says so and Auto is used.
 - With any other workflow, **Start in Worca** first opens **Set up this run**: the workflow (fixed here; cancel
   and change it on the card to use another), a **Preset** menu with the run presets saved for that workflow, and
-  each agent's model and effort and each loop's cycle budget. Applying a preset fills in its agent and loop
-  settings only. What you change applies to this run alone: the project's settings and your presets are never
-  written. **Start run** starts it and opens the run page; **Cancel** (or Escape) starts nothing. The overlay
-  opens after the reason when you start before Ready. If the server refuses the picks, the reason is shown in
-  the overlay and you can fix it and try again.
+  each agent's model (the harness › provider › model picker, so a step can run on another harness than the
+  run's) and effort and each loop's cycle budget. Applying a preset fills in its agent and loop settings only.
+  What you change applies to this run alone: the project's settings and your presets are never written.
+  **Start run** starts it and opens the run page; **Cancel** (or Escape) starts nothing. The overlay opens after
+  the reason when you start before Ready. If the server refuses the picks, the reason is shown in the overlay
+  and you can fix it and try again.
 - The files and brief documents whose Send switch is on go with it as attached files ([Files](#files)).
 - Only runs started from Requirements are checked this way. **New run**, **Ask**, schedules and the CLI
   work as before and do not look at Requirements.
@@ -334,6 +340,58 @@ and the next time you start the feature the box opens with it. A run that starts
 The page's **Runs from this feature** card lists every run started from the feature, with its status and
 cost, and links to the run (its live page, also after a resume, else its page in History). A run that
 waits for you, on a question, a gate or the Auto confirmation, says **Waiting for you**.
+
+## Pull from Requirements
+
+You do not have to leave **New run** or **Chat** to build with a feature you have specified: **attach** it. Attaching sends or starts
+nothing. The features go along when you click **Send** or **Run**.
+
+- **New run**: **Pull from Requirements** (next to the Source switch) opens a picker with a search box, a checkbox on each feature and
+  **Attach N**. It lists the active features of the project or workspace you picked as the Target. With no Target yet, the picker has a
+  project chooser inside it.
+- **Chat**: the Requirements icon button (its tooltip reads **Pull from Requirements**; next to the project button in the composer)
+  does the same for the chat's project or workspace.
+  A chat with no project asks for one in the picker.
+- **`#` in the box**: type `#` at the start of a word, or after a space, and a list of the scope's features opens. Keep typing to
+  search by title or `FEAT-7`. The arrows move, **Enter** attaches the highlighted feature (it never sends or starts), **Tab** cycles the
+  project and **Esc** closes. Only the `#` and what you typed after it are removed from your text. A Markdown heading (`# ` followed by a
+  space) is left alone.
+
+Each attached feature shows as a card under the box with its title, ID and number of criteria, and an **x** to remove it. On New
+run the button reads **N features** while some are attached; in Chat the icon shows the count. You can attach up to 10. Features you attach are kept when you leave the page and come
+back, and checked again when you return.
+
+**Context only.** The feature's spec text goes into the message or the run's task. Nothing else travels: no files or brief documents,
+and no run is linked to the feature. Neither entry writes a start, a turn or a ticket comment, so the feature page's **Runs from this
+feature** does not list these runs. **Start in Worca** works as before.
+
+**Which text.** When the feature is Ready at the moment you click Send or Run, its **current spec** is sent, read again at that moment,
+under the heading "FEAT-n (current spec)". When it is not Ready then but was started, the **latest started version** is sent. The draft
+of a feature that is not Ready is never sent. The task text is optional in New run: with features attached, the run's title is the first feature's
+title, or `<title> + N more`.
+
+**Only what this scope holds.** Search and the picker offer only features of the project (or workspace) you picked. A feature that is
+neither Ready nor started is listed as **Not Ready yet** and cannot be attached. If one stops being Ready before Send or Run and was
+never started, it blocks until you remove it. A feature that is archived or deleted, or no longer in this
+project, shows on its card and blocks **Send** and **Run** until you remove it. Changing the project or workspace with features attached
+first asks **Remove features and change** or **Cancel**; Cancel changes nothing.
+
+**Ready means Ready now, or the latest start was Ready.** A feature attached because it is Ready now never pauses the run. A started
+feature that is not Ready now uses its latest start's Ready flag: when it was not Ready at that start, the run pauses before any
+work starts, in every workflow, and shows the Requirements card: each feature with **Agreed** on the Ready ones, and one **Agree and
+plan** for the rest. Away mode and `--yes` never agree for you. Nothing pauses when every attached feature was Ready, and a run
+that resumes does not ask again once you agreed. A Chat message starts no run, so it has no pause.
+
+**A run is already going.** In New run, when an attached feature already has a run that has not ended, Worca says so and asks you to
+confirm before it starts yours.
+
+**In the chat.** A sent message shows each feature as a card. Click it to read the requirements it carried in place; that text is a
+snapshot from the moment you sent, and does not change when the feature does. If the feature has since been archived or deleted, the card
+says *This feature is no longer available.* A chat proposal card started with **Run** or **Shaper** carries the features of the
+message it answers.
+
+Both entries are behind the `requirements` flag, like the page: with it off the button and `#` are gone, a card says **Requirements
+unavailable**, and nothing is sent.
 
 ## Follow-up rounds
 
@@ -430,3 +488,17 @@ Worca. Exporting costs nothing: no model is called.
 - On a phone or a narrow window (900 px and narrower) the export dialogs open as full-screen sheets, with **← FEAT-7** to
   go back and the description folded behind **Show all**.
 - Not in this version: epics and "is blocked by" links, reading changes back from Jira, attachments in Jira.
+
+## Shaper's requirements (small runs)
+
+A Shaper run started with the `shaperSmallRuns` flag on keeps its agreed requirements on the feature, not on this page.
+Each requirement is owned by one run, which builds it and has it checked, or confirmed by a person in a named role
+(Product, Engineering, Design, DevOps, Security, Compliance or QA). A person marks a confirmed requirement Met, Not met
+or Dropped; Not met and Dropped need a one-line reason. Ship is one PR or stacked, one PR per run (stacked only with the
+flag off), and is refused with
+`ACCEPTANCE_INCOMPLETE` until each confirmed requirement is marked. With the flag on, it waits for a clean
+Verifier check on record for the exact head it would ship ([Ship](shape-it-first.md#ship)). The feature shows in four places: the Runs list
+group row, the run panel, the Expert run page and the feature page. Its requirements are listed in the run panel, the run
+page and the feature page. With the flag off, a feature that started with it on keeps the marks and their Ship block, but
+those lists go away and no Verifier check starts; see [Off](shape-it-first.md#off). The
+Requirements page is not changed by the flag. See [Small runs](shape-it-first.md#small-runs-shapersmallruns).
