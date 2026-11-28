@@ -24161,7 +24161,7 @@ function paintResumeEngineItems(menu, runEngine, pause) {
 }
 
 /** The model family a usage limit can be scoped to ("You've hit your Fable limit"), from an id; '' for none. */
-const modelFamilyOf = (id) => (/(fable|opus|sonnet|haiku)/i.exec(String(id || ''))?.[1] || '').toLowerCase();
+const modelFamilyOf = (id) => (/(fable|mythos|opus|sonnet|haiku)/i.exec(String(id || ''))?.[1] || '').toLowerCase();
 /** A Resume menu's pause, as its items read it at click time (paintResumeEngineItems wrote the dataset). */
 const menuPause = (menu) => ({ reason: menu.dataset.pauseReason || 'usage_limit', limitEngine: menu.dataset.limitEngine || null,
   limitScope: menu.dataset.limitScope || null, limitModel: menu.dataset.limitModel || null });

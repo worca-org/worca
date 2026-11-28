@@ -26,7 +26,7 @@ export const DEFAULT_CONTEXT_TOKENS = 200_000;
 const ONE_M = 1_000_000;
 // Built-ins that are 1M-only with no `[1m]` twin (config.mjs PREDEFINED_MODELS' comment); any `[1m]` id is 1M too.
 // Opus 5's window is stated nowhere in the code, so it keeps the default.
-const ONE_M_BUILTINS = new Set(['claude-fable-5-1', 'claude-opus-5-5', 'claude-sonnet-5', 'claude-sonnet-5-5', 'claude-haiku-5-5']);
+const ONE_M_BUILTINS = new Set(['claude-fable-5-2', 'claude-fable-5-1', 'claude-mythos-5-2', 'claude-mythos-5-1', 'claude-opus-5-5', 'claude-sonnet-5', 'claude-sonnet-5-5', 'claude-haiku-5-5']);
 
 /** How to pick a model per agent step — ONE text for the Ask rules (prompt.mjs rule 18) and the Auto classifier's
  *  tuning guide. Stages by display name only: the Ask rules may not name an agent key. */
