@@ -38,8 +38,9 @@ from a chat (its card's Open, a link) shows in a Run tab beside the chat, the ru
 steps the address back to the chat and keeps the Run tab in the strip; picking it again reopens its run. Escape, Back
 or the tab's × close it. A new chat with no thread yet keeps the run beside the conversation until its first send.
 
-- **Header icons.** Run and chat pages show the Overview icon, then four tool icons: Terminal, Browser, Files and
-  Changes. A tool icon focuses the newest tab of that kind on the page, or opens one; Shift-click always opens another.
+- **Tool icons.** Run pages (at the end of the tab line) and chat pages (in the header) show the Overview icon, then
+  four tool icons: Terminal, Browser, Files and Changes. A tool icon focuses the newest tab of that kind on the page,
+  or opens one; Shift-click always opens another.
   Shortcuts: Ctrl+\` Terminal, Ctrl+Shift+F Browser, Ctrl+Shift+E Files, Ctrl+Shift+G Changes. Ctrl+\` on a
   terminal tab hides the panel again.
 - **Suggested.** The **+** page also lists the page's running Actions services, recent addresses and the

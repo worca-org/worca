@@ -241,11 +241,11 @@ test('two screens keep independent tab state', async () => {
   assert.equal(hist.querySelector('.hd2-sec[data-sec="b"]').dataset.loaded, undefined);
 });
 
-// --- the overflow option (opts.overflow): the listed keys stay in the row, the others go under "More" ------------
+// --- the overflow option (opts.overflow): the tabs that do not fit the line go under "More" ------------------
 
 // The CSS level gate, read the way interface-mode.css reads it.
 const RANK = { simple: 0, advanced: 1, expert: 2 };
-// Table order a · c · b · d · e: rows a and b, so c sits between them while it is not under More.
+// Table order a · c · b · d · e.
 const overflowTable = () => [
   { key: 'a', label: 'Alpha', badge: () => null },
   { key: 'c', label: 'Gamma', menuIcon: 'cube', level: 'advanced', badge: (x) => (x.n == null ? null : String(x.n)) },
@@ -254,23 +254,26 @@ const overflowTable = () => [
   { key: 'e', label: 'Epsilon', menuIcon: 'agent', level: 'expert', badge: () => null },
 ].map((t) => ({ ...t, visible: () => true, build: (sec) => { sec.textContent = t.key; } }));
 
-async function overflowScreen({ level = 'expert', ctx = { n: 13 }, row = ['a', 'b'], initial = null } = {}) {
+/** `end`: the bar is seeded with a trailing node (a template's tool icons), named to the engine by `overflow.end`. */
+async function overflowScreen({ level = 'expert', ctx = { n: 13 }, end = false, overflow = end ? { end: '.x-end' } : {}, initial = null } = {}) {
   const app = await boot();
   const { window } = app;
   const doc = window.document;
   doc.documentElement.dataset.level = level;
   const screen = makeScreen(window, 'rd');
-  const opts = { ...optsFor('rd'), overflow: { row }, ...(initial ? { initial: () => initial } : {}) };
+  const bar = screen.querySelector('.rd-tabs');
+  if (end) bar.innerHTML = '<span class="x-end"><button type="button">Tool</button></span>';
+  const opts = { ...optsFor('rd'), overflow, ...(initial ? { initial: () => initial } : {}) };
   const init = () => window.__np.initDetailTabs(screen, overflowTable(), ctx, opts);
   init();
-  const bar = screen.querySelector('.rd-tabs');
   const tabs = () => window.__np.detailTabsOf(screen);
   const btn = (k) => bar.querySelector(`.rd-tab[data-sec="${k}"]`);
   const more = () => bar.querySelector('.tab-more');
-  const keys = () => [...bar.children].map((n) => n.dataset.sec || 'more');
-  // What the CSS draws: every tab but a non-active overflow one (and a hidden or gated one), then More.
+  const name = (n) => n.dataset.sec || (n.classList.contains('tab-more') ? 'more' : 'end');
+  const keys = () => [...bar.children].map(name);
+  // What the CSS draws: every tab but a non-active overflow one (and a hidden or gated one), then More and the end node.
   const drawn = () => [...bar.children].filter((n) => !n.hidden && !(n.hasAttribute('data-overflow') && !n.classList.contains('active'))
-    && RANK[n.dataset.minLevel || 'simple'] <= RANK[doc.documentElement.dataset.level]).map((n) => n.dataset.sec || 'more');
+    && RANK[n.dataset.minLevel || 'simple'] <= RANK[doc.documentElement.dataset.level]).map(name);
   const menu = () => doc.querySelector('body > .wfv-menu');
   const items = () => [...(menu() ? menu().querySelectorAll('.menu-item') : [])].map((i) => ({
     label: i.querySelector('.wfv-menu-l').textContent, hint: i.querySelector('.wfv-menu-hint')?.textContent ?? null,
@@ -298,11 +301,20 @@ test('no overflow option: the bar is as before (table order, no More, no data-ov
   assert.equal(bar.innerHTML, before);
 });
 
-test('overflow: row cells, then overflow cells, then the More button; the menu lists them with icon, name, count and the check', async () => {
+test('overflow, unmeasured: table order, no More, no data-overflow', async () => {
   const s = await overflowScreen();
-  assert.deepEqual(s.keys(), ['a', 'b', 'c', 'd', 'e', 'more']);
-  assert.deepEqual(s.drawn(), ['a', 'b', 'more']);
-  assert.deepEqual(['a', 'b', 'c', 'd', 'e'].map((k) => s.btn(k).hasAttribute('data-overflow')), [false, false, true, true, true]);
+  assert.deepEqual(s.keys(), ['a', 'c', 'b', 'd', 'e']);
+  assert.deepEqual(s.drawn(), ['a', 'c', 'b', 'd', 'e']);
+  assert.equal(s.more(), null);
+  assert.equal(s.bar.querySelector('[data-overflow]'), null);
+});
+
+test('overflow: the drawn tabs, then the folded ones, then More; the menu lists them with icon, name, count and the check', async () => {
+  const s = await fitScreen();
+  s.fit(160);
+  assert.deepEqual(s.keys(), ['a', 'c', 'b', 'd', 'e', 'more']);
+  assert.deepEqual(s.drawn(), ['a', 'more']);
+  assert.deepEqual(['a', 'c', 'b', 'd', 'e'].map((k) => s.btn(k).hasAttribute('data-overflow')), [false, true, true, true, true]);
   const more = s.more();
   assert.equal(more, s.bar.lastElementChild);
   assert.equal(more.tagName, 'BUTTON');
@@ -318,9 +330,10 @@ test('overflow: row cells, then overflow cells, then the More button; the menu l
   click(s.window, more);
   assert.equal(more.getAttribute('aria-expanded'), 'true');
   assert.equal(s.menu().getAttribute('aria-label'), 'More tabs');
-  assert.equal(s.menu().parentElement, s.doc.body, 'body-level: the scrolling row cannot clip it');
+  assert.equal(s.menu().parentElement, s.doc.body, 'body-level: the clipping line cannot cut it');
   assert.deepEqual(s.items(), [
     { label: 'Gamma', hint: '13', checked: 'false', icon: true },
+    { label: 'Beta', hint: null, checked: 'false', icon: false },
     { label: 'Delta', hint: null, checked: 'false', icon: true },
     { label: 'Epsilon', hint: null, checked: 'false', icon: true },
   ]);
@@ -329,77 +342,61 @@ test('overflow: row cells, then overflow cells, then the More button; the menu l
 });
 
 test('overflow: a pick opens the tab, which sits lit just before More with the focus; Esc returns the focus to More', async () => {
-  const s = await overflowScreen();
+  const s = await fitScreen();
+  s.fit(270);
   click(s.window, s.more());
   click(s.window, s.item('Delta'));
   await settle(s.window);
   assert.equal(s.menu(), null);
   assert.equal(s.oneSelected(), 'd');
-  assert.deepEqual(s.drawn(), ['a', 'b', 'd', 'more']);
+  assert.deepEqual(s.drawn(), ['a', 'd', 'more']);
   assert.equal(s.doc.activeElement, s.btn('d'));
   assert.equal(s.screen.querySelector('.rd-sec[data-sec="d"]').hidden, false);
-  // The count is read when the menu opens.
+  // The count is read when the menu opens; the open tab is on the line, so the menu does not list it.
   s.btn('c').querySelector('.rd-tab-badge').textContent = '14';
   click(s.window, s.more());
-  assert.deepEqual(s.items().map((i) => [i.label, i.hint, i.checked]), [['Gamma', '14', 'false'], ['Delta', null, 'true'], ['Epsilon', null, 'false']]);
+  assert.deepEqual(s.items().map((i) => [i.label, i.hint, i.checked]), [['Gamma', '14', 'false'], ['Beta', null, 'false'], ['Epsilon', null, 'false']]);
   s.doc.activeElement.dispatchEvent(new s.window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
   assert.equal(s.menu(), null);
   assert.equal(s.doc.activeElement, s.more());
   click(s.window, s.btn('a'));
-  assert.deepEqual(s.drawn(), ['a', 'b', 'more'], 'the overflow tab leaves the row');
+  assert.deepEqual(s.drawn(), ['a', 'c', 'more'], 'the folded tab leaves the line');
   assert.equal(s.oneSelected(), 'a');
 });
 
-test('overflow: the selected tab is always rendered, also when the screen opens on an overflow tab', async () => {
-  const s = await overflowScreen({ initial: 'e' });
+test('overflow: the selected tab is always rendered, also when the screen opens on a tab past the fold point', async () => {
+  const s = await fitScreen({ initial: 'e' });
+  s.fit(270);
   assert.equal(s.oneSelected(), 'e');
-  assert.deepEqual(s.drawn(), ['a', 'b', 'e', 'more']);
+  assert.deepEqual(s.drawn(), ['a', 'e', 'more']);
   for (const k of ['a', 'c', 'b', 'd', 'e']) { s.tabs().activate(k); assert.equal(s.oneSelected(), k); }
 });
 
-test('overflow: fewer than two shown candidates means no More, and the leftover sits in its usual place', async () => {
-  await checkRows([
-    { name: 'one candidate in the table', run: async () => {
-      const s = await overflowScreen({ row: ['a', 'b', 'd', 'e'] });
-      assert.deepEqual(s.keys(), ['a', 'c', 'b', 'd', 'e']);
-      assert.equal(s.more(), null);
-      assert.equal(s.bar.querySelector('[data-overflow]'), null);
-    } },
-    { name: 'the level leaves one', run: async () => {
-      const s = await overflowScreen({ level: 'simple' });            // c is advanced, e expert: only d
-      assert.deepEqual(s.keys(), ['a', 'c', 'b', 'd', 'e']);
-      assert.equal(s.more(), null);
-      assert.equal(s.bar.querySelector('[data-overflow]'), null);
-    } },
-    { name: 'a level-hidden candidate is not in the menu', run: async () => {
-      const s = await overflowScreen({ level: 'advanced' });
-      click(s.window, s.more());
-      assert.deepEqual(s.items().map((i) => i.label), ['Gamma', 'Delta']);
-      s.more().click();
-    } },
-  ]);
-});
-
 test('overflow: relayout follows a level change and a hidden tab, closes a menu that lost its button, and keeps the focus', async () => {
-  const s = await overflowScreen();
+  const s = await fitScreen();
   const root = s.doc.documentElement;
+  s.fit(380);
   click(s.window, s.more());
   assert.ok(s.menu());
   s.btn('b').focus();                                                   // (the menu closes as focus leaves)
   click(s.window, s.more());
-  root.dataset.level = 'simple';
+  root.dataset.level = 'simple';                                        // c and e are gone: a, b and d fit
   s.tabs().relayout();
   assert.equal(s.more(), null);
   assert.equal(s.menu(), null, 'no menu anchored to a removed button');
   assert.deepEqual(s.keys(), ['a', 'c', 'b', 'd', 'e']);
-  s.btn('b').focus();
   root.dataset.level = 'expert';
-  s.tabs().relayout();                                                  // b moves before c
-  assert.deepEqual(s.keys(), ['a', 'b', 'c', 'd', 'e', 'more']);
-  assert.equal(s.doc.activeElement, s.btn('b'), 'a moved button keeps the focus');
+  s.fit(270);
+  s.tabs().activate('d');
+  assert.deepEqual(s.keys(), ['a', 'd', 'c', 'b', 'e', 'more']);
+  s.btn('d').focus();
+  s.fit(540);                                                           // d moves back to its table place
+  assert.deepEqual(s.keys(), ['a', 'c', 'b', 'd', 'e']);
+  assert.equal(s.doc.activeElement, s.btn('d'), 'a moved button keeps the focus');
   // A tab hidden while the page is open (the merged Agents place).
-  root.dataset.level = 'advanced';                                      // c and d under More
-  s.tabs().relayout();
+  s.tabs().activate('a');
+  root.dataset.level = 'advanced';                                      // a, c, b and d draw 430px
+  s.fit(429);
   assert.ok(s.more());
   s.btn('c').hidden = true;
   s.btn('b').focus();
@@ -432,7 +429,8 @@ test('overflow: relayout follows a level change and a hidden tab, closes a menu 
 });
 
 test('overflow: a rebuild closes the menu it opened and builds one More', async () => {
-  const s = await overflowScreen();
+  const s = await fitScreen();
+  s.fit(270);
   const old = s.more();
   click(s.window, old);
   assert.ok(s.menu());
@@ -442,19 +440,21 @@ test('overflow: a rebuild closes the menu it opened and builds one More', async 
   assert.equal(s.bar.querySelectorAll('.tab-more').length, 1);
 });
 
-// --- the width fit: the row folds into More when it does not fit (tab-fold.mjs; the decision is test/ui-tab-fold.test.mjs) ---
+// --- the width fit: the tabs fold into More when the line does not hold them (tab-fold.mjs; the decision is test/ui-tab-fold.test.mjs) ---
 
-// jsdom does no layout, so a test says how wide each button is and how much room the bar has. Gap 10, bar padding 6 + 4.
-// Rows a · c · b, others d · e: the default row draws 380px, 270px without Beta, 160px without Gamma too.
+// jsdom does no layout, so a test says how wide each button (and the end node) is and how much room the bar has. Gap 10,
+// bar padding 6 + 4. All five tabs draw 540px; with e folded 490, d too 380, b too 270, c too 160.
 async function fitScreen({ observer = true, ...over } = {}) {
-  const s = await overflowScreen({ row: ['a', 'c', 'b'], ...over });
+  const s = await overflowScreen(over);
   const { window } = s;
-  const widths = { a: 100, c: 100, b: 100, d: 100, e: 100, more: 50 };
+  const widths = { a: 100, c: 100, b: 100, d: 100, e: 100, more: 50, end: 40 };
   let room = 0;
   window.HTMLButtonElement.prototype.getBoundingClientRect = function () {
     const drawn = this.isConnected && !(this.hasAttribute('data-overflow') && !this.classList.contains('active'));   // display:none has no width
     return { width: drawn ? widths[this.dataset.sec || 'more'] || 0 : 0 };
   };
+  const end = s.bar.querySelector('.x-end');
+  if (end) end.getBoundingClientRect = () => ({ width: widths.end });
   Object.defineProperty(s.bar, 'clientWidth', { configurable: true, get: () => (room ? room + 10 : 0) });
   s.bar.setAttribute('style', 'column-gap:10px;padding:0 4px 0 6px');
   const observers = [];
@@ -480,20 +480,26 @@ async function fitScreen({ observer = true, ...over } = {}) {
   return { ...s, widths, observers, frames, frame, resize, setRoom, fit, folded, labels };
 }
 
-test('width: the right-most row tabs fold into More until the row fits, and come back as it widens', async () => {
+test('width: the right-most tabs fold into More until the line fits, and come back as it widens', async () => {
   const s = await fitScreen();
-  assert.deepEqual(s.folded(), ['d', 'e'], 'unmeasured: the default split');
+  assert.deepEqual(s.folded(), [], 'unmeasured: nothing folds');
   await checkRows([
-    { name: 'it fits', run: () => {
-      s.fit(380);
-      assert.deepEqual(s.drawn(), ['a', 'c', 'b', 'more']);
-      assert.deepEqual(s.labels(), ['Delta', 'Epsilon']);
+    { name: 'it all fits: no More', run: () => {
+      s.fit(540);
+      assert.equal(s.more(), null);
+      assert.deepEqual(s.drawn(), ['a', 'c', 'b', 'd', 'e']);
     } },
-    { name: 'Beta gives way', run: () => {
+    { name: 'Epsilon gives way', run: () => {
+      s.fit(539);
+      assert.deepEqual(s.folded(), ['e']);
+      assert.deepEqual(s.drawn(), ['a', 'c', 'b', 'd', 'more']);
+      assert.deepEqual(s.labels(), ['Epsilon']);
+    } },
+    { name: 'then Delta and Beta', run: () => {
       s.fit(379);
       assert.deepEqual(s.folded(), ['b', 'd', 'e']);
       assert.deepEqual(s.drawn(), ['a', 'c', 'more']);
-      assert.deepEqual(s.labels(), ['Beta', 'Delta', 'Epsilon'], 'the menu lists the folded row tab, in table order');
+      assert.deepEqual(s.labels(), ['Beta', 'Delta', 'Epsilon'], 'the menu lists the folded tabs in table order');
     } },
     { name: 'then Gamma', run: () => {
       s.fit(160);
@@ -504,40 +510,77 @@ test('width: the right-most row tabs fold into More until the row fits, and come
       s.fit(270);
       assert.deepEqual(s.drawn(), ['a', 'c', 'more']);
     } },
-    { name: 'wide again: the default row, never past it', run: () => {
+    { name: 'wide again: every tab', run: () => {
       s.fit(2000);
-      assert.deepEqual(s.keys(), ['a', 'c', 'b', 'd', 'e', 'more']);
-      assert.deepEqual(s.drawn(), ['a', 'c', 'b', 'more']);
-      assert.deepEqual(s.folded(), ['d', 'e']);
+      assert.deepEqual(s.keys(), ['a', 'c', 'b', 'd', 'e']);
+      assert.deepEqual(s.folded(), []);
     } },
   ]);
 });
 
-test('width: one folded tab is enough for More, and it leaves again with it', async () => {
-  const s = await fitScreen({ row: ['a', 'c', 'b', 'd', 'e'] });
-  s.fit(540);
-  assert.equal(s.more(), null);
+test('width: More leaves when the line fits again', async () => {
+  const s = await fitScreen();
   s.fit(539);
   assert.deepEqual(s.drawn(), ['a', 'c', 'b', 'd', 'more']);
-  assert.deepEqual(s.labels(), ['Epsilon']);
   s.more().focus();
   s.fit(540);
   assert.equal(s.more(), null);
+  assert.equal(s.bar.querySelector('[data-overflow]'), null);
   assert.deepEqual(s.keys(), ['a', 'c', 'b', 'd', 'e']);
   assert.equal(s.doc.activeElement, s.btn('a'), 'More held the focus: the open tab takes it');
 });
 
-test('width: a lone other tab keeps its place while the row fits and goes under More first when it does not', async () => {
-  const s = await fitScreen({ level: 'advanced', row: ['a', 'c', 'b', 'e'] });   // e is expert: only d is outside the row
-  s.fit(430);
-  assert.equal(s.more(), null);
-  assert.deepEqual(s.drawn(), ['a', 'c', 'b', 'd']);
-  s.fit(429);
-  assert.deepEqual(s.drawn(), ['a', 'c', 'b', 'more']);
-  assert.deepEqual(s.labels(), ['Delta']);
+test('width: the end node stays last, survives a rebuild with its children, its width is reserved, and it is observed', async () => {
+  const s = await fitScreen({ end: true });
+  const end = s.bar.querySelector('.x-end');
+  const tool = end.firstElementChild;
+  await checkRows([
+    { name: 'the same node, with its children, after a rebuild', run: () => {
+      s.init();
+      assert.equal(s.bar.querySelector('.x-end'), end);
+      assert.equal(end.firstElementChild, tool);
+      assert.deepEqual(s.keys(), ['a', 'c', 'b', 'd', 'e', 'end']);
+    } },
+    { name: 'observed, as the tabs are', run: () => assert.ok(s.observers.at(-1).targets.includes(end)) },
+    { name: 'its width and gap count', run: () => {
+      s.fit(590);
+      assert.equal(s.more(), null);
+      s.fit(589);                                             // without it the line would fit down to 540
+      assert.deepEqual(s.folded(), ['e']);
+      assert.deepEqual(s.keys(), ['a', 'c', 'b', 'd', 'e', 'more', 'end']);
+    } },
+    { name: 'last in the narrowest bar', run: () => {
+      s.fit(1);
+      assert.deepEqual(s.drawn(), ['a', 'more', 'end']);
+      assert.equal(s.bar.lastElementChild, end);
+    } },
+    { name: 'a hidden end node costs nothing, and showing it re-fits', run: () => {
+      s.widths.end = 0;
+      s.fit(540);
+      assert.equal(s.more(), null);
+      assert.equal(s.bar.lastElementChild, end);
+      s.widths.end = 40;
+      s.fit(540);
+      assert.deepEqual(s.folded(), ['e']);
+    } },
+    { name: 'a focused control in it keeps the focus while the tabs move', run: () => {
+      s.fit(320);
+      s.tabs().activate('d');
+      assert.deepEqual(s.keys(), ['a', 'd', 'c', 'b', 'e', 'more', 'end']);
+      tool.focus();
+      s.fit(590);
+      assert.deepEqual(s.keys(), ['a', 'c', 'b', 'd', 'e', 'end']);
+      assert.equal(s.doc.activeElement, tool);
+    } },
+    { name: 'a selector that matches no child is none', run: async () => {
+      const none = await fitScreen({ overflow: { end: '.x-missing' } });
+      none.fit(540);
+      assert.deepEqual(none.keys(), ['a', 'c', 'b', 'd', 'e']);
+    } },
+  ]);
 });
 
-test('width: a folded tab opened from More joins the row, lit, and another folds instead', async () => {
+test('width: a folded tab opened from More joins the line, lit, and another folds instead', async () => {
   const s = await fitScreen();
   s.fit(270);
   click(s.window, s.more());
@@ -568,6 +611,7 @@ test('width: a button that grows re-fits the row (a badge count), and the menu f
 
 test('width: one observer per screen, one re-fit per frame, disposed by a rebuild and by a dropped screen', async () => {
   const s = await fitScreen();
+  s.fit(270);
   assert.equal(s.observers.length, 1);
   const [first] = s.observers;
   for (const node of [s.bar, s.more(), ...['a', 'c', 'b', 'd', 'e'].map(s.btn)]) assert.ok(first.targets.includes(node), node.outerHTML);
@@ -609,6 +653,8 @@ test('width: a second relayout at the same width leaves the bar as it is', async
 
 test('width: without a ResizeObserver the bar still fits on a relayout, and a bar without overflow is never watched', async () => {
   const s = await fitScreen({ observer: false });
+  s.setRoom(380);
+  s.tabs().relayout();
   assert.deepEqual(s.drawn(), ['a', 'c', 'b', 'more']);
   assert.equal(s.observers.length, 0);
   s.setRoom(270);

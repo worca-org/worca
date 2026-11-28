@@ -203,16 +203,17 @@ on the row below, with 7px switch padding (a 311px History drawer leaves 283px).
 shows, so its selects keep their content width and search shares the switch row with copy.
 ### Tabs
 `.tabs` / `.tab`: underline tabs, 32px, never boxed (checked).
-Overflow under "More" is opt-in per row (`initDetailTabs` `overflow`); only the run pages use it. Their row holds the
-reading tabs, in table order: Overview, Task, Diff / Changes, Artifacts, Q&A and Logs. The
-other tabs go under "More": a `.tab`-styled button (`.tab-more`, never `role=tab`) with a 12px `chevron-down` and
-`aria-haspopup="menu"`, opening the shared menu (`toggleMenu`): one row per tab with its icon, its name, its count as
-the hint and the open one checked. An open overflow tab joins the row, lit, just before "More", and leaves it when
-another tab opens. With fewer than two shown tabs to hold, a row that fits has no "More" and the tab keeps its usual
-place. The label is "More", never "…", which is the run's ⋯ menu.
-A row that does not fit its width folds into "More" by itself (`tab-fold.mjs`; no setting and no level rule): a lone
-other tab first, then the row tabs one at a time from the right end, until it fits. They come back in reverse order as
-the width grows, up to the default row and never past it. Overview, the open tab and "More" are never folded.
+Overflow under "More" is opt-in per row (`initDetailTabs` `overflow`); only the run pages use it. Every shown tab sits
+on the one line, in table order: Overview, Task, Diff / Changes, Artifacts, Actions, Workflow, Q&A, Logs, Sessions,
+Agents. "More" appears only when the line does not hold them all (`tab-fold.mjs`, by measured width; no setting and no
+level rule): the tabs fold into it one at a time from the right end, until the line fits. They come back in reverse order
+as the width grows, and "More" goes away with the last of them. The line never wraps and never scrolls. "More" is a
+`.tab`-styled button (`.tab-more`, never `role=tab`) with a 12px `chevron-down` and `aria-haspopup="menu"`, opening the
+shared menu (`toggleMenu`): one row per folded tab with its icon (Task, Diff / Changes, Q&A and Logs have none), its name
+and its count as the hint. Overview, the open tab, "More" and the tool icons are never folded: an open tab past the fold
+point is the last one on the line, just before "More". The label is "More", never "…", which is the run's ⋯ menu.
+The tool panel's icons (28px quiet icon buttons, 2px apart) end the run pages' tab line, and the fold reserves their
+width.
 The group page's tabs (Runs, Overview, Decisions, Logs; Logs at Expert) do not fold. A marked Shaper feature's page
 (flag `shaperSmallRuns`) reads Runs, Requirements, Decisions, Cost, Log instead: Log is offered at every UI level there,
 because it holds the step log, while its "Open logs" rows stay Expert-only. Its Cost table (`.gpage-cost`) is the
@@ -723,8 +724,8 @@ a coloured word for a state.
   the Cost tags row in the run page's facts block, never stacked inside a tile. The value is sans with tabular figures.
 - Run and group pages share one head: the bar (Back, a 28px chevron `Back to Runs`, in every layout; the breadcrumb
   `Runs › Run tags › Run 2` beside it when the list stands beside the page; Run after; on the right the one primary
-  action, Stop, ⋯), the title (one line, cut with "…" where the column ends; the cut is CSS only, the stored name is
-  whole, its tooltip holds it, and the bar repeats it once the title scrolls away). A run page's title has no kind chip:
+  action (on a run page Pause/Resume), Stop, ⋯; a run page's tool icons sit on its tab line, not in the bar), the title
+  (one line, cut with "…" where the column ends; the cut is CSS only, the stored name is whole, its tooltip holds it, and the bar repeats it once the title scrolls away). A run page's title has no kind chip:
   a run in a group has no group row in its facts block, and the breadcrumb names and links its group. A group page's
   title keeps its kind chip (`Feature` / `Chain` / `Group`). The run page's header has no box: its edges are the tabs'
   and the content's, and under the title row it holds the state line (see Card head); `.pd-header` (project and

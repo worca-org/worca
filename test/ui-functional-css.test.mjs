@@ -261,6 +261,23 @@ test('run page bar: every .rd-bar-end button is one height, font size and paddin
   document.body.innerHTML = '';
 });
 
+test('the tab line\'s tool icons are the 28px quiet icon button, lifted 3px', () => {
+  const line = (page) => `<div class="${page}"><div class="tabs ${page}-tabs" role="tablist"><span class="tool-icons" data-tool-icons>
+    <button class="btn btn-sm btn-quiet btn-icon tool-icon"></button></span></div></div>`;
+  document.body.innerHTML = `${line('rd')}${line('hd')}`;
+  for (const page of ['rd', 'hd']) {
+    const button = document.querySelector(`.${page}-tabs .tool-icon`);
+    for (const [prop, value] of [['height', '28px'], ['width', '28px']]) {
+      assert.equal(winning(button, prop).value, value, `${page}: ${prop} (by "${winning(button, prop).by}")`);
+    }
+    const host = button.parentElement;
+    for (const [prop, value] of [['margin-left', 'auto'], ['align-self', 'center'], ['position', 'relative'], ['top', '-3px']]) {
+      assert.equal(winning(host, prop).value, value, `${page}: ${prop} (by "${winning(host, prop).by}")`);
+    }
+  }
+  document.body.innerHTML = '';
+});
+
 test('narrow chat run panel: Resume keeps its word, the other bar buttons go icon-only', () => {
   // The rules inside `@container crp (max-width:560px)`, in order; the cascade replayed for `position`.
   const narrow = flat.map((r, i) => ({ r, i }))

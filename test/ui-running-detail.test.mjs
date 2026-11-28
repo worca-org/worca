@@ -540,21 +540,18 @@ test('a NEW question replaces the panel even though one was already painted', as
 
 // --- T7: tabs ---------------------------------------------------------------
 
-test('Details has nine tabs, the reading tabs in the row and the rest under More; the route picks the open one', async () => {
+test('Details has nine tabs on one line in table order; no More while unmeasured; the route picks the open one', async () => {
   const ctx = await bootRunning();
   await openRun(ctx);
   const { window } = ctx;
   const tabs = [...window.document.querySelectorAll('#run-detail .rd-tab')];
-  assert.deepEqual(tabs.map((b) => b.dataset.sec), ['overview', 'task', 'diff', 'artifacts', 'qa', 'logs', 'actions', 'workflow', 'agents']);
+  assert.deepEqual(tabs.map((b) => b.dataset.sec), ['overview', 'task', 'diff', 'artifacts', 'actions', 'workflow', 'qa', 'logs', 'agents']);
   assert.match(tabs[0].textContent, /Overview/);
   assert.match(tabs[1].textContent, /Task/);
-  assert.match(tabs[6].textContent, /Actions/);
-  assert.match(tabs[5].textContent, /Logs/);
-  assert.match(tabs[4].textContent, /Q&A/);
-  click(window, window.document.querySelector('#run-detail .rd-tabs > .tab-more'));
-  assert.deepEqual([...window.document.querySelectorAll('body > .wfv-menu .wfv-menu-l')].map((n) => n.textContent),
-    ['Actions', 'Workflow', 'Agents']);
-  click(window, window.document.querySelector('#run-detail .rd-tabs > .tab-more'));
+  assert.match(tabs[4].textContent, /Actions/);
+  assert.match(tabs[7].textContent, /Logs/);
+  assert.match(tabs[6].textContent, /Q&A/);
+  assert.equal(window.document.querySelector('#run-detail .rd-tabs > .tab-more'), null);
   // openRun lands on #running/r1/details/logs.
   assert.equal(window.document.querySelector('#run-detail .rd').dataset.mode, 'details');
   assert.ok(tabOf(window, 'logs').classList.contains('active'), 'the routed tab is open');
@@ -2600,7 +2597,7 @@ test('D2: flag off: no .rd-run-facts, no /slice ask from the Overview, dev\'s Ag
   assert.equal(tabOf(window, 'agents').hidden, false);
   assert.equal(visibleAgentsPlaces(window), 2, 'dev: the tab and C2\'s box');
   assert.deepEqual([...window.document.querySelectorAll('#run-detail .rd-tab')].map((b) => b.dataset.sec),
-    ['overview', 'task', 'diff', 'artifacts', 'qa', 'logs', 'actions', 'workflow', 'agents']);
+    ['overview', 'task', 'diff', 'artifacts', 'actions', 'workflow', 'qa', 'logs', 'agents']);
 });
 
 // --- The run time is the engine's elapsed clock; the summed step time is "agent time" ----------

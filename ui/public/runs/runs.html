@@ -113,8 +113,6 @@
                     <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"></rect></svg>
                     <span class="rd-btn-label">Stop</span>
                   </button>
-                  <!-- The tool panel's icons (issue 1064): Terminal, Browser (slice 2), Files, Changes; app.js fills it. -->
-                  <span class="tool-icons" data-tool-icons role="group" aria-label="Tools"></span>
                   <!-- D31, run 3 D13: every run's Away mode and terminal in one menu (paintRdHeader); a shaped run's Run after too. -->
                   <button type="button" class="btn btn-quiet btn-icon rd-bar-more" aria-haspopup="menu" aria-expanded="false" title="More for this run" aria-label="More for this run" hidden>
                     <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="5" cy="12" r="1.8"></circle><circle cx="12" cy="12" r="1.8"></circle><circle cx="19" cy="12" r="1.8"></circle></svg>
@@ -210,9 +208,9 @@
                   <div class="qpanel hidden"></div>
                 </div>
                 <div class="rd-body">
-                  <!-- The tab engine does `screen.querySelector('.rd-tabs').innerHTML = ''`;
-                       both hosts MUST exist or the bar silently paints nothing. -->
-                  <div class="rd-tabs" role="tablist"></div>
+                  <!-- The tab engine does `screen.querySelector('.rd-tabs').innerHTML = ''`, keeping only its `end` child
+                       (the tool panel's icons: app.js fills them); both hosts MUST exist or the bar silently paints nothing. -->
+                  <div class="rd-tabs" role="tablist"><span class="tool-icons" data-tool-icons role="group" aria-label="Tools"></span></div>
                   <div class="rd-sections"></div>
                 </div>
               </section>
@@ -272,8 +270,6 @@
                     <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"></rect></svg>
                     <span class="hd-btn-label">Stop</span>
                   </button>
-                  <!-- The tool panel's icons (issue 1064): Terminal, Browser (slice 2), Files, Changes; app.js fills it. -->
-                  <span class="tool-icons" data-tool-icons role="group" aria-label="Tools"></span>
                   <!-- Run 3 (D13), slice 2: the run page's one menu (openHistDetail binds it, runMoreItems lists it). -->
                   <button type="button" class="btn btn-quiet btn-icon hd-bar-more" aria-haspopup="menu" aria-expanded="false" title="More for this run" aria-label="More for this run">
                     <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="5" cy="12" r="1.8"></circle><circle cx="12" cy="12" r="1.8"></circle><circle cx="19" cy="12" r="1.8"></circle></svg>
@@ -376,7 +372,7 @@
               </header>
               <div class="hd-body">
                 <div class="hd-graph"><div class="run-flow-wrap"><div class="run-flow"></div></div></div>
-                <div class="hd-tabs" role="tablist"></div>
+                <div class="hd-tabs" role="tablist"><span class="tool-icons" data-tool-icons role="group" aria-label="Tools"></span></div>
                 <div class="hd-sections"></div>
               </div>
               </section>

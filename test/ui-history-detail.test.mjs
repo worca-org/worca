@@ -488,7 +488,7 @@ test('tabs render with badges; Details opens on Overview, and a tab route opens 
 
   assert.deepEqual(
     tabsOf(doc).map((b) => b.dataset.sec),
-    ['overview', 'task', 'diff', 'clarify', 'logs', 'actions', 'workflow', 'agents'],   // one order on both run pages: the row, then what is under More
+    ['overview', 'task', 'diff', 'actions', 'workflow', 'clarify', 'logs', 'agents'],   // one order on both run pages: the table's
   );
   // filesNew(1) + filesChanged(13). NEVER + filesDeleted: results.mjs:32 buckets
   // 'D' rows into changedFiles (NEW_STATUS is {A,C}) while :29 ALSO counts them in

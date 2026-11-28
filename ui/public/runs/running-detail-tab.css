@@ -18,10 +18,17 @@
 .rd-tab-badge{padding:2px 8px;border-radius:var(--r-sm);background:var(--field);color:var(--ink-2);
   font:600 var(--fs-caption) var(--mono);}
 .rd-tab.active .rd-tab-badge{background:var(--blue-bg);color:var(--blue-ink-strong);}
-/* "More" (initDetailTabs overflow, both run pages): an overflow tab is drawn only while it is the open one, just before
-   the More button, which wears .tab with its chevron close to the word. */
+/* "More" (initDetailTabs overflow, both run pages) exists only when the line does not hold every tab: a folded tab is
+   not drawn, and More wears .tab with its chevron close to the word. */
 .tabs > .tab[data-overflow]:not(.active){display:none;}
 .tabs > .tab-more{gap:4px;}
+/* The tool panel's icons end the run pages' tab line: pushed right, their centre 3px above the labels', in the 32px
+   line. That line never scrolls (the fold keeps it short). The group page wears .rd-tabs too and never folds, so it
+   keeps its scroll. */
+.tabs > .tool-icons{margin-left:auto;align-self:center;position:relative;top:-3px;}
+.tabs:is(.rd-tabs,.hd-tabs){overflow-x:hidden;}
+.tabs > .tool-icons > .btn:focus-visible{outline-offset:-2px;}   /* the last one sits on the clipped edge */
+.tabs.gpage-tabs{overflow-x:auto;}
 /* .rd-sections needs no rule of its own — the inset comes from .rd-body's
    padding, exactly as .hd-sections does. */
 .rd-sec{margin-top:4px;}

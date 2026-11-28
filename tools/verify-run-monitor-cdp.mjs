@@ -382,7 +382,7 @@ try {
     await writeFile(path.join(process.env.WORCA_SHOT_DIR, 'run-live-graph.png'), Buffer.from(shot.data, 'base64'));
   }
   // (1f) an 800px run pane at Expert: the header has no box and sits on the tabs' edges, the tab row is clipped nowhere
-  // (the rest of the tabs are under "More"), and the state line and the run controls show on every tab.
+  // (the tabs the line does not hold are under "More"), and the state line and the run controls show on every tab.
   await ev(`localStorage.setItem(${JSON.stringify(LIST_W_KEY)},'280');0`);
   await cdp('Emulation.setDeviceMetricsOverride', { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false });
   await settle('1280 again');
@@ -400,7 +400,8 @@ try {
       rows=[...document.querySelectorAll('body > .wfv-menu .menu-item')].map((n)=>{const r=(s)=>{const e=n.querySelector(s);return e&&e.getBoundingClientRect();};
         const i=r('.wfv-menu-ic'),l=r('.wfv-menu-l'),h=r('.wfv-menu-hint'),m=n.getBoundingClientRect();
         const mid=(b)=>b.top+b.height/2;
-        return {h:+m.height.toFixed(1),oneLine:!!i&&Math.abs(mid(i)-mid(l))<=2&&i.right<=l.left&&(!h||(Math.abs(mid(h)-mid(l))<=3&&l.right<=h.left))};});
+        const name=n.querySelector('.wfv-menu-l').textContent;
+        return {name,icon:!!i,h:+m.height.toFixed(1),oneLine:(!i||(Math.abs(mid(i)-mid(l))<=2&&i.right<=l.left))&&(!h||(Math.abs(mid(h)-mid(l))<=3&&l.right<=h.left))};});
       more.click();}
     return {pane:${PANE_W},scroll:bar.scrollWidth,client:bar.clientWidth,clipped,more:!!(more&&more.offsetParent),menu,rows,
       row:row.map(name),all:tabs.filter((n)=>!n.hidden).map(name),border:cs.borderTopWidth,background:cs.backgroundColor,
@@ -411,8 +412,10 @@ try {
     && narrow.all.every((t) => narrow.row.includes(t) !== narrow.menu.includes(t)), narrow);
   check('1f', '1f the header has no box; it, the waiting question and the tabs share their left and right edges',
     narrow.border === '0px' && narrow.background === 'rgba(0, 0, 0, 0)' && level(narrow.edges.left) && level(narrow.edges.right), narrow);
-  check('1f', '1f each More row is one 30px line: the icon, the name, then the count',
-    narrow.rows.length >= 2 && narrow.rows.every((r) => r.oneLine && r.h <= 34), narrow.rows);
+  // The reading tabs name no menu icon (`menuIcon` in RD_TABS); every other row leads with its own.
+  const PLAIN = ['Task', 'Diff', 'Changes', 'Q&A', 'Logs'];
+  check('1f', '1f each More row is one 30px line: the icon (a reading tab may have none), the name, then the count',
+    narrow.rows.length >= 2 && narrow.rows.every((r) => r.oneLine && r.h <= 34 && (r.icon || PLAIN.includes(r.name))), narrow.rows);
   const onTabs = [];
   for (const key of ['overview', 'task', 'qa', 'logs', 'workflow']) {
     await ev(`document.querySelector('#run-detail .rd-tab[data-sec="${key}"]').click();0`);

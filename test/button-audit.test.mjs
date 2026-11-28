@@ -60,6 +60,11 @@ test('a made .btn-sm action on the run page bar (.rd-bar-end) is the bar\'s medi
   assert.deepEqual(run('<div class="chat-rc-factions"><button id="m" class="btn btn-sm">Archive</button></div>', sm13).map((v) => v.rule), ['height', 'font-size']);
 });
 
+test('a tool icon at the end of the run tab line is the 28px quiet icon button', () => {
+  assert.deepEqual(run(`<div class="rd"><div class="tabs rd-tabs" role="tablist"><span class="tool-icons" data-tool-icons>
+    <button class="btn btn-sm btn-quiet btn-icon tool-icon" data-h="28" aria-label="Files"></button></span></div></div>`), []);
+});
+
 test('under a coarse pointer every button must be at least 40px', () => {
   assert.deepEqual(run('<button class="btn">a</button>', {}, { coarse: true }).map((v) => v.rule), ['height']);
   assert.deepEqual(run('<button class="btn">a</button>', {}, { coarse: true, height: 40 }), []);
