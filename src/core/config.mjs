@@ -94,12 +94,20 @@ export { EFFORTS };
  * 2.1.293 — 2.1.292 serves it but warns "unrecognized_model" and caps the window
  * at 200k); nothing is renamed, and the Haiku 4.5 defaults (title model, broker
  * probe) stay put.
+ * Mythos 5.2 (`claude-mythos-5-2`) and Mythos 5.1 (`claude-mythos-5-1`) joined
+ * after Fable 5.1 on 2026-11-28: the same surface and prices as Fable 5.2 and 5.1,
+ * 1M-only with no `[1m]` twin (CLI 2.1.332's model table: window 1e6, native_1m);
+ * Fable 5.2 is 1M-only the same way.
+ * Anthropic serves them only to verified organizations, so a run on one fails at
+ * its first turn on any other account; no default points at them.
  */
 export const PREDEFINED_MODELS = [
   { id: 'claude-opus-5-5',        label: 'Opus 5.5',        efforts: ['medium', 'high', 'xhigh', 'max'] },
   { id: 'claude-opus-5',          label: 'Opus 5',          efforts: ['medium', 'high', 'xhigh', 'max'] },
   { id: 'claude-fable-5-2',       label: 'Fable 5.2',       efforts: ['medium', 'high', 'xhigh', 'max'] },
   { id: 'claude-fable-5-1',       label: 'Fable 5.1 (1M)',  efforts: ['medium', 'high', 'xhigh', 'max'] },
+  { id: 'claude-mythos-5-2',      label: 'Mythos 5.2',      efforts: ['medium', 'high', 'xhigh', 'max'] },
+  { id: 'claude-mythos-5-1',      label: 'Mythos 5.1',      efforts: ['medium', 'high', 'xhigh', 'max'] },
   { id: 'claude-opus-4-8',        label: 'Opus 4.8',        efforts: ['medium', 'high', 'xhigh', 'max'] },
   { id: 'claude-opus-4-8[1m]',    label: 'Opus 4.8 (1M)',   efforts: ['medium', 'high', 'xhigh', 'max'] },
   { id: 'claude-opus-4-7',        label: 'Opus 4.7',        efforts: ['medium', 'high', 'xhigh', 'max'] },

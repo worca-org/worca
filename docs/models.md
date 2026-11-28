@@ -686,7 +686,9 @@ OpenAI-compatible entry is flagged *cost not verified* until you pin a
 per-million-token price on it.
 
 Fable 5.2 (`claude-fable-5-2`, $8 / $40 per Mtok) and Fable 5.1 are premium-tier
-models. Worca never picks one by itself: the premium guard pauses a run before
+models, and so are Mythos 5.2 (`claude-mythos-5-2`) and Mythos 5.1
+(`claude-mythos-5-1`) at the same prices. Anthropic serves Mythos only to verified
+organizations: on any other account a run on it fails at its first turn. Worca never picks one by itself: the premium guard pauses a run before
 it would use one nobody chose ([When a role is empty](#when-a-role-is-empty)).
 When a usage limit is one model's own ("You've hit your Fable limit"), the
 pause records it (`limitScope: "model"`, `limitModel`), and **Switch model and

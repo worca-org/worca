@@ -117,17 +117,28 @@ test('claude-fable-5-2 is a premium-tier Anthropic built-in at $8/$40', async ()
   assert.equal(f.vendor, 'anthropic');
   assert.equal(f.tier, 'premium');
   assert.deepEqual(f.price, { input: 8, output: 40 });
-  assert.equal(f.context, DEFAULT_CONTEXT_TOKENS, 'its window is stated nowhere: the 200k default');
+  assert.deepEqual([f.context, f.contextFrom], [1_000_000, 'built-in'], '1M-only, like its Mythos 5.2 twin');
   const { PREDEFINED_MODELS } = await import('../src/core/config.mjs');
   const i = PREDEFINED_MODELS.findIndex((m) => m.id === 'claude-fable-5-2');
   assert.deepEqual(PREDEFINED_MODELS[i], { id: 'claude-fable-5-2', label: 'Fable 5.2', efforts: ['medium', 'high', 'xhigh', 'max'] });
   assert.equal(PREDEFINED_MODELS[i + 1].id, 'claude-fable-5-1');
 });
 
-test('isPremiumModel: Fable 5.1/5.2 are premium, Opus 5.5 and unknown ids are not, a costOf override wins', async () => {
+test('claude-mythos-5-2 and claude-mythos-5-1 are premium-tier Anthropic built-ins with a 1M window, priced like their Fable twins', async () => {
+  const { listPriceFor } = await import('../src/core/list-prices.mjs');
+  assert.deepEqual(listPriceFor('claude-mythos-5-2'), listPriceFor('claude-fable-5-2'));
+  assert.deepEqual(listPriceFor('claude-mythos-5-1'), listPriceFor('claude-fable-5-1'));
+  const [m52, m51] = modelFacts([row('claude-mythos-5-2'), row('claude-mythos-5-1')]);
+  assert.deepEqual([m52.vendor, m52.tier, m52.price, m52.context], ['anthropic', 'premium', { input: 8, output: 40 }, 1_000_000]);
+  assert.deepEqual([m51.vendor, m51.tier, m51.price, m51.context], ['anthropic', 'premium', { input: 10, output: 50 }, 1_000_000]);
+});
+
+test('isPremiumModel: Fable and Mythos 5.1/5.2 are premium, Opus 5.5 and unknown ids are not, a costOf override wins', async () => {
   const { isPremiumModel } = await import('../src/core/model-tiers.mjs');
   assert.equal(isPremiumModel('claude-fable-5-1'), true);
   assert.equal(isPremiumModel('claude-fable-5-2'), true);
+  assert.equal(isPremiumModel('claude-mythos-5-1'), true);
+  assert.equal(isPremiumModel('claude-mythos-5-2'), true);
   assert.equal(isPremiumModel('claude-opus-5-5'), false);
   assert.equal(isPremiumModel('no-such-model'), false);
   assert.equal(isPremiumModel(''), false);

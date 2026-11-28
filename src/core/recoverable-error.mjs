@@ -131,7 +131,7 @@ function serverTimeZone() {
 /** #1450: whether a usage limit is one model family's ("You've hit your Fable limit") or the whole connection's.
  *  @returns {'model'|'connection'} */
 export function limitScopeOf(detail) {
-  return /hit your (fable|opus|sonnet|haiku)\b[^.]*\blimit/i.test(String(detail ?? '')) ? 'model' : 'connection';
+  return /hit your (fable|mythos|opus|sonnet|haiku)\b[^.]*\blimit/i.test(String(detail ?? '')) ? 'model' : 'connection';
 }
 
 export function limitResetAt(err, { now = Date.now(), tz = serverTimeZone() } = {}) {

@@ -121,6 +121,7 @@ test('limitScopeOf (#1450): a family limit is the model\'s, any other usage limi
   const { limitScopeOf } = await import('../src/core/recoverable-error.mjs');
   assert.equal(limitScopeOf("You've hit your Fable limit · resets 3pm (Europe/Berlin)"), 'model');
   assert.equal(limitScopeOf('You have hit your opus weekly limit.'), 'model');
+  assert.equal(limitScopeOf("You've hit your Mythos limit · resets 3pm"), 'model');
   assert.equal(limitScopeOf("You've hit your session limit · resets 3pm"), 'connection');
   assert.equal(limitScopeOf('Claude AI usage limit reached|1760000000'), 'connection');
   assert.equal(limitScopeOf(null), 'connection');
