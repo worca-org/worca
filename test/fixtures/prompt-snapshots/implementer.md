@@ -17,7 +17,7 @@ Work inside the project directory (your cwd). Commit nothing; just edit files an
 
 Mode: plan
 
-Implement the plan using TDD (red-green-refactor). Follow its contracts with NO deviation; deviate slightly only if a contract does not work at all.
+Implement the plan using TDD (red-green-refactor). Follow its contracts; deviate only if a contract does not work at all. The plan's goal sets the reach: cover every place the goal governs that the plan missed, and list each one under Reach (see the agent's Recording section).
 
 plan: /abs/plan.md
 
@@ -29,7 +29,7 @@ Pick the BEST-FIT `subagent_type`: this project's own agents (`.claude/agents`) 
 
 Skills are available too: this project's and your personal skills (`.claude/skills`, `~/.claude/skills`) can be invoked via the Skill tool — by you AND by the sub-agents you spawn — use any that fit (e.g. design, framework-pattern, knowledge-graph) instead of guessing conventions.
 
-Sub-agents are strictly READ-ONLY investigators: YOU write every artifact. Skip fan-out only for a trivial, single-file change.
+Sub-agents are strictly READ-ONLY investigators: YOU write every artifact. Skip fan-out only for a trivial, single-file change. A short diff or a short brief is not a reason to skip: what a change missed is outside it.
 
 Send every dispatch in ONE message with `run_in_background: false`: the lanes still run concurrently and all their reports come back in that same turn. Never wait for a lane or a background command with `sleep`, `node -e setTimeout`, a polling loop, or by reading sub-agent transcripts; a background command's completion notice wakes you.
 

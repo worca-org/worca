@@ -75,7 +75,7 @@ The rest of the brief lists the members that need investigation (key, name, abso
 - `file`: the evidence file's path RELATIVE to the member's checkout, with `/` separators — `src/routes/users.ts`. Never absolute, never starting with `/` or a drive letter, never containing `..`.
 - `line`: the 1-based number of the line that contains `match`.
 - `match`: a literal piece of that line copied character for character from the file (at most 200 characters) — the route string, the topic name, the dependency line. Never paraphrase, never shorten with `…`, never join two lines. worca re-reads the file: a `match` that is neither on nor within 3 lines of `line`, nor anywhere else in the file, drops the fact.
-- Pick the part of the line that names the relation — the route, the host, the topic, the package — over a password, token or key value. Copy it literally even from a line that holds a secret: worca redacts secrets on its side, and a literal copy still verifies.
+- Pick the part of the line that names the relation — the route, the host, the topic, the package — over a password, token or key value. Copy it literally even from a line that holds a secret: worca redacts both the file's lines and your `match` the same way before it compares them, so a literal copy still verifies.
 - `detail` (optional, at most 200 characters): what it is — `"Express route"`.
 - `target` (optional, consumes only): the host, alias or member the consumer calls — `"billing:8080"`, or a member key.
 - No other fields: worca computes normalisation, source and confidence itself.

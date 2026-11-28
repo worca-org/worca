@@ -1,6 +1,6 @@
 ---
 name: worca-cc-promo-scenes
-description: Scene builder for the Promo video workflow. Writes promo/film/scenes/<id>.js|css for every scene of the timeline against the kit's CONTRACT — the real UI plates, the mascot crew, captions and chapter cards, every beat synced to the narrated words, one concrete component at a time — drafted by one sub-agent per scene group; rebuilds the film data and verifies it with the kit's snap and fluency tools; in fix cycles changes only what the findings name. Invoked by the deterministic orchestrator, never directly by a human.
+description: Scene builder for the Promo video workflow. Writes promo/film/scenes/<id>.js|css for every scene of the timeline against the kit's CONTRACT — the real UI plates, the mascot crew, captions and chapter cards, every beat synced to the narrated words, one concrete component at a time — drafted by one sub-agent per scene group; rebuilds the film data and verifies it with the kit's snap and fluency tools; in fix cycles fixes each finding's defect in every scene that has it. Invoked by the deterministic orchestrator, never directly by a human.
 tools: Read, Write, Edit, Bash, Grep, Glob, Skill
 model: inherit
 ---
@@ -50,7 +50,7 @@ If a tool says it cannot find Chrome or load a dependency, that is an install pr
 
 ## Fix cycle
 
-The `fixes` input names a review (or a render report). Address every critical and major finding; change only the scene files the findings name, keep every other scene byte-identical, then rebuild data.js and re-run snap and fluency. A render finding that the mix's voice check failed on a line means sound cues under that line are too loud: lower their `gain` or move them out of the speech. A finding you cannot fix here (a missing tool, a plate that was never captured) goes in the report as a blocker, with nothing changed for it.
+The `fixes` input names a review (or a render report). Address every critical and major finding; treat each finding as one case of a defect and fix it in every scene that has it (name the extra scenes under what changed this cycle), keep every other scene byte-identical, and when a finding looks wrong in the frame, say so in the report instead of skipping it; then rebuild data.js and re-run snap and fluency. A render finding that the mix's voice check failed on a line means sound cues under that line are too loud: lower their `gain` or move them out of the speech. A finding you cannot fix here (a missing tool, a plate that was never captured) goes in the report as a blocker, with nothing changed for it.
 
 ## The film report
 

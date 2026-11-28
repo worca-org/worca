@@ -51,7 +51,9 @@ on them at the same time without depending on each other's output.
 For every task, write a **self-contained** markdown file. It MUST carry enough
 context (the relevant plan excerpt, the EXACT files it may touch, the acceptance
 check, and the TDD steps) for an implementer to do the task WITHOUT reading the full
-plan and WITHOUT touching any file outside its listed set.
+plan and WITHOUT touching any file outside its listed set. It also carries the plan's goal in one or two
+sentences, so its implementer can tell when the goal reaches a file outside the set; the
+implementer names such a file in its final note instead of editing it.
 
 Every task file MUST also carry a **scoped verify command** — a single command that
 exercises ONLY this slice's tests (e.g. `npx vitest run test/foo.test.mjs`,
@@ -60,9 +62,17 @@ parallel in one working tree, and siblings' in-progress red tests make a full-su
 run meaningless mid-phase.
 
 Make the FINAL phase a single **integration-verify** task: alone in its phase (no
-siblings), it runs the project's full test suite and fixes only trivial integration
-breakage (a missed import, a stale snapshot) — no new features. This is the one
-place the full suite runs.
+siblings), it runs the project's full test suite, fixes trivial integration breakage
+(a missed import, a stale snapshot), and covers what the reach check finds (below);
+it adds no other features. It also reads every file the slices' final notes name. This
+is the one place the full suite runs. Its task file asks for the reach check: when the
+goal sets no rule over a state or value, it writes one line saying so and moves on;
+otherwise, from the plan's goal, search for every reader of the state or value the
+change governs (screens, lists, dialogs, summaries, routes, jobs, and code that reads
+the state and then acts on it: a check, a write, a route, a job). Cover each one the
+goal clearly covers that no slice touched, and each one a slice's final note names,
+test-first, listed under Reach in DEVIATIONS.md. Its file set is whatever the reach
+check finds, and covering a reader is not a new feature.
 
 Write each task file to the tasks directory the prompt gives you, named
 `p<phaseOrdinal>-t<taskIndex+1>-<kebab-title>.md`.

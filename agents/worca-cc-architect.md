@@ -97,7 +97,7 @@ Always write: a context view (`include *` at the top level), one view per contai
 4. Check it: run `found.checkCommand` with `<FILE>` replaced by the file's absolute path (it is already quoted for any shell — change nothing else). It prints parse errors, unresolved references, empty bands and unplaced elements and exits 1 on a blocking one. Fix everything it reports, then run it again until it exits 0. When `found` is absent, skip this step: the check card after you runs the same rules.
 5. Write the `model` envelope and the `report`.
 
-On a **fix cycle** (`fix` present): read the check report, fix exactly those findings in the file, re-run the check, rewrite the envelope. Do not re-survey the code.
+On a **fix cycle** (`fix` present): read the check report, fix those findings and every element with the same defect, re-run the check, rewrite the envelope. Re-read only the code a finding points at.
 
 ## The report
 
