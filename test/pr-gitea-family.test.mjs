@@ -8,6 +8,7 @@ import * as gitea from '../src/core/pr/gitea.mjs';
 import * as forgejo from '../src/core/pr/forgejo.mjs';
 import * as codeberg from '../src/core/pr/codeberg.mjs';
 import { prWatchSnapshot as giWatch, prWatchJobLog, _testing as gitInfo } from '../src/core/git-info.mjs';
+import { countsAsRequest } from '../src/core/pr-watch.mjs';
 import { FIX, res, fakeFetch, routesFor } from './helpers/fake-gitea.mjs';
 import { checkRows } from './helpers/rows.mjs';
 import { withEnv } from './helpers/with-env.mjs';
@@ -158,6 +159,11 @@ test('Watch PR on the family: snapshot, checks, build log and replies in both fl
       assert.deepEqual(snap.pr.threads.map((t) => [t.nodeId, t.isResolved, t.comments.map((c) => c.authorAssociation)]), [[1721, false, ['MEMBER']], [1729, true, ['NONE']], ['c1720', false, ['MEMBER']]],
         'the author and requested reviewers are MEMBER, a stranger NONE; an old-side comment is its own thread, resolved by its resolver');
       assert.deepEqual(snap.pr.reviews, [{ databaseId: 6, state: 'CHANGES_REQUESTED', body: 'rename it', author: { login: 'rev' }, authorAssociation: 'MEMBER' }]);
+      // watch.trustedReviewers: a stranger's comment counts only once their login is listed (any case).
+      const strangers = snap.pr.threads.find((t) => t.nodeId === 1729).comments[0];
+      assert.equal(strangers.author.login, 'stranger');
+      assert.equal(countsAsRequest(strangers, 'mirinimi', []), false);
+      assert.equal(countsAsRequest(strangers, 'mirinimi', ['Stranger']), true);
       assert.deepEqual([snap.pr.behindBy, snap.pr.baseSettled], [0, true], 'no failure: no base read');
       use(gitea, routesFor('gitea', API, { pr: G.prMerged }));
       assert.deepEqual(await gitea.prWatchSnapshot({ prUrl: PR(1), env: ENV }), { ok: true, pr: { url: PR(1), state: 'MERGED', branch: 'feat/clean', base: 'master', author: { login: 'mirinimi' }, headSha: G.prMerged.head.sha, contexts: [], threads: [], reviews: [] } });

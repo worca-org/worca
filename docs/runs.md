@@ -248,8 +248,8 @@ each push, or turns a placeholder into findings) counts as a new comment and is 
 anyone not listed, and comments hidden on GitHub, never start a run. If the check can't run (the helper model is
 unreachable), Worca tries again ten minutes later.
 
-The reviewer list takes GitHub login names; on Bitbucket, list the account UUID (`{…}`). Azure DevOps already
-counts every reviewer.
+The reviewer list takes login names on GitHub, Gitea, Forgejo and Codeberg; on Bitbucket, list the account UUID
+(`{…}`). Azure DevOps already counts every reviewer.
 
 After a run, Worca also checks whether the branch still merges into its base. If it does, you get **Update
 branch**. If it conflicts, you get **Resolve in a pipeline** or **Resolve in a terminal**.

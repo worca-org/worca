@@ -65,8 +65,8 @@ set is never overwritten. It never prints a secret.
 | --- | --- | --- |
 | The model credential: an Anthropic API key, or a subscription token from `claude setup-token` | `WORCA_BROKER_KEY_ANTHROPIC`, read by the broker only | `--model-key-file <file>`, or `WORCA_BROKER_KEY_ANTHROPIC` in the environment |
 | Nothing: two shared secrets are generated | `WORCA_BROKER_SECRET`, `WORCA_EGRESS_SECRET` | always generated |
-| The git host | picks the token variable and the hosts the allow-list needs | `--git-host github.com`, `dev.azure.com` or `bitbucket.org` |
-| The git token | `GH_TOKEN`, `WORCA_ADO_TOKEN` or `WORCA_BB_TOKEN` | `--git-token-file <file>`, or `WORCA_GIT_TOKEN` (or the host's own variable) in the environment |
+| The git host | picks the token variable and the hosts the allow-list needs | `--git-host github.com`, `dev.azure.com`, `bitbucket.org` or `codeberg.org` |
+| The git token | `GH_TOKEN`, `WORCA_ADO_TOKEN`, `WORCA_BB_TOKEN` or `WORCA_CODEBERG_TOKEN` | `--git-token-file <file>`, or `WORCA_GIT_TOKEN` (or the host's own variable) in the environment |
 | The commit identity | `GIT_AUTHOR_NAME`, `GIT_AUTHOR_EMAIL` | `--git-name`, `--git-email`; the default is your git config |
 | Extra hosts for the allow-list: your package registry, an internal mirror | `WORCA_EGRESS_ALLOW` (the defaults, the git host's names, your extras) | `--allow pypi.org,files.pythonhosted.org` |
 | The corporate proxy, when one is found or given | `HTTPS_PROXY`, host and port only | `--proxy proxy.acme.example:8080`, or `--no-proxy` |

@@ -41,10 +41,12 @@ export const GIT_HOSTS = Object.freeze({
   'github.com': { tokenVar: 'GH_TOKEN', allow: ['github.com', '.github.com', '.githubusercontent.com'] },
   'dev.azure.com': { tokenVar: 'WORCA_ADO_TOKEN', allow: ['dev.azure.com', '.visualstudio.com', 'vssps.dev.azure.com'] },
   'bitbucket.org': { tokenVar: 'WORCA_BB_TOKEN', allow: ['bitbucket.org', 'api.bitbucket.org'] },
+  'codeberg.org': { tokenVar: 'WORCA_CODEBERG_TOKEN', allow: ['codeberg.org'] },
 });
-const GIT_ALIASES = { github: 'github.com', azure: 'dev.azure.com', ado: 'dev.azure.com', bitbucket: 'bitbucket.org' };
+const GIT_ALIASES = { github: 'github.com', azure: 'dev.azure.com', ado: 'dev.azure.com', bitbucket: 'bitbucket.org', codeberg: 'codeberg.org' };
 /** Git tokens compose.yml hands to Worca (never to agents): one of them set counts as "git token set". */
-const GIT_TOKEN_VARS = ['GH_TOKEN', 'WORCA_ADO_TOKEN', 'WORCA_ADO_READ_TOKEN', 'WORCA_ADO_WRITE_TOKEN', 'WORCA_BB_TOKEN', 'WORCA_BB_READ_TOKEN', 'WORCA_BB_WRITE_TOKEN'];
+const GIT_TOKEN_VARS = ['GH_TOKEN', 'WORCA_ADO_TOKEN', 'WORCA_ADO_READ_TOKEN', 'WORCA_ADO_WRITE_TOKEN', 'WORCA_BB_TOKEN', 'WORCA_BB_READ_TOKEN', 'WORCA_BB_WRITE_TOKEN',
+  'WORCA_CODEBERG_TOKEN', 'WORCA_CODEBERG_READ_TOKEN', 'WORCA_CODEBERG_WRITE_TOKEN'];
 /** The example .env's placeholders: not a value the user set. */
 const PLACEHOLDERS = { GIT_AUTHOR_NAME: 'Your Name', GIT_AUTHOR_EMAIL: 'you@example.com' };
 /** Model credentials Worca's container must not hold (the broker holds the one key). */
@@ -61,7 +63,7 @@ The hardened box (docs/hardened-box.md): one developer, on their own machine, Do
 
 Setup flags (each also settable without a prompt; secrets never on the command line):
   --model-key-file <f>   The broker's model credential (API key or subscription token); or WORCA_BROKER_KEY_ANTHROPIC in the environment
-  --git-host <h>         github.com (default), dev.azure.com or bitbucket.org
+  --git-host <h>         github.com (default), dev.azure.com, bitbucket.org or codeberg.org
   --git-token-file <f>   The git token Worca holds (agents never get it); or WORCA_GIT_TOKEN (or GH_TOKEN, …) in the environment
   --git-name <n>, --git-email <e>   Commit identity (default: your git config)
   --allow <hosts>        Extra hosts for the allow-list, comma-separated (your package registry, …)
@@ -275,11 +277,11 @@ export async function planSetup({ body, flags = {}, env = {}, ask = null, gitCon
   // 3. Git over HTTPS: the host, then the token Worca holds.
   let host = String(flags.gitHost || '').trim().toLowerCase();
   host = GIT_ALIASES[host] || host;
-  if (host && !GIT_HOSTS[host]) return { entries, notes, error: `--git-host must be github.com, dev.azure.com or bitbucket.org (another host: set its token in .env and add it with --allow)` };
+  if (host && !GIT_HOSTS[host]) return { entries, notes, error: `--git-host must be github.com, dev.azure.com, bitbucket.org or codeberg.org (another host: set its token in .env and add it with --allow)` };
   const tokenSet = GIT_TOKEN_VARS.some(has);
   if (!tokenSet) {
-    if (!host) { host = (await askLine('Git host (github.com, dev.azure.com or bitbucket.org)', 'github.com')).toLowerCase(); host = GIT_ALIASES[host] || host; }
-    if (!GIT_HOSTS[host]) return { entries, notes, error: `git host ${host}: the setup knows github.com, dev.azure.com and bitbucket.org` };
+    if (!host) { host = (await askLine('Git host (github.com, dev.azure.com, bitbucket.org or codeberg.org)', 'github.com')).toLowerCase(); host = GIT_ALIASES[host] || host; }
+    if (!GIT_HOSTS[host]) return { entries, notes, error: `git host ${host}: the setup knows github.com, dev.azure.com, bitbucket.org and codeberg.org` };
     const tokenVar = GIT_HOSTS[host].tokenVar;
     let token = '';
     if (flags.gitTokenFile) { try { token = readTrimmed(flags.gitTokenFile); } catch { return { entries, notes, error: `--git-token-file: cannot read ${flags.gitTokenFile}` }; } }

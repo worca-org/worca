@@ -125,6 +125,11 @@ test('setup without prompts: every answer from flags or the environment; a missi
     assert.equal(got.GIT_AUTHOR_NAME, 'Jane Doe');
     const allow = got.WORCA_EGRESS_ALLOW.split(',');
     for (const h of [...DEFAULT_ALLOW, 'dev.azure.com', '.visualstudio.com', 'vssps.dev.azure.com', 'pypi.org', '.files.pythonhosted.org']) assert.ok(allow.includes(h), h);
+    const cb = await planSetup({ body: '', env: { WORCA_BROKER_KEY_ANTHROPIC: KEY }, flags: { gitTokenFile: tokFile, gitHost: 'codeberg', gitName: 'Jane Doe', gitEmail: 'jane@acme.example' } });
+    assert.equal(cb.error, undefined);
+    const cbGot = Object.fromEntries(cb.entries.map((e) => [e.key, e.value]));
+    assert.equal(cbGot.WORCA_CODEBERG_TOKEN, TOKEN, 'Codeberg: its own token variable');
+    assert.ok(cbGot.WORCA_EGRESS_ALLOW.split(',').includes('codeberg.org'));
     assert.equal(got.HTTPS_PROXY, 'http://proxy.acme.example:8080', 'host and port only: the login never goes to .env');
     assert.ok(r.notes.some((x) => /login in that proxy URL was left out/.test(x)));
     assert.equal(got.WORCA_CA_CERT, ca);
