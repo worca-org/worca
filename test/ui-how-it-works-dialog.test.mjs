@@ -167,6 +167,10 @@ describe('openGuideDialog shell', () => {
 });
 
 const BAR_HTML = '<header id="topnav"><h1 id="topnav-title">Chat</h1><div class="topnav-r"><button id="topnav-ask">Ask</button></div></header>'
+  + '<div class="runs-head"><span class="howto-slot" data-howto-slot="runs"></span></div>'
+  + '<div class="chats-head"><span class="howto-slot" data-howto-slot="chat"></span></div>'
+  + '<div class="mdl-head"><span class="howto-slot" data-howto-slot="models" data-howto-size="md"></span></div>'
+  + '<div class="odd-head"><span class="howto-slot" data-howto-slot="profile"></span></div>'
   + '<button id="wfv-lib-toggle">Open</button><div id="wfv-br"><div class="wfv-bar"><button id="wfv-zoom">100%</button></div><div class="wfv-bar wfv-howto-bar" id="wfv-howto-slot"></div></div>'
   + '<button id="ws-howto-btn" type="button">How workspaces work</button>';
 
@@ -184,72 +188,128 @@ function boot({ status = { guidesSeen: {} }, postResult = {} } = {}) {
     log: (...a) => state.logs.push(a),
   });
   hiw.mount();
-  return { window, doc, state, hiw, top: doc.getElementById('howto-btn'), wf: doc.getElementById('wfv-howto-btn'), ws: doc.getElementById('ws-howto-btn'), modal: () => doc.getElementById('how-it-works-modal') };
+  // The page's own button: the one its slot was given (the Chats list's follows the route, so it is found by slot).
+  const page = (area) => doc.querySelector(`[data-howto-slot="${area}"] > .page-howto`);
+  return { window, doc, state, hiw, page, wf: doc.getElementById('wfv-howto-btn'), ws: doc.getElementById('ws-howto-btn'), modal: () => doc.getElementById('how-it-works-modal') };
 }
 
 describe('howto button', () => {
-  test('is a design-system button with a question icon, the New mark (said in the accessible name) and the min-level hook', () => {
+  test('the page form is a quiet icon button named for its page, with the New mark (said in the accessible name) and no level gate', () => {
     const dom = trackDom(new JSDOM('<!doctype html><body></body>'));
     const doc = dom.window.document;
-    doc.body.innerHTML = howtoButtonHtml({ id: 'x-btn', cls: 'x-cls' });
-    const b = doc.getElementById('x-btn');
-    assert.equal(b.tagName, 'BUTTON');
-    assert.ok(b.classList.contains('btn') && b.classList.contains('x-cls'));
-    assert.equal(b.dataset.minLevel, 'simple');
-    assert.ok(b.querySelector('svg'));
-    assert.ok(b.textContent.includes('How it works'));
+    doc.body.innerHTML = howtoButtonHtml({ cls: 'page-howto', area: 'runs', label: 'How Runs works', size: 'sm' });
+    const b = doc.querySelector('button');
+    assert.deepEqual([...b.classList], ['btn', 'btn-quiet', 'btn-icon', 'btn-sm', 'page-howto']);
+    assert.equal(b.type, 'button');
+    assert.equal(b.hasAttribute('id'), false, 'a page button has no id: Settings holds one per section');
+    assert.equal(b.hasAttribute('data-min-level'), false, 'inside a page, shown at every level means no attribute (Marketplace: nothing on the page is gated)');
+    assert.equal(b.dataset.howtoArea, 'runs');
+    assert.equal(b.textContent, '', 'no words');
+    assert.equal(b.querySelector('svg').getAttribute('width'), '16');
+    assert.equal(b.querySelector('svg').getAttribute('height'), '16');
+    assert.equal(b.title, 'How Runs works');
+    assert.equal(b.getAttribute('aria-label'), 'How Runs works');
+    assert.equal(b.querySelector('.howto-label'), null);
     assert.equal(b.querySelector('.howto-new').hidden, true);
-    // No text in the dot: it would be a fourth word of the label and text on the dot's slate.
+    // No text in the dot: it would count as a word of the label and as text on the dot's slate.
     assert.equal(b.querySelector('.howto-new').textContent, '');
     assert.equal(b.querySelector('.howto-new').getAttribute('aria-hidden'), 'true');
-    assert.equal(b.querySelector('.howto-label').textContent, 'How it works');
-    assert.equal(b.getAttribute('aria-label'), 'How it works');
     paintHowtoMark(b, true);
     assert.equal(b.dataset.new, 'true');
     assert.equal(b.querySelector('.howto-new').hidden, false);
-    assert.equal(b.getAttribute('aria-label'), 'How it works, new');
+    assert.equal(b.getAttribute('aria-label'), 'How Runs works, new');
     paintHowtoMark(b, false);
     assert.equal(b.dataset.new, 'false');
     assert.equal(b.querySelector('.howto-new').hidden, true);
-    assert.equal(b.getAttribute('aria-label'), 'How it works');
-    // The icon form (the Workflows editor's bar after the zoom menu): a quiet icon button, no words, the same name.
-    doc.body.innerHTML = howtoButtonHtml({ id: 'i-btn', icon: true });
+    assert.equal(b.getAttribute('aria-label'), 'How Runs works');
+    // 32px, for a row whose buttons are 32px: no btn-sm.
+    doc.body.innerHTML = howtoButtonHtml({ cls: 'page-howto', area: 'models', label: 'How Models works' });
+    assert.deepEqual([...doc.querySelector('button').classList], ['btn', 'btn-quiet', 'btn-icon', 'page-howto']);
+  });
+
+  test('without an area it is the Workflows editor\'s button, as before', () => {
+    const dom = trackDom(new JSDOM('<!doctype html><body></body>'));
+    const doc = dom.window.document;
+    doc.body.innerHTML = howtoButtonHtml({ id: 'i-btn', cls: 'wfv-howto' });
     const i = doc.getElementById('i-btn');
-    assert.ok(i.classList.contains('btn-icon') && i.classList.contains('btn-quiet') && !i.classList.contains('btn-sm'));
-    assert.equal(i.querySelector('.howto-label'), null);
+    assert.deepEqual([...i.classList], ['btn', 'btn-quiet', 'btn-icon', 'wfv-howto']);
+    assert.equal(i.dataset.minLevel, 'simple');
+    assert.equal(i.title, 'How this area works');
     assert.equal(i.getAttribute('aria-label'), 'How it works');
+    assert.equal(i.querySelector('svg').getAttribute('width'), '14');
+    assert.equal(i.hasAttribute('data-howto-area'), false);
+    assert.equal(i.textContent, '');
+    paintHowtoMark(i, true);
+    assert.equal(i.getAttribute('aria-label'), 'How it works, new');
     assert.doesNotThrow(() => paintHowtoMark(null, true));
   });
 });
 
 describe('How it works controller', () => {
-  test('mount puts the top-bar button first in .topnav-r and the Workflows one in its bar after the zoom menu; twice is the same', () => {
+  test('mount leaves the top bar alone, puts one button in each page slot and the Workflows one in its bar; twice is the same', () => {
     const c = boot();
     c.hiw.mount();
-    const r = c.doc.querySelector('.topnav-r');
-    assert.equal(r.firstElementChild.id, 'howto-btn');
-    assert.equal(c.doc.querySelectorAll('#howto-btn').length, 1);
+    assert.deepEqual([...c.doc.querySelector('.topnav-r').children].map((e) => e.id), ['topnav-ask'], 'nothing in the top bar');
+    assert.equal(c.doc.getElementById('howto-btn'), null);
+    for (const area of ['runs', 'chat', 'models']) {
+      const slot = c.doc.querySelector(`[data-howto-slot="${area}"]`);
+      assert.equal(slot.children.length, 1, `${area}: one button, also after a second mount`);
+      assert.equal(slot.firstElementChild.dataset.howtoArea, area);
+    }
+    assert.equal(c.page('runs').classList.contains('btn-sm'), true, '28px by default');
+    assert.equal(c.page('models').classList.contains('btn-sm'), false, 'data-howto-size="md" is the 32px button');
+    assert.equal(c.page('runs').title, 'How Runs works');
+    assert.equal(c.page('models').getAttribute('aria-label'), 'How Models works, new');
+    assert.equal(c.doc.querySelector('[data-howto-slot="profile"]').children.length, 0, 'an area without a guide gets no button');
     assert.equal(c.doc.querySelectorAll('#wfv-howto-btn').length, 1);
     assert.deepEqual([...c.doc.getElementById('wfv-howto-slot').children].map((e) => e.id), ['wfv-howto-btn']);
     assert.notEqual(c.doc.getElementById('wfv-lib-toggle').previousElementSibling.id, 'wfv-howto-btn', 'no longer beside the Library toggle');
   });
 
-  test('paintMarks: unseen shows the mark, seen and unknown prefs do not (also on #ws-howto-btn)', () => {
-    const c = boot({ status: { guidesSeen: { chat: true } } });
-    c.hiw.syncRoute('chat');
-    c.hiw.paintMarks();
-    assert.equal(c.top.dataset.new, 'false');
+  test('button(area) hands out a wired, painted button; null for an area without a guide', () => {
+    const c = boot({ status: { guidesSeen: { stats: true } } });
+    assert.equal(c.hiw.button('profile'), null);
+    const b = c.hiw.button('connectors', { size: 'md' });
+    assert.deepEqual([...b.classList], ['btn', 'btn-quiet', 'btn-icon', 'page-howto']);
+    assert.equal(b.title, 'How Connectors works');
+    assert.equal(b.dataset.new, 'true', 'painted when made');
+    assert.equal(c.hiw.button('stats').dataset.new, 'false');
+    assert.equal(c.hiw.button('stats').classList.contains('btn-sm'), true, '28px unless asked');
+    assert.notEqual(c.hiw.button('connectors'), b, 'a new button each call');
+    c.doc.body.append(b);
+    click(c.window, b);
+    assert.equal(c.modal().dataset.area, 'connectors');
+    assert.equal(b.dataset.new, 'false');
+  });
+
+  test('a slot that appears after mount is filled by the next route sync, once', () => {
+    const c = boot();
+    const late = c.doc.createElement('span');
+    late.dataset.howtoSlot = 'stats';
+    c.doc.body.append(late);
+    c.hiw.syncRoute('stats');
+    assert.equal(late.children.length, 1);
+    assert.equal(late.firstElementChild.title, 'How Statistics works');
     c.hiw.syncRoute('runs');
-    assert.equal(c.top.dataset.new, 'true');
-    assert.equal(c.top.querySelector('.howto-new').hidden, false);
+    assert.equal(late.children.length, 1);
+  });
+
+  test('paintMarks: each page button carries its own area\'s mark, whatever the route; unknown prefs show none (also on #ws-howto-btn)', () => {
+    const c = boot({ status: { guidesSeen: { chat: true } } });
+    c.hiw.syncRoute('runs');
+    assert.equal(c.page('chat').dataset.new, 'false');
+    assert.equal(c.page('runs').dataset.new, 'true');
+    assert.equal(c.page('runs').querySelector('.howto-new').hidden, false);
+    assert.equal(c.page('runs').getAttribute('aria-label'), 'How Runs works, new');
     assert.equal(c.ws.dataset.new, 'true');
     assert.equal(c.wf.dataset.new, 'true');
     c.state.status = { guidesSeen: {}, workspaceGuideSeen: true };
     c.hiw.paintMarks();
     assert.equal(c.ws.dataset.new, 'false');
+    assert.equal(c.page('chat').dataset.new, 'true');
     c.state.status = null;
     c.hiw.paintMarks();
-    for (const b of [c.top, c.wf, c.ws]) assert.equal(b.dataset.new, 'false');
+    for (const b of [c.page('runs'), c.page('chat'), c.page('models'), c.wf, c.ws]) assert.equal(b.dataset.new, 'false');
   });
 
   test('open shows the explainer, posts guidesSeen once, marks the area seen at once and ignores a second open', async () => {
@@ -264,7 +324,7 @@ describe('How it works controller', () => {
     assert.deepEqual(c.state.posts, [{ guidesSeen: { chat: true } }]);
     assert.deepEqual(before, { guidesSeen: {} }, 'the status it was given is not mutated');
     assert.equal(c.state.status.guidesSeen.chat, true);
-    assert.equal(c.top.dataset.new, 'false', 'mark gone on open, not on close');
+    assert.equal(c.page('chat').dataset.new, 'false', 'mark gone on open, not on close');
   });
 
   test('markSeen sends exactly the legacy flag for workspaces and the map for other areas', async () => {
@@ -294,25 +354,50 @@ describe('How it works controller', () => {
     assert.equal(q('.wg-tour'), null, 'a guide without a tour never shows the button');
   });
 
-  test('syncRoute: top-bar button on runs, new and chat; not on workspaces, workspace-create, getting-started, profile', () => {
+  test('syncRoute: the Workflows button shows on workflows only; a page button is never hidden by the route', () => {
     const c = boot();
-    for (const r of ['runs', 'running', 'history', 'new', 'chat']) { c.hiw.syncRoute(r); assert.equal(c.top.hidden, false, r); assert.equal(c.wf.hidden, true, r); }
-    for (const r of ['workspaces', 'workspace-create', 'getting-started', 'profile']) { c.hiw.syncRoute(r); assert.equal(c.top.hidden, true, r); assert.equal(c.wf.hidden, true, r); }
+    for (const r of ['runs', 'running', 'history', 'new', 'chat', 'workspaces', 'workspace-create', 'getting-started', 'profile']) {
+      c.hiw.syncRoute(r);
+      assert.equal(c.wf.hidden, true, r);
+      assert.equal(c.page('runs').hidden, false, r);
+    }
     c.hiw.syncRoute('workflows');
-    assert.equal(c.top.hidden, true);
     assert.equal(c.wf.hidden, false);
+    assert.equal(c.page('runs').hidden, false);
   });
 
-  test('the button is titled from the page title, and a click opens that route\'s area', () => {
+  test('a click opens the button\'s own area, whatever the route; the Workflows one opens the route\'s', () => {
     const c = boot();
     c.hiw.syncRoute('chat');
-    assert.equal(c.top.title, 'How Chat works');
-    click(c.window, c.top);
-    assert.equal(c.modal().dataset.area, 'chat');
+    click(c.window, c.page('runs'));
+    assert.equal(c.modal().dataset.area, 'runs');
     c.hiw.syncRoute('workflows');
     assert.equal(c.modal(), null, 'the route change closed the first explainer');
     click(c.window, c.wf);
     assert.equal(c.modal().dataset.area, 'workflows');
+  });
+
+  test('the Chats list button follows Chat and Design: its name, its mark and its guide are the route\'s', () => {
+    const c = boot();
+    const b = c.page('chat');
+    c.hiw.syncRoute('design');
+    assert.equal(b.dataset.howtoArea, 'design');
+    assert.equal(b.title, 'How Design works');
+    assert.equal(b.getAttribute('aria-label'), 'How Design works, new');
+    click(c.window, b);
+    assert.equal(c.modal().dataset.area, 'design');
+    assert.equal(b.dataset.new, 'false');
+    c.hiw.syncRoute('stats');
+    assert.equal(b.dataset.howtoArea, 'design', 'another page leaves it as it was');
+    c.hiw.syncRoute('chat');
+    assert.equal(b.dataset.howtoArea, 'chat');
+    assert.equal(b.title, 'How Chat works');
+    assert.equal(b.dataset.new, 'true', 'Chat is still new');
+    assert.equal(b.getAttribute('aria-label'), 'How Chat works, new');
+    c.hiw.syncRoute('design');
+    assert.equal(b.dataset.new, 'false', 'Design was opened');
+    assert.equal(c.page('runs').title, 'How Runs works', 'the other buttons keep their page');
+    assert.equal(c.page('models').dataset.howtoArea, 'models');
   });
 
   test('a route change closes an open explainer; the same route does not', () => {
@@ -332,7 +417,7 @@ describe('How it works controller', () => {
       c.hiw.syncRoute('chat');
       assert.doesNotThrow(() => c.hiw.open('chat'));
       await new Promise((r) => setTimeout(r, 0));
-      assert.equal(c.top.dataset.new, 'false');
+      assert.equal(c.page('chat').dataset.new, 'false');
       assert.equal(c.state.logs.length, 1);
       assert.ok(c.modal());
       assert.equal(c.doc.querySelector('.toast, .rc-toast'), null);

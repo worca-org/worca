@@ -136,6 +136,7 @@ be skipped by forgetting it.
 |---|---|
 | Getting started, Runs, Projects | S |
 | New run: the Runs page head (#runs-new; the top bar no longer has it) | S — the way to the New run page at every level and width; the guide's New run hop rings it after the Runs row |
+| How it works: the **?** that ends each page's own top row (the intro line, the tabs or the list header; on Chat and Design the Chats list's head, or the chat's head while the list is folded; the top bar no longer has it) | all — never gated: every page with an explainer shows it at every level. The Workflows editor's, after the zoom menu, is S |
 | Build: the group label, Workflows (the full-screen editor; agents and scripts live in its Library) | S |
 | Build: Requirements (behind the requirements flag) | S |
 | Runs counts: the amber Needs-you number (no symbol), else the live count as a grey number | S — each hidden at zero |

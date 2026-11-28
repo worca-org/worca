@@ -1,17 +1,24 @@
-// The "How it works" controller: places the button (global top bar, and the Workflows editor
-// bar where the top bar is not shown), shows it per route, opens an area's explainer, records
-// "seen" the moment it opens and starts the matching tour. It builds no markup of its own:
-// the button comes from howto-button.mjs and the dialog from guide-dialog.mjs.
+// The "How it works" controller: gives every page its button (a quiet ? at the end of the page's own top row,
+// and the Workflows editor's in its bar), opens an area's explainer, records "seen" the moment it opens and
+// starts the matching tour. A page's static markup holds an empty slot ([data-howto-slot="<area>"]) that mount()
+// fills; a header built in JS is handed its button by button(area). It builds no markup of its own: the button
+// comes from howto-button.mjs and the dialog from guide-dialog.mjs.
 import { openGuideDialog } from './guide-dialog.mjs';
 import { guideFor, areaOfRoute } from './area-guides.mjs';
-import { howtoButtonElement, paintHowtoMark } from './howto-button.mjs';
+import { howtoButtonElement, nameHowtoButton, paintHowtoMark } from './howto-button.mjs';
 import { isGuideSeen } from '../../../src/shared/how-it-works/areas.mjs';
+import { pageTitle } from '../topnav.mjs';
 
 const MODAL_ID = 'how-it-works-modal';
 const TOUR_LABEL = 'Show me in the product';
-const TOP_ID = 'howto-btn';
+const PAGE_CLASS = 'page-howto';
 const WORKFLOWS_ID = 'wfv-howto-btn';
 const WORKSPACES_BTN_ID = 'ws-howto-btn';
+// One Chats list serves Chat and Design, so its one button is the showing route's.
+const LIST_AREAS = new Set(['chat', 'design']);
+
+/** A page button's name: "How Runs works". */
+const nameOf = (area) => `How ${pageTitle(area)} works`;
 
 // The patch POST /api/onboarding takes: the legacy flag for Workspaces, the map for the rest.
 function seenPatch(areaId) {
@@ -45,50 +52,64 @@ function buildArt(doc, art) {
 export function createHowItWorks({ doc, getStatus, setStatus, postPrefs, startTour, log = console.error }) {
   let route = null;
   let handle = null;
-  let top = null;
   let workflows = null;
 
   const currentArea = () => areaOfRoute(route);
   const byId = (id) => doc.getElementById(id);
+  const isNew = (area) => !!area && isGuideSeen(getStatus(), area) === false;
+  const pageButtons = () => [...doc.querySelectorAll(`.${PAGE_CLASS}[data-howto-area]`)];
 
-  function place(id, cls, host, before, icon = false) {
-    const existing = byId(id);
-    if (existing) return existing;
-    if (!host) return null;
-    const el = howtoButtonElement(doc, { id, cls, icon });
-    el.hidden = true;
-    el.addEventListener('click', () => { const a = currentArea(); if (a) open(a); });
-    host.insertBefore(el, before);
+  /** A page's button for `area`: a new one each call, wired and with its mark painted. null when the area has no
+   *  guide. `size`: 'sm' (28px, the default) or 'md' (32px, for a row whose buttons are 32px). */
+  function button(area, { size = 'sm' } = {}) {
+    if (!guideFor(area)) return null;
+    const el = howtoButtonElement(doc, { cls: PAGE_CLASS, area, label: nameOf(area), size: size === 'md' ? 'md' : 'sm' });
+    el.addEventListener('click', () => open(el.dataset.howtoArea));
+    paintHowtoMark(el, isNew(area));
     return el;
   }
 
-  function mount() {
-    const right = doc.querySelector('.topnav-r');
-    top = place(TOP_ID, 'topnav-howto', right, right?.firstChild ?? null);
-    workflows = place(WORKFLOWS_ID, 'wfv-howto', byId('wfv-howto-slot'), null, true);   // an icon in its own bar, after the zoom menu
+  // Every slot that holds no button yet gets one. Safe to run again: a page built after mount() is filled on the
+  // next route.
+  function fillSlots() {
+    for (const slot of doc.querySelectorAll('[data-howto-slot]')) {
+      if (slot.querySelector(`.${PAGE_CLASS}`)) continue;
+      const el = button(slot.dataset.howtoSlot, { size: slot.dataset.howtoSize });
+      if (el) slot.append(el);
+    }
   }
 
-  function titleFor(guide) {
-    const page = doc.getElementById('topnav-title')?.textContent.trim();
-    return page ? `How ${page} works` : guide.title;
+  function mount() {
+    fillSlots();
+    if (!byId(WORKFLOWS_ID)) {
+      const host = byId('wfv-howto-slot');   // an icon in its own bar, after the zoom menu
+      if (host) {
+        const el = howtoButtonElement(doc, { id: WORKFLOWS_ID, cls: 'wfv-howto' });
+        el.hidden = true;
+        el.addEventListener('click', () => { const a = currentArea(); if (a) open(a); });
+        host.append(el);
+      }
+    }
+    workflows = byId(WORKFLOWS_ID);
   }
 
   function paintMarks() {
-    const mark = (btn, area) => { if (btn) paintHowtoMark(btn, !!area && isGuideSeen(getStatus(), area) === false); };
-    const area = currentArea();
-    mark(top, area && area !== 'workspaces' && area !== 'workflows' ? area : null);
-    mark(workflows, 'workflows');
-    mark(byId(WORKSPACES_BTN_ID), 'workspaces');
+    for (const btn of pageButtons()) paintHowtoMark(btn, isNew(btn.dataset.howtoArea));
+    paintHowtoMark(workflows, isNew('workflows'));
+    paintHowtoMark(byId(WORKSPACES_BTN_ID), isNew('workspaces'));
   }
 
   function syncRoute(name) {
     if (name !== route && handle) handle.close('close');
     route = name;
     const area = currentArea();
-    const guide = area ? guideFor(area) : null;
-    if (top) {
-      top.hidden = !(guide && area !== 'workspaces' && area !== 'workflows');
-      if (guide) top.title = titleFor(guide);
+    fillSlots();
+    if (LIST_AREAS.has(area)) {
+      for (const btn of pageButtons()) {
+        if (!LIST_AREAS.has(btn.dataset.howtoArea) || btn.dataset.howtoArea === area) continue;
+        btn.dataset.howtoArea = area;
+        nameHowtoButton(btn, nameOf(area));
+      }
     }
     if (workflows) workflows.hidden = area !== 'workflows';
     paintMarks();
@@ -126,5 +147,5 @@ export function createHowItWorks({ doc, getStatus, setStatus, postPrefs, startTo
     paintMarks();
   }
 
-  return { mount, syncRoute, paintMarks, open, markSeen };
+  return { mount, syncRoute, paintMarks, open, markSeen, button };
 }

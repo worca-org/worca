@@ -1,20 +1,39 @@
-/* "How it works" (every area): the top-bar button's new mark and the explainer dialog. The walkthrough
+/* "How it works" (every area): each page's own button, its new mark and the explainer dialog. The walkthrough
    shell shares workspace-guide.css's wg- classes; this file adds only what the area explainers need. */
 /* Above the spotlight tour (.guide-layer 72–73): the dialog can be opened from the tour's own button. */
 #how-it-works-modal.viewer-modal{z-index:75;}
 #how-it-works-modal .wg-card{width:min(640px,100%);}
 /* The "new" mark: the same small round dot and token as the Ask Worca one (.topnav-ask-dot), hidden once the area is seen. */
-.topnav-howto,.wfv-howto,#ws-howto-btn{position:relative;}
+.page-howto,.wfv-howto{position:relative;}
 .howto-new{position:absolute;top:4px;right:4px;width:6px;height:6px;clip-path:circle(50%);background:var(--slate);}
 .howto-new[hidden]{display:none;}
+/* A page's slot for its button: the last control on the page's own top row. Unfilled, it takes no room and no gap. */
+.howto-slot{display:inline-flex;flex:none;}
+.howto-slot:empty{display:none;}
+/* The chat's head (the Chats list folded): the last thing on the row, after the tools. Like the head's other buttons
+   it keeps its size; the title and the meter give way to a long title. */
+.chat-head > .page-howto{flex:none;}
+/* An intro row (.topbar): level with the intro's first line, however far the text wraps. */
+.topbar > .howto-slot{align-self:flex-start;}
+/* Beside a sync chip (Team metrics, Team policy): 8px from it (the row's gap is 24px), centred on it. */
+.sync-chip:not([hidden]) + .howto-slot{margin-left:-16px;align-self:center;}
+/* A tabs row (Marketplace, Connectors, Models): on the actions' line (their 4px under) and 8px from them. The row's
+   own gap is 16px, so with the button the columns are 8px apart and the tabs keep their 16px with a margin. When the
+   row wraps and the button lands on a line of its own, it keeps to the right. */
+.mk-head:has(> .howto-slot),.mdl-head:has(> .howto-slot){column-gap:8px;}
+.mk-head:has(> .howto-slot) > .mk-tabs,.mdl-head:has(> .howto-slot) > #models-tabs-host{margin-right:8px;}
+.mk-head > .howto-slot,.mdl-head > .howto-slot{padding-bottom:4px;margin-left:auto;}
+/* Phone: Models' actions take a line of their own (models-view.css); they leave the button its place at the line's end. */
+@media (max-width:760px){.mdl-head > .mv-head-actions:has(+ .howto-slot){flex-basis:calc(100% - 40px);}}
+/* A touch phone: icon buttons are 40px wide there (buttons-component.css), so the place is 40px and the gap. */
+@media (max-width:760px) and (pointer:coarse){.mdl-head > .mv-head-actions:has(+ .howto-slot){flex-basis:calc(100% - 48px);}}
+/* New run: the intro is centred over the form, so its row is the form's width and the button sits at the form's
+   right edge, the centred text clear of it on both sides. */
+.view[data-view="new"] .topbar{position:relative;max-width:864px;margin-inline:auto;padding-inline:36px;box-sizing:border-box;}
+.view[data-view="new"] .topbar > .howto-slot{position:absolute;top:0;right:0;}
+/* A touch screen's icon button is 40px wide (buttons-component.css): the text keeps clear of it. */
+@media (pointer:coarse){.view[data-view="new"] .topbar{padding-inline:44px;}}
 /* The sample list inside an explainer screen: plain rows with the same quiet caption as the workspace map's. */
 #how-it-works-modal .wg-art ul,#how-it-works-modal .wg-art ol{margin:0;padding-left:22px;}
 #how-it-works-modal .wg-art li{margin:2px 0;color:var(--ink);}
 #how-it-works-modal .wg-caption{margin-top:6px;}
-/* Phone: the same tier as responsive-nav.css. The top-bar button is icon only, like .topnav-act-label; its
-   aria-label keeps the name "How it works". */
-@media (max-width:760px){
-  .topnav-howto{min-width:32px;padding:0 8px;gap:0;justify-content:center;}
-  .topnav-howto .howto-label{display:none;}
-  .topnav-howto svg{width:16px;height:16px;}
-}

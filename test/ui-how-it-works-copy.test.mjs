@@ -96,11 +96,24 @@ test('every named control appears in its source file and in the guide copy', () 
   }
 });
 
-test('the top-bar button CSS targets stable classes, never the title the controller rewrites', () => {
+test('the button CSS targets stable classes, never the title, and nothing in the top bar', () => {
   const css = read('ui/public/how-it-works/how-it-works.css');
   assert.doesNotMatch(css, /\[title=/);
-  assert.match(css, /\.topnav-howto[^{]*\{[^}]*position:relative/);
-  assert.match(css, /@media \(max-width:760px\)\s*\{\s*\.topnav-howto\{/);
+  assert.doesNotMatch(css, /topnav-howto/, 'the top-bar button is gone, its phone tier with it');
+  assert.match(css, /\.page-howto[^{]*\{[^}]*position:relative/, 'the mark sits on the page button');
+  assert.match(css, /\.howto-slot:empty\{display:none;?\}/, 'an unfilled slot takes no room and no gap');
+});
+
+test('the room a row leaves the button fits a touch screen\'s 40px icon button too', () => {
+  // The reason for the numbers below: on a touch screen every icon button is at least 40px wide.
+  assert.match(read('ui/public/design-system/buttons-component.css'), /@media \(pointer:coarse\)\{[^}]*\}\.btn-icon\{min-width:40px;?\}\}/);
+  const css = read('ui/public/how-it-works/how-it-works.css');
+  assert.match(css, /@media \(max-width:760px\)\{\.mdl-head > \.mv-head-actions:has\(\+ \.howto-slot\)\{flex-basis:calc\(100% - 40px\);?\}\}/, 'Models on a phone: a 32px button and the 8px gap');
+  assert.match(css, /@media \(max-width:760px\) and \(pointer:coarse\)\{\.mdl-head > \.mv-head-actions:has\(\+ \.howto-slot\)\{flex-basis:calc\(100% - 48px\);?\}\}/,
+    'Models on a touch phone: More, Add model and the 40px button share one line');
+  assert.match(css, /\.view\[data-view="new"\] \.topbar\{[^}]*padding-inline:36px/, 'New run: room for the 28px button on both sides');
+  assert.match(css, /@media \(pointer:coarse\)\{\.view\[data-view="new"\] \.topbar\{padding-inline:44px;?\}\}/, 'New run on touch: the centred intro clear of the 40px button');
+  assert.match(css, /\.chat-head > \.page-howto\{flex:none;?\}/, 'the chat head\'s button keeps its size beside a long title, as the head\'s other buttons do');
 });
 
 test('copy never names Stillhet-only areas', () => {

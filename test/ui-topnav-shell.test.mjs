@@ -230,12 +230,13 @@ test('resizing across 1080px and 760px: the tiers never touch the stored prefere
 
 // ---- New run ----
 
-test('New run: no button in the top bar; the slot ends the Runs page head, after View, and app.js fills it with the library Button', () => {
+test('New run: no button in the top bar; the slot follows View in the Runs page head (only How it works after it), and app.js fills it with the library Button', () => {
   const doc = new JSDOM(html).window.document;
   assert.equal(doc.getElementById('topnav-new'), null, 'the top bar has no New run');
   const slot = doc.getElementById('runs-new-slot');
   assert.equal(slot.parentElement.className, 'runs-head');
-  assert.equal(slot.nextElementSibling, null, 'the last child of the head');
+  assert.ok(slot.nextElementSibling.matches('span.howto-slot[data-howto-slot="runs"]'), 'only the page\'s How it works slot comes after it');
+  assert.equal(slot.nextElementSibling.nextElementSibling, null, 'which ends the head');
   const viewBtn = doc.getElementById('runs-view-btn');
   assert.ok(viewBtn.compareDocumentPosition(slot) & doc.defaultView.Node.DOCUMENT_POSITION_FOLLOWING, 'after View');
   assert.equal(ruleBody('.topnav-new'), null, 'no rule left for the old button');
@@ -252,8 +253,9 @@ test('New run (the Runs page head) opens #new, and is never marked current', asy
   assert.equal(btn.textContent.trim(), 'New');
   assert.equal(btn.getAttribute('aria-label'), 'New run', 'the accessible name keeps the full words');
   assert.equal(btn.title, 'New run');
-  assert.deepEqual([...$('#runs-list-pane .runs-head').children].filter((n) => !n.hidden).map((n) => n.textContent.trim()), ['Runs', 'View', 'New'],
-    'New ends the head, after View');
+  const headParts = [...$('#runs-list-pane .runs-head').children].filter((n) => !n.hidden);
+  assert.deepEqual(headParts.filter((n) => !n.matches('.howto-slot')).map((n) => n.textContent.trim()), ['Runs', 'View', 'New'], 'New is the last of the head\'s words, after View');
+  assert.ok(headParts.at(-1).matches('.howto-slot') && headParts.at(-1).querySelector('button.page-howto[aria-label^="How Runs works"]'), 'the wordless How it works button ends the head');
   click('#runs-new');
   await settle();
   assert.equal(window.location.hash, '#new');
@@ -323,7 +325,8 @@ test('the pages carry no title of their own: the top bar\'s h1 is the page name;
     'a page h1 is left (a .topbar or .runs-head title)');
   assert.equal(doc.querySelectorAll('.topbar h1, .runs-head h1').length, 0);
   for (const bar of doc.querySelectorAll('.topbar')) {
-    assert.ok(bar.textContent.trim() || bar.querySelector('button, a, select'), `an empty .topbar is left in ${bar.closest('[data-view]')?.dataset.view}`);
+    // A row that holds only the page's How it works slot is not empty: how-it-works.mjs puts the ? in it (Settings › Tags, Presets, Automations).
+    assert.ok(bar.textContent.trim() || bar.querySelector('button, a, select, [data-howto-slot]'), `an empty .topbar is left in ${bar.closest('[data-view]')?.dataset.view}`);
   }
   assert.equal(doc.querySelector('[data-view="workflows"] .topbar'), null, 'the Workflows view has no title-only bar');
   assert.ok(doc.querySelector('[data-view="new"] .topbar .sub'), 'the sub lines stay');

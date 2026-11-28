@@ -99,7 +99,12 @@ export function createMarketplacePage({ doc, win, host, deps }) {
     panel.setAttribute('aria-busy', 'true');
     panels[tab] = panel;
   }
-  head.append(nav, actions);
+  // The page's How it works button ends the head on every tab: a slot outside `actions` (a repaint empties those),
+  // filled by how-it-works.mjs with the 32px button the row's own buttons are.
+  const howto = make('span', 'howto-slot');
+  howto.dataset.howtoSlot = 'marketplace';
+  howto.dataset.howtoSize = 'md';
+  head.append(nav, actions, howto);
   host.replaceChildren(head, ...TABS.map((t) => panels[t]));
 
   // The tab the address names: the first segment after #marketplace/; null while the address names another view.

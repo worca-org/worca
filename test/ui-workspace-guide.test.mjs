@@ -169,10 +169,11 @@ test('first Create with no workspace: the walkthrough first, then the wizard (R-
   await show('workspaces');
   assert.equal(guide(), null, 'R-po-11: opening the page opens nothing');
   const howto = doc.getElementById('ws-howto-btn');
-  const label = howto.cloneNode(true);
-  label.querySelector('.howto-new')?.remove();
-  assert.equal(label.textContent.trim(), 'How workspaces work', 'the words are unchanged; the mark is a separate span');
+  assert.equal(howto.textContent.trim(), '', 'an icon: the words are its name, not its text');
+  assert.equal(howto.title, 'How workspaces work', 'the words are unchanged');
+  assert.match(howto.getAttribute('aria-label'), /^How workspaces work(, new)?$/);
   assert.equal(howto.closest('.ws-top-actions'), doc.getElementById('ws-create-btn').closest('.ws-top-actions'), 'R-po-16: beside Create workspace');
+  assert.equal(howto.previousElementSibling, doc.getElementById('ws-create-btn'), 'after it: the last control on the row');
   click(window, doc.getElementById('ws-create-btn'));
   await settle();
   assert.ok(guide(), 'R-po-1: the walkthrough opened');

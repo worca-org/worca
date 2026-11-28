@@ -31,6 +31,7 @@
               <div>
                 <div class="sub">Machine-wide Worca CC preferences</div>
               </div>
+              <span class="howto-slot" data-howto-slot="settings"></span>
             </div>
 
             <section class="card settings-card" id="appearance-card" data-min-level="simple">
@@ -346,6 +347,8 @@
           <!-- ===== TAB: TAGS — run tag rules (Settings › Tags): tag rows and "Require mandatory tags".
                Every level. ===== -->
           <section class="settings-pane hidden" data-tab="tags">
+            <!-- No intro line here: the row holds only How it works, on the same spot as in every other section. -->
+            <div class="topbar"><div></div><span class="howto-slot" data-howto-slot="settings"></span></div>
             <section class="card settings-card" id="tag-dims-settings-card" data-min-level="simple">
               <div class="card-head"><div class="label-row"><h2>Cost tags</h2></div></div>
               <p class="hint" id="tagsTeamNote" hidden></p>
@@ -373,6 +376,8 @@
           </section><!-- /pane tags -->
 
           <section class="settings-pane hidden" data-tab="presets">
+            <!-- No intro line here: the row holds only How it works, on the same spot as in every other section. -->
+            <div class="topbar"><div></div><span class="howto-slot" data-howto-slot="settings"></span></div>
             <section class="card settings-card" id="presets-settings-card" data-min-level="advanced">
               <div class="card-head"><div class="label-row"><h2>Presets</h2></div></div>
               <p class="hint">Named New run setups. Pick one in New run, type a prompt and start: its choices apply to that run only.</p>
@@ -382,6 +387,8 @@
 
           <!-- Git event automations (#711, docs/git-automations.md): per project and workspace, Auto-handle + rules + what they did. -->
           <section class="settings-pane hidden" data-tab="automations">
+            <!-- No intro line here: the row holds only How it works, on the same spot as in every other section. -->
+            <div class="topbar"><div></div><span class="howto-slot" data-howto-slot="settings"></span></div>
             <section class="card settings-card" id="automations-settings-card" data-min-level="advanced" data-flag="gitAutomations">
               <div class="card-head"><div class="label-row"><h2>Automations</h2></div></div>
               <p class="hint">Start a workflow when an issue or PR is created. Each project and workspace sets its own in its Automations tab.</p>
@@ -397,6 +404,7 @@
                 <div class="sub">Cost limits and defaults for your pipeline runs</div>
                 <div class="drows"><div class="drow drow-wide"><div class="drow-control"><input id="settings-runs-filter" class="input settings-filter" type="search" placeholder="Filter these settings" aria-label="Filter the Runs settings" autocomplete="off" /></div></div></div>
               </div>
+              <span class="howto-slot" data-howto-slot="settings"></span>
             </div>
 
             <section class="card settings-card" id="budget-settings-card" data-min-level="simple">
@@ -933,7 +941,7 @@
               <div>
                 <div class="sub">Try features before they are finished; a switch applies at once, in every open tab, for everyone using this Worca.</div>
               </div>
-              <button type="button" class="btn btn-sm" id="flags-reset">Reset all</button>
+              <div class="topbar-actions"><button type="button" class="btn btn-sm" id="flags-reset">Reset all</button><span class="howto-slot" data-howto-slot="settings"></span></div>
             </div>
             <section class="card settings-card" id="flags-settings-card" data-min-level="simple">
               <p class="flags-warn" role="note">Labs features may change, break or disappear in any release.</p>
@@ -951,6 +959,7 @@
               <div>
                 <div class="sub">The assistant chat: how far one turn may go, which tools and websites it may use, and its saved history</div>
               </div>
+              <span class="howto-slot" data-howto-slot="settings"></span>
             </div>
 
             <!-- Ask Worca's engine (cascading-settings-design.md D17): user-only — the engine new chats start on and
@@ -1065,10 +1074,13 @@
               <div>
                 <div class="sub">Named guardrail policies: built-ins plus your own sets, selected per pipeline run</div>
               </div>
+              <div class="topbar-actions">
               <button type="button" id="guardrail-create-btn" class="btn btn-primary" data-min-level="expert">
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M12 5v14M5 12h14"></path></svg>
                 Create guardrails
               </button>
+              <span class="howto-slot" data-howto-slot="settings"></span>
+              </div>
             </div>
             <p id="guardrails-msg" class="form-msg" aria-live="polite"></p>
             <div class="run-list" id="guardrails-list"></div>
@@ -1081,6 +1093,7 @@
               <div>
                 <div class="sub">What worca remembers across runs and chats: the global rules and preferences every agent sees (a project's own memory is on its project page).</div>
               </div>
+              <span class="howto-slot" data-howto-slot="settings"></span>
             </div>
             <!-- A Memory defragment run uses its run engine's "Memory defragment" helper job (Models › Jobs › Helper jobs) when
                  that harness has one, else that harness's own Quick jobs role (Models › Jobs › Roles): app.js

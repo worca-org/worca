@@ -67,6 +67,13 @@ test('renderTabs: link tabs, only the selected one is current, counts hidden unt
   assert.deepEqual(tabs.map((a) => a.querySelector('.mk-count').hidden), [false, false, true]);
   const head = renderHead(doc, { tabs: nav, actions: [doc.createElement('button')] });
   assert.ok(head.querySelector('.mk-head-actions button') && head.firstChild === nav);
+  assert.deepEqual([...head.children].map((n) => n.className), ['tabs mk-tabs', 'mk-head-actions'], 'no How it works button given: the head is the tabs and the actions');
+  // The page's How it works button ends the head, in the same slot span Marketplace's head has (one CSS rule).
+  const howto = doc.createElement('button');
+  const withHowto = renderHead(doc, { tabs: renderTabs(doc, { view: 'sets', counts: {} }), actions: [], howto });
+  assert.deepEqual([...withHowto.children].map((n) => n.className), ['tabs mk-tabs', 'mk-head-actions', 'howto-slot']);
+  assert.deepEqual([...withHowto.lastElementChild.children], [howto]);
+  assert.equal(withHowto.lastElementChild.hasAttribute('data-howto-slot'), false, 'already filled: nothing for the controller to fill');
 });
 
 test('renderToolbar: search, pressed chip with count, Source options', () => {
